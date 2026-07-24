@@ -25,11 +25,11 @@ cat > "$AUTOWRAPPER_DIR/module.h" << 'HEADER_EOF'
 #include <godot_cpp/godot.hpp>
 
 inline void gdext_initialize_module_auto(godot::ModuleInitializationLevel p_level) {
-    // Stub: no autowrapped classes to register yet.
+    (void)p_level;
 }
 
 inline void gdext_uninitialize_module_auto(godot::ModuleInitializationLevel p_level) {
-    // Stub: no autowrapped classes to unregister yet.
+    (void)p_level;
 }
 
 #endif // AUTOWRAPPER_MODULE_H
