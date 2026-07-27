@@ -26,12 +26,7 @@ MODULES = [
     ("TCollection", ["TCollection_"]),
     ("TColStd", ["TColStd_"]),
     ("NCollection", ["NCollection_"]),
-    ("ShapeExtend", ["ShapeExtend_"]),
     ("TopTools", ["TopTools_"]),
-    ("TDF", ["TDF_"]),
-    ("Message", ["Message_"]),
-    ("SelectMgr", ["SelectMgr_"]),
-    ("IntRes2d", ["IntRes2d_"]),
     # Core geometry
     ("gp", ["gp_"]),
     ("GeomAbs", ["GeomAbs_"]),
@@ -44,6 +39,12 @@ MODULES = [
     ("BRep", ["BRep_"]),
     ("TopExp", ["TopExp_"]),
     ("BRepTools", ["BRepTools_"]),
+    # After core geometry (needs gp, Geom, etc.)
+    ("TDF", ["TDF_"]),
+    ("Message", ["Message_"]),
+    ("SelectMgr", ["SelectMgr_"]),
+    ("IntRes2d", ["IntRes2d_"]),
+    ("ShapeExtend", ["ShapeExtend_"]),
     # Higher-level modules
     ("BRepBuilderAPI", ["BRepBuilderAPI_"]),
     ("BRepPrimAPI", ["BRepPrimAPI_"]),
