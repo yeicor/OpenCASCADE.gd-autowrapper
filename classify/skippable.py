@@ -25,6 +25,21 @@ UNWRAPPABLE_TYPES = {
     "SelectBasics_PickResult",
 }
 
+# Handle inner type aliases: typedef'd handle names → the real wrapper class name.
+# e.g. Prs3d_Presentation is typedef'd to Graphic3d_Structure, so
+# handle<Prs3d_Presentation> is actually handle<Graphic3d_Structure>.
+HANDLE_ALIASES: dict[str, str] = {
+    "Prs3d_Presentation": "Graphic3d_Structure",
+    "PrsMgr_Presentation3d": "PrsMgr_Presentation",
+    "PrsMgr_PresentationManager3d": "PrsMgr_PresentationManager",
+    "V3d_Light": "Graphic3d_CLight",
+    "PrsMgr_PresentableObject": "PrsMgr_PresentableObject",
+}
+
+def _resolve_handle_inner(name: str) -> str:
+    """Resolve handle inner type aliases to their real wrapper class names."""
+    return HANDLE_ALIASES.get(name, name)
+
 # Methods that should always be skipped
 SKIP_METHODS = {
     "DumpJson", "InitFromJson",  # JSON streaming
@@ -98,7 +113,7 @@ def check_type_wrappable(param_type: OCCTType, context: str,
 
     # Handle types with unwrapped inner type cannot be passed across FFI
     if param_type.is_handle:
-        inner = param_type.handle_inner
+        inner = _resolve_handle_inner(param_type.handle_inner)
         # Skip handle types with unresolvable inner types (contains <> or is 'int')
         if "<" in inner or ">" in inner:
             print(f"  WARNING: skipping '{context}' — handle inner type '{inner}' is unresolvable template",
@@ -165,7 +180,7 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
 
             # Also check handle return types for unresolvable inner types
             if method.return_type.is_handle:
-                inner = method.return_type.handle_inner
+                inner = _resolve_handle_inner(method.return_type.handle_inner)
                 if "<" in inner or ">" in inner or inner == "int":
                     method.skip = True
                     method.skip_reason = f"unresolvable handle return type '{inner}'"

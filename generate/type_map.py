@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from model import ClassDecl, ClassKind, EnumDecl, OCCTType, occt_name_to_wrapper
+from classify.skippable import _resolve_handle_inner
 
 
 # Primitive type mappings (OCCT -> godot-cpp)
@@ -133,7 +134,7 @@ class TypeMap:
 
         # Handle types -> Ref<T>
         if otype.is_handle:
-            inner = otype.handle_inner
+            inner = _resolve_handle_inner(otype.handle_inner)
             wname = self._wrapper_names.get(inner, inner)
             return f"Ref<{wname}>"
 
@@ -176,7 +177,7 @@ class TypeMap:
             return "int32_t"
 
         if otype.is_handle:
-            inner = otype.handle_inner
+            inner = _resolve_handle_inner(otype.handle_inner)
             wname = self._wrapper_names.get(inner, inner)
             return "Ref<{}>".format(wname)
 
@@ -228,7 +229,7 @@ class TypeMap:
             return "int"
 
         if otype.is_handle:
-            inner = otype.handle_inner
+            inner = _resolve_handle_inner(otype.handle_inner)
             wname = self._wrapper_names.get(inner, inner)
             return wname
 

@@ -102,7 +102,9 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
                 break
 
     # Skip classes with protected destructors (can't be subclassed as RefCounted)
-    if has_protected_dtor:
+    # Transient descendants are exempt — handles manage their lifecycle, and a
+    # protected destructor is the norm for abstract handle types.
+    if has_protected_dtor and not is_transient_descendant(cursor):
         return None
 
     # Skip classes where all constructors are protected/private (can't instantiate)

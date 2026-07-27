@@ -20,14 +20,14 @@ from classify.overloads import group_overloads
 
 
 # Module definitions: (module_name, header_prefixes)
+# Order here does NOT matter — modules are automatically topologically sorted
+# based on the #include DAG extracted by libclang in Phase 2.
 MODULES = [
-    # Fundamental types first (referenced by all other modules)
     ("Standard", ["Standard_"]),
     ("TCollection", ["TCollection_"]),
     ("TColStd", ["TColStd_"]),
     ("NCollection", ["NCollection_"]),
     ("TopTools", ["TopTools_"]),
-    # Core geometry
     ("gp", ["gp_"]),
     ("GeomAbs", ["GeomAbs_"]),
     ("TopAbs", ["TopAbs_"]),
@@ -35,27 +35,27 @@ MODULES = [
     ("Geom2d", ["Geom2d_"]),
     ("Bnd", ["Bnd_"]),
     ("TopLoc", ["TopLoc_"]),
-    # Topology
     ("TopoDS", ["TopoDS_"]),
     ("BRep", ["BRep_"]),
     ("TopExp", ["TopExp_"]),
     ("BRepTools", ["BRepTools_"]),
-    # After core geometry (needs gp, Geom, etc.)
     ("TDF", ["TDF_"]),
     ("Message", ["Message_"]),
-    ("SelectMgr", ["SelectMgr_"]),
     ("IntRes2d", ["IntRes2d_"]),
-    ("ShapeExtend", ["ShapeExtend_"]),
-    # Image/Poly (needed by many modules)
     ("Image", ["Image_"]),
     ("Poly", ["Poly_"]),
-    ("TopLoc", ["TopLoc_"]),
-    ("PrsMgr", ["PrsMgr_"]),
     ("Adaptor3d", ["Adaptor3d_"]),
     ("Adaptor2d", ["Adaptor2d_"]),
     ("ShapeBuild", ["ShapeBuild_"]),
+    ("ShapeExtend", ["ShapeExtend_"]),
+    ("Quantity", ["Quantity_"]),
+    ("PrsMgr", ["PrsMgr_"]),
+    ("Prs3d", ["Prs3d_"]),
+    ("Graphic3d", ["Graphic3d_"]),
+    ("V3d", ["V3d_"]),
+    ("SelectMgr", ["SelectMgr_"]),
     ("BOPAlgo", ["BOPAlgo_"]),
-    # Higher-level modules
+    ("AIS", ["AIS_"]),
     ("BRepBuilderAPI", ["BRepBuilderAPI_"]),
     ("BRepPrimAPI", ["BRepPrimAPI_"]),
     ("BRepAlgoAPI", ["BRepAlgoAPI_"]),
@@ -66,11 +66,6 @@ MODULES = [
     ("XCAFDoc", ["XCAFDoc_"]),
     ("XCAFPrs", ["XCAFPrs_"]),
     ("TDocStd", ["TDocStd_"]),
-    ("Quantity", ["Quantity_"]),
-    ("AIS", ["AIS_"]),
-    ("V3d", ["V3d_"]),
-    ("Prs3d", ["Prs3d_"]),
-    ("Graphic3d", ["Graphic3d_"]),
     ("gce", ["gce_"]),
     ("GC", ["GC_"]),
     ("BRepFilletAPI", ["BRepFilletAPI_"]),
@@ -83,6 +78,15 @@ MODULES = [
     ("GeomAPI", ["GeomAPI_"]),
     ("IntPolyh", ["IntPolyh_"]),
     ("Law", ["Law_"]),
+    ("Aspect", ["Aspect_"]),
+    ("StdSelect", ["StdSelect_"]),
+    ("TDataStd", ["TDataStd_"]),
+    ("IMeshTools", ["IMeshTools_"]),
+    ("IMeshData", ["IMeshData_"]),
+    ("XCAFView", ["XCAFView_"]),
+    ("XCAFNoteObjects", ["XCAFNoteObjects_"]),
+    ("Media", ["Media_"]),
+    ("PrsDim", ["PrsDim_"]),
 ]
 
 
@@ -102,13 +106,26 @@ def _parse_single_header(args: tuple[str, str, str, str]) -> dict | None:
         from occast.classes import extract_classes
         from occast.enums import extract_tu_enums
         from pathlib import Path
+        import re
 
         parser = ClangParser(compile_commands_path)
         tu = parser.parse_header(header_path)
 
-        # Extract transitive OCCT include graph
+        # Extract direct #include directives from the file itself (for module
+        # dependency graph — direct includes form a true DAG).
         vcpkg_occt_dir = (Path.home() / "Projects" / "OpenCASCADE.gd" / "vcpkg"
                           / "installed" / "x64-linux" / "include" / "opencascade")
+        direct_includes: list[str] = []
+        try:
+            src = Path(header_path).read_text(errors='replace')
+            for m in re.finditer(r'#\s*include\s*[<"]([^>"]+)[>"]', src):
+                dep = m.group(1)
+                if dep.endswith('.hxx') and (vcpkg_occt_dir / dep).exists():
+                    direct_includes.append(dep)
+        except OSError:
+            pass
+
+        # Extract transitive OCCT include graph (for merged header list)
         seen: set[str] = set()
         transitive_includes: list[str] = []
         for inc in tu.get_includes():
@@ -144,6 +161,7 @@ def _parse_single_header(args: tuple[str, str, str, str]) -> dict | None:
             "header": header_path_name,
             "classes": class_dicts,
             "enums": enums,
+            "direct_includes": direct_includes,
             "transitive_includes": transitive_includes,
         }
     except Exception as e:
@@ -209,13 +227,19 @@ def scan_all_modules(
                       flush=True)
 
     # -----------------------------------------------------------------------
-    # Phase 3: Assemble results into modules (sequential)
+    # Phase 2.5: Topologically sort modules based on #include DAG
+    # -----------------------------------------------------------------------
+    sorted_modules = _topological_sort_modules(MODULES, module_headers,
+                                               results_by_header)
+
+    # -----------------------------------------------------------------------
+    # Phase 3: Assemble results into modules (sequential, in dependency order)
     # -----------------------------------------------------------------------
     all_include_lists: list[list[str]] = []
     modules: list[ModuleDecl] = []
     known_transient: set[str] = set()
 
-    for mod_name, prefixes in MODULES:
+    for mod_name, prefixes in sorted_modules:
         if module_names and mod_name not in module_names:
             continue
 
@@ -417,3 +441,130 @@ def _filter_broken_includes(headers: list[str], vcpkg_dir: Path) -> list[str]:
                     changed = True
                     break
     return [h for h in headers if h not in exclude]
+
+
+def _topological_sort_modules(
+    modules_def: list[tuple[str, list[str]]],
+    module_headers: dict[str, list[tuple[str, str]]],
+    results_by_header: dict[str, dict],
+) -> list[tuple[str, list[str]]]:
+    """Topologically sort modules based on direct #include DAG.
+
+    Uses only direct (non-transitive) #include directives to build the
+    module dependency graph.  OCCT headers have circular includes between
+    closely-related modules (e.g. Standard<->NCollection), so we first
+    collapse strongly-connected components into super-nodes, then
+    topologically sort the resulting DAG.
+    """
+    import bisect
+
+    # Map: header_name (stem) -> module_name
+    header_to_module: dict[str, str] = {}
+    for mod_name, hdrs in module_headers.items():
+        for header_name, _prefix in hdrs:
+            header_to_module[header_name] = mod_name
+
+    mod_set = {m for m, _ in modules_def}
+    # deps[a] = set of modules that a depends on (must come before a)
+    deps: dict[str, set[str]] = {m: set() for m in mod_set}
+
+    for mod_name, hdrs in module_headers.items():
+        for header_name, _prefix in hdrs:
+            result = results_by_header.get(header_name)
+            if result is None:
+                continue
+            for inc in result.get("direct_includes", []):
+                inc_mod = header_to_module.get(inc)
+                if inc_mod and inc_mod != mod_name:
+                    deps[mod_name].add(inc_mod)
+
+    # --- Tarjan's SCC to collapse cycles ---
+    index_counter = [0]
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    index: dict[str, int] = {}
+    lowlink: dict[str, int] = {}
+    sccs: list[list[str]] = []
+
+    def _strongconnect(v: str):
+        index[v] = lowlink[v] = index_counter[0]
+        index_counter[0] += 1
+        stack.append(v)
+        on_stack.add(v)
+        for w in deps.get(v, set()):
+            if w not in mod_set:
+                continue
+            if w not in index:
+                _strongconnect(w)
+                lowlink[v] = min(lowlink[v], lowlink[w])
+            elif w in on_stack:
+                lowlink[v] = min(lowlink[v], index[w])
+        if lowlink[v] == index[v]:
+            scc = []
+            while True:
+                w = stack.pop()
+                on_stack.discard(w)
+                scc.append(w)
+                if w == v:
+                    break
+            sccs.append(scc)
+
+    for m in mod_set:
+        if m not in index:
+            _strongconnect(m)
+
+    # Map module -> SCC id
+    mod_to_scc: dict[str, int] = {}
+    for i, scc in enumerate(sccs):
+        for m in scc:
+            mod_to_scc[m] = i
+
+    # Build super-graph of SCCs
+    scc_deps: dict[int, set[int]] = {i: set() for i in range(len(sccs))}
+    for a, dep_set in deps.items():
+        scc_a = mod_to_scc[a]
+        for b in dep_set:
+            scc_b = mod_to_scc.get(b)
+            if scc_b is not None and scc_a != scc_b:
+                scc_deps[scc_a].add(scc_b)
+
+    # Kahn's on SCCs
+    in_degree_scc = {i: len(scc_deps[i]) for i in range(len(sccs))}
+    rev_scc: dict[int, list[int]] = {i: [] for i in range(len(sccs))}
+    for a, dep_set in scc_deps.items():
+        for b in dep_set:
+            rev_scc[b].append(a)
+
+    queue = sorted(i for i in range(len(sccs)) if in_degree_scc[i] == 0)
+    scc_order: list[int] = []
+    while queue:
+        node = queue.pop(0)
+        scc_order.append(node)
+        for dependent in rev_scc[node]:
+            in_degree_scc[dependent] -= 1
+            if in_degree_scc[dependent] == 0:
+                bisect.insort(queue, dependent)
+
+    if len(scc_order) != len(sccs):
+        print("  WARNING: cycle in SCC graph (should be impossible), using input order")
+        scc_order = list(range(len(sccs)))
+
+    # Flatten SCCs back to module list, preserving SCC order and within-SCC input order
+    mod_input_order = {m: i for i, (m, _) in enumerate(modules_def)}
+    sorted_mods: list[str] = []
+    for scc_id in scc_order:
+        scc_mods = sorted(sccs[scc_id], key=lambda m: mod_input_order.get(m, 999))
+        sorted_mods.extend(scc_mods)
+
+    # Print SCCs that have more than one module (collapsed cycles)
+    multi_sccs = [scc for scc in sccs if len(scc) > 1]
+    if multi_sccs:
+        for scc in multi_sccs:
+            print(f"  Collapsed SCC: {scc}")
+
+    # Rebuild ordered list with original (name, prefixes) tuples
+    order_map = {name: i for i, name in enumerate(sorted_mods)}
+    sorted_modules = sorted(modules_def, key=lambda t: order_map.get(t[0], 999))
+
+    print(f"  Module processing order (topological): {[m for m, _ in sorted_modules]}")
+    return sorted_modules
