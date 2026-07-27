@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, OCCTType
 from classify.overloads import get_method_unique_name
-from generate.type_map import TypeMap
+from generate.type_map import TypeMap, _PRIMITIVE_WRAPPER_MAP
 
 
 def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
@@ -25,11 +25,31 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     lines.append("#endif")
     lines.append("")
 
+    # Check if any methods use primitive wrapper types
+    needs_primitive_wrappers = False
+    for method in cls.all_wrappable_methods:
+        # Check return type
+        if method.return_type:
+            if method.return_type.base_name in _PRIMITIVE_WRAPPER_MAP:
+                needs_primitive_wrappers = True
+                break
+        # Check parameters
+        for p in method.parameters:
+            if p.type.base_name in _PRIMITIVE_WRAPPER_MAP:
+                needs_primitive_wrappers = True
+                break
+        if needs_primitive_wrappers:
+            break
+
     # Include the class's own OCCT header. All transitive dependencies are
     # satisfied by the force-included occt_compat.hxx (build system).
     header_basename = cls.header_file.rsplit("/", 1)[-1] if "/" in cls.header_file else cls.header_file
     if header_basename:
         lines.append("#include <{}>".format(header_basename))
+
+    # Include primitive wrappers if needed
+    if needs_primitive_wrappers:
+        lines.append('#include "OcgPrimitiveWrappers.hpp"')
 
     # Forward-declare all referenced wrapper types (Ref<T> only needs forward decl)
     referenced = set()

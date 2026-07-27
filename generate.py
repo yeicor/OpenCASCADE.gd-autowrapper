@@ -18,7 +18,7 @@ from model import ModuleDecl, ClassKind
 from scanner import scan_all_modules, MODULES
 from generate.type_map import TypeMap
 from generate.header import generate_header
-from generate.source import generate_source
+from generate.source import generate_source, generate_primitive_wrappers_header
 from generate.module import generate_module_header
 from generate.docs_xml import generate_doc_xml
 
@@ -76,10 +76,7 @@ def main():
     print("Step 2: Generating godot-cpp wrapper code ...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate the OCCT compatibility header — a single file that includes ALL
-    # OCCT headers in topological dependency order, derived entirely from
-    # libclang's include graphs. Force-included via CMake, it ensures every
-    # vcpkg header has all its transitive dependencies satisfied.
+    # Generate the OCCT compatibility header
     compat_path = output_dir / "occt_compat.hxx"
     with open(compat_path, 'w') as f:
         f.write("// Auto-generated OCCT compatibility header — DO NOT EDIT\n")
@@ -95,6 +92,12 @@ def main():
         old_file.unlink()
     for old_file in output_dir.glob("Ocg*.cpp"):
         old_file.unlink()
+
+    # Generate primitive wrapper classes header (after clean to avoid deletion)
+    prim_path = output_dir / "OcgPrimitiveWrappers.hpp"
+    with open(prim_path, 'w') as f:
+        f.write(generate_primitive_wrappers_header())
+    print(f"  Generated OcgPrimitiveWrappers.hpp")
 
     # Build type map from all modules
     all_classes = [cls for m in modules for cls in m.classes]
@@ -127,9 +130,14 @@ def main():
     # leaving methods referencing now-unwrapped types
     from classify.skippable import mark_skippable_methods
     updated_wrapped_names = {cls.name for cls in all_classes}
+    updated_enum_names: set[str] = set()
+    for e in all_enums:
+        updated_enum_names.add(e.name)
+        if e.is_nested and e.parent_class:
+            updated_enum_names.add(f"{e.parent_class}::{e.name}")
     for mod in modules:
         for cls in mod.classes:
-            mark_skippable_methods(cls, updated_wrapped_names)
+            mark_skippable_methods(cls, updated_wrapped_names, updated_enum_names)
 
     files_generated = 0
     for mod in modules:

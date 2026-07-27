@@ -25,29 +25,59 @@ SKIP_METHODS = {
     "operator new[]", "operator delete[]",
     "DynamicType", "get_type_descriptor",  # RTTI macros — libclang can't resolve return types
     "TransformShapeFU",  # OCCT packaging bug: symbol only exists in BRepFeat_Form, not MakeLinearForm
+    "Transforms",  # System-only static method: exists in system headers but removed in vcpkg OCCT
 }
 
 
-def check_type_wrappable(param_type: OCCTType, context: str, wrapped_names: set[str] | None = None) -> bool:
+def check_type_wrappable(param_type: OCCTType, context: str,
+                         wrapped_names: set[str] | None = None,
+                         enum_names: set[str] | None = None) -> bool:
     """Check if a parameter type can be wrapped. Prints WARNING if not."""
+    from generate.type_map import PRIMITIVE_MAP
+
     # Check unwrappable base types
     if param_type.base_name in UNWRAPPABLE_TYPES:
         print(f"  WARNING: skipping '{context}' — parameter type '{param_type.base_name}' is not wrappable",
               file=sys.stderr)
         return False
 
-    # Check raw pointer types (not handles)
-    if param_type.is_pointer and not param_type.is_handle:
-        print(f"  WARNING: skipping '{context}' — raw pointer type '{param_type.spelling}' is not wrappable",
-              file=sys.stderr)
-        return False
+    base = param_type.base_name
 
-    # Skip non-const reference output parameters (int&, Standard_Integer&, etc.)
-    # These are output parameters that godot-cpp can't handle via PtrToArg
+    # Enum types are always wrappable (mapped to int32_t with static_cast)
+    is_enum = (enum_names is not None and base in enum_names)
+
+    # Check raw pointer types (not handles) — exception: const char* returns as String
+    if param_type.is_pointer and not param_type.is_handle:
+        # Allow char* / const char* for return types (converted to String)
+        if base in ("char", "Standard_CString") or base == "char":
+            pass  # handled by the type map
+        else:
+            print(f"  WARNING: skipping '{context}' — raw pointer type '{param_type.spelling}' is not wrappable",
+                  file=sys.stderr)
+            return False
+
+    # Non-const reference output parameters: wrappable if the base type is a
+    # wrapped class, or a primitive that has a wrapper class
     if param_type.is_ref and not param_type.is_const and not param_type.is_handle:
-        print(f"  WARNING: skipping '{context}' — non-const reference output param '{param_type.spelling}'",
-              file=sys.stderr)
-        return False
+        if is_enum:
+            # Non-const ref of enum: needs enum output wrapper (not yet implemented)
+            print(f"  WARNING: skipping '{context}' — non-const ref enum output param '{param_type.spelling}' needs wrapper",
+                  file=sys.stderr)
+            return False
+        elif base in PRIMITIVE_MAP:
+            # Check that a primitive wrapper class exists for this type
+            from generate.type_map import _PRIMITIVE_WRAPPER_MAP
+            if base not in _PRIMITIVE_WRAPPER_MAP:
+                print(f"  WARNING: skipping '{context}' — primitive type '{base}' has no output wrapper class",
+                      file=sys.stderr)
+                return False
+            pass  # primitives get Ocg* wrapper classes
+        elif wrapped_names is not None and base in wrapped_names:
+            pass  # wrapped classes use existing wrapper
+        else:
+            print(f"  WARNING: skipping '{context}' — non-const reference output param '{param_type.spelling}' has no wrapper",
+                  file=sys.stderr)
+            return False
 
     # Skip template types (containing <>) — they're class templates we can't wrap generically
     # But NOT handle types (opencascade::handle<T>) which are wrappable
@@ -74,12 +104,11 @@ def check_type_wrappable(param_type: OCCTType, context: str, wrapped_names: set[
                   file=sys.stderr)
             return False
 
-    # Skip non-primitive, non-handle, non-wrapped OCCT types
-    from generate.type_map import PRIMITIVE_MAP
-    base = param_type.base_name
+    # Skip non-primitive, non-handle, non-wrapped, non-enum OCCT types
     if (wrapped_names is not None
             and base not in PRIMITIVE_MAP
             and not param_type.is_handle
+            and not is_enum
             and base not in wrapped_names):
         print(f"  WARNING: skipping '{context}' — OCCT type '{base}' has no wrapper",
               file=sys.stderr)
@@ -88,7 +117,8 @@ def check_type_wrappable(param_type: OCCTType, context: str, wrapped_names: set[
     return True
 
 
-def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None) -> None:
+def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None,
+                           enum_names: set[str] | None = None) -> None:
     """Mark methods that cannot be wrapped and print warnings.
 
     Sets method.skip = True for each un-wrappable method.
@@ -118,7 +148,8 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
 
         # Check return type
         if method.return_type and not method.return_type.is_void:
-            if not check_type_wrappable(method.return_type, f"{context} (return type)", wrapped_names):
+            if not check_type_wrappable(method.return_type, f"{context} (return type)",
+                                        wrapped_names, enum_names):
                 method.skip = True
                 method.skip_reason = f"unwrappable return type '{method.return_type.base_name}'"
                 continue
@@ -135,7 +166,8 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
         # Check parameter types
         skip = False
         for param in method.parameters:
-            if not check_type_wrappable(param.type, f"{context} (param '{param.name}')", wrapped_names):
+            if not check_type_wrappable(param.type, f"{context} (param '{param.name}')",
+                                        wrapped_names, enum_names):
                 method.skip = True
                 method.skip_reason = f"unwrappable parameter type '{param.type.base_name}'"
                 skip = True

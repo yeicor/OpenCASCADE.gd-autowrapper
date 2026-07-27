@@ -249,9 +249,21 @@ def scan_all_modules(
         for cls in mod.classes:
             all_wrapped_names.add(cls.name)
 
+        # Collect all known enum names (from all modules so far + current)
+        all_enum_names: set[str] = set()
+        for prev_mod in modules:
+            for e in prev_mod.enums:
+                all_enum_names.add(e.name)
+                if e.is_nested and e.parent_class:
+                    all_enum_names.add(f"{e.parent_class}::{e.name}")
+        for e in mod.enums:
+            all_enum_names.add(e.name)
+            if e.is_nested and e.parent_class:
+                all_enum_names.add(f"{e.parent_class}::{e.name}")
+
         # Mark skippable methods
         for cls in mod.classes:
-            mark_skippable_methods(cls, all_wrapped_names)
+            mark_skippable_methods(cls, all_wrapped_names, all_enum_names)
 
         # Group overloads
         for cls in mod.classes:
