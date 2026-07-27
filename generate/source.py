@@ -7,6 +7,22 @@ from classify.overloads import get_method_unique_name
 from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE
 
 
+def _null_check_for_refcounted(lines: list[str], ret_type: str) -> None:
+    """Generate a null check for _handle (REF_COUNTED classes without default ctor)."""
+    if ret_type == "void":
+        lines.append("    ERR_FAIL_COND(!_handle);")
+    else:
+        lines.append("    ERR_FAIL_COND_V(!_handle, {}());".format(ret_type))
+
+
+def _null_check_for_builder(lines: list[str], ret_type: str) -> None:
+    """Generate a null check for _builder (BUILDER classes without default ctor)."""
+    if ret_type == "void":
+        lines.append("    ERR_FAIL_NULL(_builder);")
+    else:
+        lines.append("    ERR_FAIL_NULL_V(_builder, {}());".format(ret_type))
+
+
 def generate_primitive_wrappers_header() -> str:
     """Generate the header file containing primitive wrapper classes.
 
@@ -148,9 +164,12 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     has_default_ctor = any(len(c.parameters) == 0 for c in cls.constructors)
 
     if cls.kind == ClassKind.BUILDER:
-        lines.append("    _builder = std::make_unique<{}>();".format(cname))
-        lines.append("    _builder->Build();")
-        lines.append("    _result = _builder->Shape();")
+        if has_default_ctor:
+            lines.append("    _builder = std::make_unique<{}>();".format(cname))
+            lines.append("    _builder->Build();")
+            lines.append("    _result = _builder->Shape();")
+        else:
+            lines.append("    // No default constructor — _builder is null; use factory methods")
     elif cls.kind == ClassKind.REF_COUNTED:
         if has_default_ctor:
             lines.append("    _handle = new ::{}();".format(cname))
@@ -257,6 +276,11 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
 
     lines.append("{} {}::{}({}){} {{".format(ret, wname, unique, params, const))
 
+    if cls.kind == ClassKind.REF_COUNTED:
+        _null_check_for_refcounted(lines, ret)
+    elif cls.kind == ClassKind.BUILDER:
+        _null_check_for_builder(lines, ret)
+
     target = _value_type_target(cls)
     arrow = "->" if _needs_pointer_call(cls) else "."
     call = _native_call_expr(target, arrow, method, args)
@@ -274,7 +298,12 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             # Handle return: opencascade::handle<T> -> Ref<OcgT>
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            lines.append("    wrapper->_handle = result;")
+            ret_kind = type_map.class_kind(ret_base)
+            if ret_kind == ClassKind.REF_COUNTED:
+                lines.append("    wrapper->_handle = result;")
+            else:
+                # VALUE/TOPODS_SHAPE: dereference handle into native storage
+                lines.append("    wrapper->_native = *result.get();")
             lines.append("    return wrapper;")
         elif type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
@@ -302,6 +331,11 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
     args = _occt_args_for_call(method, type_map)
 
     lines.append("{} {}::{}({}){} {{".format(ret, wname, unique, params, const))
+
+    if cls.kind == ClassKind.REF_COUNTED:
+        _null_check_for_refcounted(lines, ret)
+    elif cls.kind == ClassKind.BUILDER:
+        _null_check_for_builder(lines, ret)
 
     target = _value_type_target(cls)
     arrow = "->" if _needs_pointer_call(cls) else "."

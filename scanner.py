@@ -21,8 +21,30 @@ from classify.overloads import group_overloads
 
 # Module definitions: (module_name, header_prefixes)
 MODULES = [
+    # Fundamental types first (referenced by all other modules)
+    ("Standard", ["Standard_"]),
+    ("TCollection", ["TCollection_"]),
+    ("TColStd", ["TColStd_"]),
+    ("NCollection", ["NCollection_"]),
+    ("ShapeExtend", ["ShapeExtend_"]),
+    ("TopTools", ["TopTools_"]),
+    ("TDF", ["TDF_"]),
+    ("Message", ["Message_"]),
+    ("SelectMgr", ["SelectMgr_"]),
+    ("IntRes2d", ["IntRes2d_"]),
+    # Core geometry
     ("gp", ["gp_"]),
+    ("GeomAbs", ["GeomAbs_"]),
+    ("TopAbs", ["TopAbs_"]),
+    ("Geom", ["Geom_"]),
+    ("Geom2d", ["Geom2d_"]),
+    ("Bnd", ["Bnd_"]),
+    # Topology
     ("TopoDS", ["TopoDS_"]),
+    ("BRep", ["BRep_"]),
+    ("TopExp", ["TopExp_"]),
+    ("BRepTools", ["BRepTools_"]),
+    # Higher-level modules
     ("BRepBuilderAPI", ["BRepBuilderAPI_"]),
     ("BRepPrimAPI", ["BRepPrimAPI_"]),
     ("BRepAlgoAPI", ["BRepAlgoAPI_"]),
@@ -34,15 +56,6 @@ MODULES = [
     ("XCAFPrs", ["XCAFPrs_"]),
     ("TDocStd", ["TDocStd_"]),
     ("Quantity", ["Quantity_"]),
-    ("GeomAbs", ["GeomAbs_"]),
-    ("TopAbs", ["TopAbs_"]),
-    ("BRep", ["BRep_"]),
-    ("TopExp", ["TopExp_"]),
-    ("BRepTools", ["BRepTools_"]),
-    ("Geom", ["Geom_"]),
-    ("Geom2d", ["Geom2d_"]),
-    ("TColStd", ["TColStd_"]),
-    ("NCollection", ["NCollection_"]),
     ("AIS", ["AIS_"]),
     ("V3d", ["V3d_"]),
     ("Prs3d", ["Prs3d_"]),
@@ -56,7 +69,6 @@ MODULES = [
     ("ShapeAnalysis", ["ShapeAnalysis_"]),
     ("ShapeUpgrade", ["ShapeUpgrade_"]),
     ("BRepCheck", ["BRepCheck_"]),
-    ("Bnd", ["Bnd_"]),
     ("GeomAPI", ["GeomAPI_"]),
     ("IntPolyh", ["IntPolyh_"]),
     ("Law", ["Law_"]),
@@ -225,17 +237,6 @@ def scan_all_modules(
 
         # Classify all classes in this module
         classify_all(mod.classes)
-
-        # Remove VALUE/BUILDER/OTHER classes without a public default constructor.
-        before = len(mod.classes)
-        mod.classes = [c for c in mod.classes
-                       if c.kind == ClassKind.REF_COUNTED
-                       or c.kind == ClassKind.TOPODS_SHAPE
-                       or c.has_public_default_ctor]
-        skipped_noctor = before - len(mod.classes)
-        if skipped_noctor:
-            print(f"    (skipped {skipped_noctor} classes without default constructor)",
-                  end="")
 
         # Assign wrapper names
         for cls in mod.classes:

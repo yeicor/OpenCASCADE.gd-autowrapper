@@ -31,12 +31,15 @@ SKIP_METHODS = {
     "operator new", "operator delete", "operator new[]", "operator delete[]",
     "operator=", "operator[]",  # subscript can't be named as method
     "ShallowCopy", "ShallowDump",
+    "operator<<", "operator>>",  # stream I/O — not representable in GDScript
 }
 
 # Operators that can't be wrapped (not representable in GDScript)
 UNWRAPPABLE_OPS = {
     "[]",  # subscript operator — can't be named as a method
     ",", "->", "->*", "new", "delete", "new[]", "delete[]",
+    "<<", ">>",  # stream operators — not representable in GDScript
+    "~",  # bitwise NOT — not representable
 }
 
 

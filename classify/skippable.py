@@ -23,7 +23,7 @@ SKIP_METHODS = {
     "Dump", "Destroy",  # Internal/debug methods
     "operator new", "operator delete",
     "operator new[]", "operator delete[]",
-    "DynamicType", "get_type_descriptor",  # RTTI macros — libclang can't resolve return types
+    "DynamicType", "get_type_descriptor", "get_type_name",  # RTTI macros — libclang can't resolve return types
     "TransformShapeFU",  # OCCT packaging bug: symbol only exists in BRepFeat_Form, not MakeLinearForm
     "Transforms",  # System-only static method: exists in system headers but removed in vcpkg OCCT
 }

@@ -16,7 +16,8 @@ def classify_class(cls: ClassDecl) -> ClassKind:
     5. Everything else -> OTHER
     """
     # 1. Standard_Transient descendant -> REF_COUNTED
-    if cls.is_transient_descendant:
+    # Standard_Transient and Standard_Persistent ARE the root handle types
+    if cls.is_transient_descendant or cls.name in ("Standard_Transient", "Standard_Persistent"):
         return ClassKind.REF_COUNTED
 
     # 2. Builder classes

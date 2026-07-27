@@ -84,6 +84,11 @@ class TypeMap:
         """Get the wrapper name for an OCCT type, or None if not wrapped."""
         return self._wrapper_names.get(occt_name)
 
+    def class_kind(self, occt_name: str) -> ClassKind | None:
+        """Get the ClassKind for a wrapped OCCT type, or None."""
+        cls = self._classes.get(occt_name)
+        return cls.kind if cls else None
+
     def is_wrapped(self, occt_name: str) -> bool:
         return occt_name in self._wrapper_names
 
