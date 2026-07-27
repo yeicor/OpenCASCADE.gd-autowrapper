@@ -106,15 +106,14 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
         return None
 
     # Skip classes where all constructors are protected/private (can't instantiate)
-    if has_protected_ctor and not has_public_default_ctor:
+    # Transient descendants are exempt — they get null handles instead.
+    if has_protected_ctor and not has_public_default_ctor and not is_transient_descendant(cursor):
         return None
 
-    # Skip abstract classes (can't instantiate _native)
-    if has_pure_virtual:
-        return None
-
-    # Skip abstract classes (can't instantiate _native)
-    if has_pure_virtual:
+    # Skip abstract classes that are NOT transient descendants.
+    # Transient descendants (handle types) can be used as opaque handles
+    # even when abstract — e.g. Geom_Curve, Geom_Surface.
+    if has_pure_virtual and not is_transient_descendant(cursor):
         return None
 
     # Skip exception-type classes (Standard_Failure descendants) — in vcpkg OCCT,
