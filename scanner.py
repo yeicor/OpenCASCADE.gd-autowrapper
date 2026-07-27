@@ -45,6 +45,12 @@ MODULES = [
     ("SelectMgr", ["SelectMgr_"]),
     ("IntRes2d", ["IntRes2d_"]),
     ("ShapeExtend", ["ShapeExtend_"]),
+    # Image/Poly (needed by many modules)
+    ("Image", ["Image_"]),
+    ("Poly", ["Poly_"]),
+    ("TopLoc", ["TopLoc_"]),
+    ("PrsMgr", ["PrsMgr_"]),
+    ("Adaptor3d", ["Adaptor3d_"]),
     # Higher-level modules
     ("BRepBuilderAPI", ["BRepBuilderAPI_"]),
     ("BRepPrimAPI", ["BRepPrimAPI_"]),
