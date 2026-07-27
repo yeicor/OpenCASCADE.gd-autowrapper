@@ -52,6 +52,9 @@ MODULES = [
     ("TopLoc", ["TopLoc_"]),
     ("PrsMgr", ["PrsMgr_"]),
     ("Adaptor3d", ["Adaptor3d_"]),
+    ("Adaptor2d", ["Adaptor2d_"]),
+    ("ShapeBuild", ["ShapeBuild_"]),
+    ("BOPAlgo", ["BOPAlgo_"]),
     # Higher-level modules
     ("BRepBuilderAPI", ["BRepBuilderAPI_"]),
     ("BRepPrimAPI", ["BRepPrimAPI_"]),

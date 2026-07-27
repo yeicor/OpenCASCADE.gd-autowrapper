@@ -84,6 +84,9 @@ def extract_methods(cursor: Cursor, known_transient: set[str]) -> tuple[
 
     for child in cursor.get_children():
         if child.kind == CursorKind.CONSTRUCTOR:
+            # Skip protected/private constructors
+            if child.access_specifier in (AccessSpecifier.PRIVATE, AccessSpecifier.PROTECTED):
+                continue
             ctor = _extract_constructor(child, known_transient)
             if ctor:
                 constructors.append(ctor)
