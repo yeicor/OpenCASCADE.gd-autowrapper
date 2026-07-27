@@ -12,8 +12,17 @@ from model import ClassDecl, MethodDecl, OCCTType
 # Types that cannot be wrapped across the FFI boundary
 UNWRAPPABLE_TYPES = {
     "Standard_OStream", "Standard_IStream", "Standard_SStream",
-    "Standard_ProgramAddress",
+    "Standard_ProgramAddress", "Standard_Address",
     "opencascade::signal_handler",
+    "void*",
+    # Template aliases (NCollection_Vec2<T>, etc.) — can't wrap across FFI
+    "Graphic3d_Vec2i", "Graphic3d_Vec2", "Graphic3d_Vec3", "Graphic3d_Vec4",
+    # Enum types from non-scanned modules
+    "Aspect_TypeOfLine", "Aspect_TypeOfMarker", "Aspect_TypeOfText",
+    # BOPAlgo types
+    "BOPAlgo_PaveFiller",
+    # SelectBasics types
+    "SelectBasics_PickResult",
 }
 
 # Methods that should always be skipped

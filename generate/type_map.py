@@ -28,6 +28,11 @@ PRIMITIVE_MAP = {
     "Standard_Real": "double",
     "long double": "double",
     "Standard_CString": "String",
+    "Standard_Size": "uint64_t",
+    "Standard_ExtCharacter": "int32_t",
+    "Standard_ExtString": "String",
+    "Graphic3d_ZLayerId": "int32_t",
+    "Graphic3d_ArrayFlags": "int32_t",
 }
 
 # Mapping from OCCT primitive type to wrapper class name for non-const ref output params.

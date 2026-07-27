@@ -34,6 +34,7 @@ MODULES = [
     ("Geom", ["Geom_"]),
     ("Geom2d", ["Geom2d_"]),
     ("Bnd", ["Bnd_"]),
+    ("TopLoc", ["TopLoc_"]),
     # Topology
     ("TopoDS", ["TopoDS_"]),
     ("BRep", ["BRep_"]),
