@@ -17,12 +17,12 @@ UNWRAPPABLE_TYPES = {
     "void*",
     # Template aliases (NCollection_Vec2<T>, etc.) — can't wrap across FFI
     "Graphic3d_Vec2i", "Graphic3d_Vec2", "Graphic3d_Vec3", "Graphic3d_Vec4",
-    # Enum types from non-scanned modules
-    "Aspect_TypeOfLine", "Aspect_TypeOfMarker", "Aspect_TypeOfText",
     # BOPAlgo types
     "BOPAlgo_PaveFiller",
     # SelectBasics types
     "SelectBasics_PickResult",
+    # IMeshData handle types (internal)
+    "IMeshData::IEdgeHandle", "IMeshData::IFaceHandle",
 }
 
 # Handle inner type aliases: typedef'd handle names → the real wrapper class name.

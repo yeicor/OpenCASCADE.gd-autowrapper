@@ -134,15 +134,78 @@ def main():
 
     # Re-run skippable marking after vcpkg filtering — some types may have been removed,
     # leaving methods referencing now-unwrapped types.
-    # Also includes collection types (NCollection typedefs) as wrapped.
+    # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
     from classify.skippable import mark_skippable_methods
     from generate.type_map import COLLECTION_TYPES
-    updated_wrapped_names = {cls.name for cls in all_classes} | set(COLLECTION_TYPES.keys())
+    updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys())
     updated_enum_names: set[str] = set()
     for e in all_enums:
         updated_enum_names.add(e.name)
         if e.is_nested and e.parent_class:
             updated_enum_names.add(f"{e.parent_class}::{e.name}")
+    # Non-scanned enum types from OCCT modules not in our MODULES list.
+    # These are plain C enums or scoped enums that can be passed as int32_t.
+    NON_SCANNED_ENUMS = {
+        # Extrema
+        "Extrema_ExtAlgo", "Extrema_ExtFlag",
+        # IFSelect
+        "IFSelect_ReturnStatus", "IFSelect_PrintFail",
+        # Font
+        "Font_FontAspect",
+        # Aspect (non-scanned nested enums)
+        "Aspect_VKey", "Aspect_FBConfig", "Aspect_HatchStyle",
+        "Aspect_GraphicsLibrary",
+        # PCDM
+        "PCDM_StoreStatus", "PCDM_ReaderStatus",
+        # DsgPrs
+        "DsgPrs_ArrowSide",
+        # Select3D
+        "Select3D_TypeOfSensitivity",
+        # Approx
+        "Approx_ParametrizationType",
+        # Poly
+        "Poly_MeshPurpose",
+        # ChFi3d
+        "ChFi3d_FilletShape",
+        # ChFiDS
+        "ChFiDS_ErrorStatus", "ChFiDS_ChamfMode",
+        # ChFi2d
+        "ChFi2d_ConstructionError",
+        # GeomFill
+        "GeomFill_Trihedron",
+        # Draft
+        "Draft_ErrorStatus",
+        # BRepFill
+        "BRepFill_TypeOfContact", "BRepFill_ThruSectionErrorStatus",
+        # BRepOffset
+        "BRepOffset_Mode",
+        # BRepMesh
+        "BRepMesh_GeomTool::IntFlag",
+        # XSAlgo
+        "XSAlgo_ShapeProcessor::ProcessingFlags",
+        # ShapeProcess
+        "ShapeProcess::OperationsFlags",
+        # LocOpe
+        "LocOpe_Operation",
+        # XCAFPrs
+        "XCAFPrs_DocumentExplorerFlags",
+        # XCAFDoc
+        "XCAFDoc_AssemblyGraph::NodeType",
+        # FS
+        "FS_VARStatuses",
+        # BehaviorOnTransform
+        "BehaviorOnTransform",
+        # AVRational
+        "AVRational",
+        # CullingContext
+        "CullingContext",
+        # PeriodicityParams
+        "PeriodicityParams",
+        # StdSelect
+        "StdSelect_TypeOfSelectionImage",
+        "AIS_SelectionScheme",
+    }
+    updated_enum_names |= NON_SCANNED_ENUMS
     # Reset skip flags and re-run marking with complete type info
     for mod in modules:
         for cls in mod.classes:
