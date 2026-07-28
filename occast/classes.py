@@ -25,7 +25,7 @@ def extract_classes(tu_cursor: Cursor, module_name: str, known_transient: set[st
     seen = set()
 
     for child in tu_cursor.get_children():
-        if child.kind == CursorKind.CLASS_DECL:
+        if child.kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
             if not child.is_definition():
                 continue
             if child.spelling in seen:

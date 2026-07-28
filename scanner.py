@@ -87,6 +87,9 @@ MODULES = [
     ("XCAFNoteObjects", ["XCAFNoteObjects_"]),
     ("Media", ["Media_"]),
     ("PrsDim", ["PrsDim_"]),
+    ("Transfer", ["Transfer_"]),
+    ("XSControl", ["XSControl_"]),
+    ("Select3D", ["Select3D_"]),
 ]
 
 

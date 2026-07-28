@@ -204,6 +204,8 @@ def main():
         # StdSelect
         "StdSelect_TypeOfSelectionImage",
         "AIS_SelectionScheme",
+        # Graphic3d
+        "Graphic3d_ValidatedCubeMapOrder",
     }
     updated_enum_names |= NON_SCANNED_ENUMS
     # Reset skip flags and re-run marking with complete type info
