@@ -92,6 +92,7 @@ class OCCTType:
             "void", "bool", "char", "unsigned char", "signed char",
             "short", "unsigned short", "int", "unsigned int",
             "long", "unsigned long", "long long", "unsigned long long",
+            "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t",
             "float", "double", "long double",
             "Standard_Boolean", "Standard_Character", "Standard_Byte",
             "Standard_Integer", "Standard_Real", "Standard_ShortReal",

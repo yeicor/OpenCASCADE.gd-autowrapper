@@ -17,12 +17,16 @@ PRIMITIVE_MAP = {
     "Standard_Byte": "uint8_t",
     "short": "int16_t",
     "unsigned short": "uint16_t",
+    "uint16_t": "uint16_t",
     "int": "int32_t",
     "Standard_Integer": "int32_t",
     "unsigned int": "uint32_t",
+    "uint32_t": "uint32_t",
     "long": "int64_t",
     "long long": "int64_t",
+    "int64_t": "int64_t",
     "unsigned long long": "uint64_t",
+    "uint64_t": "uint64_t",
     "float": "float",
     "Standard_ShortReal": "float",
     "double": "double",
@@ -53,6 +57,8 @@ _PRIMITIVE_WRAPPER_MAP = {
     "float": "OcgStandardShortReal",
     "uint8_t": "OcgStandardByte",
     "char": "OcgStandardCharacter",
+    "int64_t": "OcgStandardLongInteger",
+    "uint64_t": "OcgStandardULongInteger",
 }
 
 # C++ types for primitive wrapper classes
@@ -63,6 +69,8 @@ PRIMITIVE_WRAPPER_CPP_TYPE = {
     "OcgStandardShortReal": "float",
     "OcgStandardByte": "uint8_t",
     "OcgStandardCharacter": "char",
+    "OcgStandardLongInteger": "int64_t",
+    "OcgStandardULongInteger": "uint64_t",
 }
 
 # Collection wrapper types: OCCT typedef'd NCollection instantiations that can't
