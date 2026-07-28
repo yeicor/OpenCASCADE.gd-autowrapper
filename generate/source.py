@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind
 from classify.overloads import get_method_unique_name
-from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE
+from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES
 
 
 def _null_check_for_refcounted(lines: list[str], ret_type: str) -> None:
@@ -64,6 +64,53 @@ def generate_primitive_wrappers_header() -> str:
         lines.append('        ClassDB::bind_method(D_METHOD("get_value"), &{}::get_value);'.format(wrapper_name))
         lines.append('        ClassDB::bind_method(D_METHOD("set_value", "value"), &{}::set_value);'.format(wrapper_name))
         lines.append("    }")
+        lines.append("};")
+        lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
+def generate_collection_wrappers_header() -> str:
+    """Generate OcgCollectionWrappers.hpp with opaque RefCounted wrapper classes
+    for NCollection-based typedefs (lists, sequences, arrays, maps).
+
+    These types are typedefs of NCollection templates and cannot be extracted
+    by libclang's class cursor.  They're wrapped as opaque RefCounted value
+    types: the OCCT native type is stored in _native.
+    """
+    from model import occt_name_to_wrapper
+
+    lines = []
+    lines.append("// Auto-generated opaque collection wrapper classes -- DO NOT EDIT")
+    lines.append("#pragma once")
+    lines.append("")
+    lines.append("#include <godot_cpp/classes/ref_counted.hpp>")
+    lines.append("#include <godot_cpp/core/class_db.hpp>")
+    lines.append("")
+    lines.append("#ifdef __GNUC__")
+    lines.append("#pragma GCC diagnostic ignored \"-Wchanges-meaning\"")
+    lines.append("#pragma GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+    lines.append("#pragma GCC diagnostic ignored \"-Wunused-parameter\"")
+    lines.append("#endif")
+    lines.append("")
+    lines.append("using namespace godot;")
+    lines.append("")
+
+    # Group by include to avoid duplicate includes
+    for occt_name, (cpp_type, include) in sorted(COLLECTION_TYPES.items()):
+        wname = occt_name_to_wrapper(occt_name, "")
+        lines.append("#include {}".format(include))
+    lines.append("")
+
+    for occt_name, (cpp_type, include) in sorted(COLLECTION_TYPES.items()):
+        wname = occt_name_to_wrapper(occt_name, "")
+        lines.append("class {} : public RefCounted {{".format(wname))
+        lines.append("    GDCLASS({}, RefCounted)".format(wname))
+        lines.append("")
+        lines.append("public:")
+        lines.append("    {} _native;".format(cpp_type))
+        lines.append("")
+        lines.append("    {}() = default;".format(wname))
         lines.append("};")
         lines.append("")
 

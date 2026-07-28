@@ -65,6 +65,54 @@ PRIMITIVE_WRAPPER_CPP_TYPE = {
     "OcgStandardCharacter": "char",
 }
 
+# Collection wrapper types: OCCT typedef'd NCollection instantiations that can't
+# be extracted as standalone classes.  Maps OCCT name → (OCCT C++ type, include).
+# These are opaque VALUE types wrapped in RefCounted for godot-cpp.
+COLLECTION_TYPES: dict[str, tuple[str, str]] = {
+    # Lists (NCollection_List<T>)
+    "TopTools_ListOfShape":          ("NCollection_List<TopoDS_Shape>",          "<TopTools_ListOfShape.hxx>"),
+    "TColStd_ListOfInteger":         ("NCollection_List<Standard_Integer>",      "<TColStd_ListOfInteger.hxx>"),
+    "TColStd_ListOfAsciiString":     ("NCollection_List<TCollection_AsciiString>","<TColStd_ListOfAsciiString.hxx>"),
+    "TColStd_ListOfReal":            ("NCollection_List<Standard_Real>",         "<TColStd_ListOfReal.hxx>"),
+    "TColStd_ListOfTransient":       ("NCollection_List<opencascade::handle<Standard_Transient>>", "<TColStd_ListOfTransient.hxx>"),
+    # Sequences (NCollection_Sequence<T>)
+    "TDF_LabelSequence":             ("NCollection_Sequence<TDF_Label>",         "<TDF_LabelSequence.hxx>"),
+    "TopTools_SequenceOfShape":      ("NCollection_Sequence<TopoDS_Shape>",      "<TopTools_SequenceOfShape.hxx>"),
+    "TColStd_SequenceOfHAsciiString":("NCollection_Sequence<opencascade::handle<TCollection_HAsciiString>>", "<TColStd_SequenceOfHAsciiString.hxx>"),
+    "TColStd_SequenceOfExtendedString": ("NCollection_Sequence<TCollection_ExtendedString>", "<TColStd_SequenceOfExtendedString.hxx>"),
+    "TColStd_SequenceOfHExtendedString":("NCollection_Sequence<opencascade::handle<TCollection_HExtendedString>>", "<TColStd_SequenceOfHExtendedString.hxx>"),
+    "TColgp_SequenceOfPnt":          ("NCollection_Sequence<gp_Pnt>",            "<TColgp_SequenceOfPnt.hxx>"),
+    # Array1 (NCollection_Array1<T>)
+    "TColgp_Array1OfPnt":            ("NCollection_Array1<gp_Pnt>",              "<TColgp_Array1OfPnt.hxx>"),
+    "TColgp_Array1OfPnt2d":          ("NCollection_Array1<gp_Pnt2d>",            "<TColgp_Array1OfPnt2d.hxx>"),
+    "TColgp_Array1OfVec":            ("NCollection_Array1<gp_Vec>",              "<TColgp_Array1OfVec.hxx>"),
+    "TColStd_Array1OfReal":          ("NCollection_Array1<Standard_Real>",       "<TColStd_Array1OfReal.hxx>"),
+    "TColStd_Array1OfInteger":       ("NCollection_Array1<Standard_Integer>",    "<TColStd_Array1OfInteger.hxx>"),
+    # Array2 (NCollection_Array2<T>)
+    "TColgp_Array2OfPnt":            ("NCollection_Array2<gp_Pnt>",              "<TColgp_Array2OfPnt.hxx>"),
+    "TColStd_Array2OfReal":          ("NCollection_Array2<Standard_Real>",       "<TColStd_Array2OfReal.hxx>"),
+    # DataMaps (NCollection_DataMap<K,V>)
+    "TopTools_DataMapOfShapeListOfShape": ("NCollection_DataMap<TopoDS_Shape,TopTools_ListOfShape,TopTools_ShapeMapHasher>", "<TopTools_DataMapOfShapeListOfShape.hxx>"),
+    "TopTools_DataMapOfShapeShape":  ("NCollection_DataMap<TopoDS_Shape,TopoDS_Shape,TopTools_ShapeMapHasher>", "<TopTools_DataMapOfShapeShape.hxx>"),
+    "TopTools_DataMapOfShapeBox":    ("NCollection_DataMap<TopoDS_Shape,Bnd_Box,TopTools_ShapeMapHasher>", "<TopTools_DataMapOfShapeBox.hxx>"),
+    "TColStd_DataMapOfStringInteger":("NCollection_DataMap<TCollection_AsciiString,Standard_Integer,TCollection_AsciiString::StringMapHasher>", "<TColStd_DataMapOfStringInteger.hxx>"),
+    "TDataStd_DataMapOfStringString":("NCollection_DataMap<TCollection_AsciiString,TCollection_AsciiString,TCollection_AsciiString::StringMapHasher>", "<TDataStd_DataMapOfStringString.hxx>"),
+    "TDataStd_DataMapOfStringReal":  ("NCollection_DataMap<TCollection_AsciiString,Standard_Real,TCollection_AsciiString::StringMapHasher>", "<TDataStd_DataMapOfStringReal.hxx>"),
+    "TDataStd_DataMapOfStringByte":  ("NCollection_DataMap<TCollection_AsciiString,Standard_Byte,TCollection_AsciiString::StringMapHasher>", "<TDataStd_DataMapOfStringByte.hxx>"),
+    # Maps
+    "TopTools_IndexedMapOfShape":     ("NCollection_IndexedMap<TopoDS_Shape,TopTools_ShapeMapHasher>", "<TopTools_IndexedMapOfShape.hxx>"),
+    "TopTools_IndexedDataMapOfShapeReal": ("NCollection_IndexedDataMap<TopoDS_Shape,Standard_Real,TopTools_ShapeMapHasher>", "<TopTools_IndexedDataMapOfShapeReal.hxx>"),
+    "TopTools_MapOfShape":           ("NCollection_Map<TopoDS_Shape,TopTools_ShapeMapHasher>", "<TopTools_MapOfShape.hxx>"),
+    "TDF_LabelMap":                  ("NCollection_Map<TDF_Label>",              "<TDF_LabelMap.hxx>"),
+    "TDF_LabelIndexedMap":           ("NCollection_IndexedMap<TDF_Label>",       "<TDF_LabelIndexedMap.hxx>"),
+    "IMeshData::MapOfInteger":       ("NCollection_Map<int>",                    "<IMeshData_MapOfInteger.hxx>"),
+    # TDF sequences/lists/arrays
+    "TDF_DeltaList":                 ("NCollection_Sequence<opencascade::handle<TDF_Delta>>", "<TDF_DeltaList.hxx>"),
+    "TDF_AttributeArray1":           ("NCollection_Array1<opencascade::handle<TDF_Attribute>>", "<TDF_AttributeArray1.hxx>"),
+    "TDF_AttributeDeltaList":        ("NCollection_Sequence<opencascade::handle<TDF_AttributeDelta>>", "<TDF_AttributeDeltaList.hxx>"),
+    "TDF_LabelList":                 ("NCollection_Sequence<TDF_Label>",         "<TDF_LabelList.hxx>"),
+}
+
 
 class TypeMap:
     """Builds and queries the type mapping for a set of classified classes."""
@@ -85,6 +133,10 @@ class TypeMap:
         # Collect standalone enum names
         for e in enums:
             self._enum_names.add(e.name)
+        # Register collection wrapper types
+        for occt_name in COLLECTION_TYPES:
+            wname = occt_name_to_wrapper(occt_name, "")
+            self._wrapper_names[occt_name] = wname
 
     def wrapper_name(self, occt_name: str) -> str | None:
         """Get the wrapper name for an OCCT type, or None if not wrapped."""
@@ -256,7 +308,10 @@ class TypeMap:
 
         All non-REF_COUNTED wrapped types (VALUE, TOPODS_SHAPE, BUILDER, OTHER)
         store native data and need Ref<T> wrapping for godot-cpp.
+        Collection types are always value types.
         """
+        if occt_name in COLLECTION_TYPES:
+            return True
         cls = self._classes.get(occt_name)
         if cls:
             return cls.kind != ClassKind.REF_COUNTED

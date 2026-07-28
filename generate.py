@@ -18,7 +18,7 @@ from model import ModuleDecl, ClassKind
 from scanner import scan_all_modules, MODULES
 from generate.type_map import TypeMap
 from generate.header import generate_header
-from generate.source import generate_source, generate_primitive_wrappers_header
+from generate.source import generate_source, generate_primitive_wrappers_header, generate_collection_wrappers_header
 from generate.module import generate_module_header
 from generate.docs_xml import generate_doc_xml
 
@@ -99,6 +99,12 @@ def main():
         f.write(generate_primitive_wrappers_header())
     print(f"  Generated OcgPrimitiveWrappers.hpp")
 
+    # Generate collection wrapper classes header
+    coll_path = output_dir / "OcgCollectionWrappers.hpp"
+    with open(coll_path, 'w') as f:
+        f.write(generate_collection_wrappers_header())
+    print(f"  Generated OcgCollectionWrappers.hpp")
+
     # Build type map from all modules
     all_classes = [cls for m in modules for cls in m.classes]
     all_enums = [e for m in modules for e in m.enums]
@@ -127,16 +133,22 @@ def main():
     type_map = TypeMap(all_classes, all_enums)
 
     # Re-run skippable marking after vcpkg filtering — some types may have been removed,
-    # leaving methods referencing now-unwrapped types
+    # leaving methods referencing now-unwrapped types.
+    # Also includes collection types (NCollection typedefs) as wrapped.
     from classify.skippable import mark_skippable_methods
-    updated_wrapped_names = {cls.name for cls in all_classes}
+    from generate.type_map import COLLECTION_TYPES
+    updated_wrapped_names = {cls.name for cls in all_classes} | set(COLLECTION_TYPES.keys())
     updated_enum_names: set[str] = set()
     for e in all_enums:
         updated_enum_names.add(e.name)
         if e.is_nested and e.parent_class:
             updated_enum_names.add(f"{e.parent_class}::{e.name}")
+    # Reset skip flags and re-run marking with complete type info
     for mod in modules:
         for cls in mod.classes:
+            for m in cls.all_methods:
+                m.skip = False
+                m.skip_reason = ""
             mark_skippable_methods(cls, updated_wrapped_names, updated_enum_names)
 
     files_generated = 0
