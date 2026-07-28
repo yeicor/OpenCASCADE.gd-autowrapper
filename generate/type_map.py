@@ -148,6 +148,44 @@ COLLECTION_TYPES: dict[str, tuple[str, str]] = {
     "SelectMgr_IndexedMapOfHSensitive": ("NCollection_IndexedMap<opencascade::handle<SelectMgr_BaseEntity>,SelectMgr_EntityOwner::HashCode >", "<SelectMgr_IndexedMapOfHSensitive.hxx>"),
 }
 
+# Deprecated HSequence/HArray handle types (Standard_Transient subclasses wrapping NCollection).
+# Unlike COLLECTION_TYPES (value types with _native), these are handle types with _handle storage.
+# Maps OCCT name → (handle C++ type, include header).
+HANDLE_COLLECTION_TYPES: dict[str, tuple[str, str]] = {
+    # TColStd HSequence/HArray types
+    "TColStd_HSequenceOfTransient":    ("TColStd_HSequenceOfTransient", "<TColStd_HSequenceOfTransient.hxx>"),
+    "TColStd_HSequenceOfReal":         ("TColStd_HSequenceOfReal", "<TColStd_HSequenceOfReal.hxx>"),
+    "TColStd_HSequenceOfInteger":      ("TColStd_HSequenceOfInteger", "<TColStd_HSequenceOfInteger.hxx>"),
+    "TColStd_HArray1OfReal":           ("TColStd_HArray1OfReal", "<TColStd_HArray1OfReal.hxx>"),
+    "TColStd_HArray1OfByte":           ("TColStd_HArray1OfByte", "<TColStd_HArray1OfByte.hxx>"),
+    "TColStd_HArray1OfInteger":        ("TColStd_HArray1OfInteger", "<TColStd_HArray1OfInteger.hxx>"),
+    "TColStd_HArray1OfAsciiString":    ("TColStd_HArray1OfAsciiString", "<TColStd_HArray1OfAsciiString.hxx>"),
+    "TColStd_HArray1OfBoolean":        ("TColStd_HArray1OfBoolean", "<TColStd_HArray1OfBoolean.hxx>"),
+    "TColStd_HArray1OfCharacter":      ("TColStd_HArray1OfCharacter", "<TColStd_HArray1OfCharacter.hxx>"),
+    "TColStd_HArray1OfExtendedString": ("TColStd_HArray1OfExtendedString", "<TColStd_HArray1OfExtendedString.hxx>"),
+    "TColStd_HArray1OfListOfInteger":  ("TColStd_HArray1OfListOfInteger", "<TColStd_HArray1OfListOfInteger.hxx>"),
+    "TColStd_HArray1OfTransient":      ("TColStd_HArray1OfTransient", "<TColStd_HArray1OfTransient.hxx>"),
+    # TColgp HArray types
+    "TColgp_HArray1OfPnt":            ("TColgp_HArray1OfPnt", "<TColgp_HArray1OfPnt.hxx>"),
+    "TColgp_HArray1OfPnt2d":          ("TColgp_HArray1OfPnt2d", "<TColgp_HArray1OfPnt2d.hxx>"),
+    "TColgp_HArray1OfVec":            ("TColgp_HArray1OfVec", "<TColgp_HArray1OfVec.hxx>"),
+    "TColgp_HArray1OfDir":            ("TColgp_HArray1OfDir", "<TColgp_HArray1OfDir.hxx>"),
+    "TColgp_HArray1OfDir2d":          ("TColgp_HArray1OfDir2d", "<TColgp_HArray1OfDir2d.hxx>"),
+    "TColgp_HArray1OfVec2d":          ("TColgp_HArray1OfVec2d", "<TColgp_HArray1OfVec2d.hxx>"),
+    "TColgp_HArray1OfXY":             ("TColgp_HArray1OfXY", "<TColgp_HArray1OfXY.hxx>"),
+    "TColgp_HArray1OfXYZ":            ("TColgp_HArray1OfXYZ", "<TColgp_HArray1OfXYZ.hxx>"),
+    "TColgp_HArray1OfCirc2d":         ("TColgp_HArray1OfCirc2d", "<TColgp_HArray1OfCirc2d.hxx>"),
+    "TColgp_HArray1OfLin2d":          ("TColgp_HArray1OfLin2d", "<TColgp_HArray1OfLin2d.hxx>"),
+    # TopTools HSequence types
+    "TopTools_HSequenceOfShape":      ("TopTools_HSequenceOfShape", "<TopTools_HSequenceOfShape.hxx>"),
+    # TColGeom HArray types
+    "TColGeom_HArray1OfCurve":        ("TColGeom_HArray1OfCurve", "<TColGeom_HArray1OfCurve.hxx>"),
+    "TColGeom2d_HArray1OfCurve":      ("TColGeom2d_HArray1OfCurve", "<TColGeom2d_HArray1OfCurve.hxx>"),
+    # More H types from other modules
+    "TColgp_HArray2OfPnt":            ("TColgp_HArray2OfPnt", "<TColgp_HArray2OfPnt.hxx>"),
+    "TColStd_HArray2OfReal":          ("TColStd_HArray2OfReal", "<TColStd_HArray2OfReal.hxx>"),
+}
+
 
 class TypeMap:
     """Builds and queries the type mapping for a set of classified classes."""
@@ -168,8 +206,12 @@ class TypeMap:
         # Collect standalone enum names
         for e in enums:
             self._enum_names.add(e.name)
-        # Register collection wrapper types
+        # Register collection wrapper types (VALUE types with _native)
         for occt_name in COLLECTION_TYPES:
+            wname = occt_name_to_wrapper(occt_name, "")
+            self._wrapper_names[occt_name] = wname
+        # Register handle collection types (REF_COUNTED types with _handle)
+        for occt_name in HANDLE_COLLECTION_TYPES:
             wname = occt_name_to_wrapper(occt_name, "")
             self._wrapper_names[occt_name] = wname
 
@@ -188,6 +230,14 @@ class TypeMap:
     def cpp_type_for_param(self, otype: OCCTType) -> str:
         """Get the C++ parameter type for the wrapper method signature."""
         base = otype.base_name
+
+        # Standard_OStream non-const ref → absorbed (no param in wrapper)
+        if base == "Standard_OStream" and otype.is_ref and not otype.is_const:
+            return ""
+
+        # Standard_IStream (any ref) → String (will be converted to istringstream in body)
+        if base == "Standard_IStream" and otype.is_ref:
+            return "String"
 
         # Non-const ref output params of primitives → Ref<OcgPrimitiveWrapper>
         if otype.is_ref and not otype.is_const and not otype.is_handle:

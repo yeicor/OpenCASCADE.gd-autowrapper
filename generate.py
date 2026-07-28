@@ -136,8 +136,8 @@ def main():
     # leaving methods referencing now-unwrapped types.
     # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
     from classify.skippable import mark_skippable_methods
-    from generate.type_map import COLLECTION_TYPES
-    updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys())
+    from generate.type_map import COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
+    updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
     updated_enum_names: set[str] = set()
     for e in all_enums:
         updated_enum_names.add(e.name)

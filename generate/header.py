@@ -7,6 +7,15 @@ from classify.overloads import get_method_unique_name
 from generate.type_map import TypeMap, _PRIMITIVE_WRAPPER_MAP, COLLECTION_TYPES
 
 
+def _method_ret_for_header(method: MethodDecl, type_map: TypeMap) -> str:
+    """Get the return type for the wrapper method declaration,
+    handling OStream (returns String) and standard types."""
+    for p in method.parameters:
+        if p.type.base_name == "Standard_OStream" and p.type.is_ref and not p.type.is_const:
+            return "String"
+    return type_map.cpp_type_for_return(method.return_type)
+
+
 def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     """Generate the .hpp header for a wrapper class."""
     lines = []
@@ -127,7 +136,7 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         has_methods = True
         unique = get_method_unique_name(method)
-        ret = type_map.cpp_type_for_return(method.return_type)
+        ret = _method_ret_for_header(method, type_map)
         params = _gen_param_list(method, type_map)
         const = " const" if method.is_const else ""
         lines.append("    {} {}({}){};".format(ret, unique, params, const))
@@ -142,7 +151,7 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         has_ops = True
         unique = get_method_unique_name(op)
-        ret = type_map.cpp_type_for_return(op.return_type)
+        ret = _method_ret_for_header(op, type_map)
         params = _gen_param_list(op, type_map)
         const = " const" if op.is_const else ""
         lines.append("    {} {}({}){};".format(ret, unique, params, const))
@@ -157,7 +166,7 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         has_static = True
         unique = get_method_unique_name(sm)
-        ret = type_map.cpp_type_for_return(sm.return_type)
+        ret = _method_ret_for_header(sm, type_map)
         params = _gen_param_list(sm, type_map)
         lines.append("    static {} {}({});".format(ret, unique, params))
 
@@ -183,6 +192,8 @@ def _gen_param_list(method: MethodDecl, type_map: TypeMap) -> str:
     parts = []
     for p in method.parameters:
         ctype = type_map.cpp_type_for_param(p.type)
+        if not ctype:
+            continue  # OStream or absorbed param
         name = p.name or "arg"
         parts.append("{} {}".format(ctype, name))
     return ", ".join(parts)

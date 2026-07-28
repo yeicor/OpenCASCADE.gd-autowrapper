@@ -11,7 +11,6 @@ from model import ClassDecl, MethodDecl, OCCTType
 
 # Types that cannot be wrapped across the FFI boundary
 UNWRAPPABLE_TYPES = {
-    "Standard_OStream", "Standard_IStream", "Standard_SStream",
     "Standard_ProgramAddress", "Standard_Address",
     "opencascade::signal_handler",
     "void*",
@@ -42,15 +41,18 @@ def _resolve_handle_inner(name: str) -> str:
 
 # Methods that should always be skipped
 SKIP_METHODS = {
-    "DumpJson", "InitFromJson",  # JSON streaming
+    "InitFromJson",  # JSON streaming
     "ShallowCopy", "ShallowDump",  # Internal OCCT
-    "Dump", "Destroy",  # Internal/debug methods
+    "Destroy",  # Internal/debug methods
     "operator new", "operator delete",
     "operator new[]", "operator delete[]",
     "DynamicType", "get_type_descriptor", "get_type_name",  # RTTI macros — libclang can't resolve return types
     "TransformShapeFU",  # OCCT packaging bug: symbol only exists in BRepFeat_Form, not MakeLinearForm
     "Transforms",  # System-only static method: exists in system headers but removed in vcpkg OCCT
 }
+
+
+STREAM_TYPES = {"Standard_OStream", "Standard_IStream", "Standard_SStream"}
 
 
 def check_type_wrappable(param_type: OCCTType, context: str,
@@ -66,6 +68,10 @@ def check_type_wrappable(param_type: OCCTType, context: str,
         return False
 
     base = param_type.base_name
+
+    # Stream types are wrappable with special handling (absorbed or mapped to String)
+    if base in STREAM_TYPES:
+        return True
 
     # Enum types are always wrappable (mapped to int32_t with static_cast)
     is_enum = (enum_names is not None and base in enum_names)

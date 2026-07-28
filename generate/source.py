@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind
 from classify.overloads import get_method_unique_name
-from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES
+from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
 
 
 def _null_check_for_refcounted(lines: list[str], ret_type: str) -> None:
@@ -77,8 +77,12 @@ def generate_collection_wrappers_header() -> str:
     These types are typedefs of NCollection templates and cannot be extracted
     by libclang's class cursor.  They're wrapped as opaque RefCounted value
     types: the OCCT native type is stored in _native.
+
+    Also generates handle-based wrappers for deprecated HSequence/HArray types
+    that inherit from Standard_Transient (stored in _handle).
     """
     from model import occt_name_to_wrapper
+    from generate.type_map import HANDLE_COLLECTION_TYPES
 
     lines = []
     lines.append("// Auto-generated opaque collection wrapper classes -- DO NOT EDIT")
@@ -96,12 +100,15 @@ def generate_collection_wrappers_header() -> str:
     lines.append("using namespace godot;")
     lines.append("")
 
-    # Group by include to avoid duplicate includes
+    # Include headers for value-type collections
     for occt_name, (cpp_type, include) in sorted(COLLECTION_TYPES.items()):
-        wname = occt_name_to_wrapper(occt_name, "")
+        lines.append("#include {}".format(include))
+    # Include headers for handle-type collections
+    for occt_name, (cpp_type, include) in sorted(HANDLE_COLLECTION_TYPES.items()):
         lines.append("#include {}".format(include))
     lines.append("")
 
+    # Generate value-type wrappers (_native storage)
     for occt_name, (cpp_type, include) in sorted(COLLECTION_TYPES.items()):
         wname = occt_name_to_wrapper(occt_name, "")
         lines.append("class {} : public RefCounted {{".format(wname))
@@ -109,6 +116,19 @@ def generate_collection_wrappers_header() -> str:
         lines.append("")
         lines.append("public:")
         lines.append("    {} _native;".format(cpp_type))
+        lines.append("")
+        lines.append("    {}() = default;".format(wname))
+        lines.append("};")
+        lines.append("")
+
+    # Generate handle-type wrappers (_handle storage)
+    for occt_name, (cpp_type, include) in sorted(HANDLE_COLLECTION_TYPES.items()):
+        wname = occt_name_to_wrapper(occt_name, "")
+        lines.append("class {} : public RefCounted {{".format(wname))
+        lines.append("    GDCLASS({}, RefCounted)".format(wname))
+        lines.append("")
+        lines.append("public:")
+        lines.append("    opencascade::handle<{}> _handle;".format(cpp_type))
         lines.append("")
         lines.append("    {}() = default;".format(wname))
         lines.append("};")
@@ -136,6 +156,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
 
     # Include headers for all referenced wrapper types (needed for _native access in impl)
     referenced = set()
+    needs_sstream = False
     for method in cls.all_wrappable_methods:
         if method.return_type and method.return_type.base_name in type_map._wrapper_names:
             if method.return_type.base_name != cname:
@@ -144,12 +165,17 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             if p.type.base_name in type_map._wrapper_names:
                 if p.type.base_name != cname:
                     referenced.add(p.type.base_name)
+            if p.type.base_name in ("Standard_OStream", "Standard_IStream"):
+                needs_sstream = True
     for ref in sorted(referenced):
         wname_ref = type_map.wrapper_name(ref)
         if wname_ref:
             lines.append('#include "{}.hpp"'.format(wname_ref))
 
     lines.append("")
+    if needs_sstream:
+        lines.append("#include <sstream>")
+        lines.append("")
     lines.append("#include <godot_cpp/core/error_macros.hpp>")
     lines.append("")
     lines.append("namespace godot {")
@@ -312,11 +338,24 @@ def _native_call_expr(target: str, arrow: str, method: MethodDecl, args: str) ->
     return "{}{}{}({})".format(target, arrow, name, args)
 
 
+def _has_ostream_param(method: MethodDecl) -> bool:
+    """Check if method has a Standard_OStream output parameter."""
+    return any(p.type.base_name == "Standard_OStream" for p in method.parameters)
+
+def _has_istream_param(method: MethodDecl) -> bool:
+    """Check if method has a Standard_IStream input parameter."""
+    return any(p.type.base_name == "Standard_IStream" for p in method.parameters)
+
+
 def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
     """Generate implementation for a regular method."""
     wname = cls.wrapper_name
     unique = get_method_unique_name(method)
     ret = type_map.cpp_type_for_return(method.return_type)
+    has_ostream = _has_ostream_param(method)
+    has_istream = _has_istream_param(method)
+    if has_ostream:
+        ret = "String"  # OStream output → return string contents
     params = _gen_param_list(method, type_map)
     const = " const" if method.is_const else ""
     args = _occt_args_for_call(method, type_map)
@@ -327,6 +366,13 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         _null_check_for_refcounted(lines, ret)
     elif cls.kind == ClassKind.BUILDER:
         _null_check_for_builder(lines, ret)
+
+    # Create stream variables
+    if has_ostream:
+        lines.append("    std::ostringstream ocg_os;")
+    if has_istream:
+        lines.append("    std::istringstream ocg_is({}.utf8().get_data());".format(
+            next(p.name for p in method.parameters if p.type.base_name == "Standard_IStream")))
 
     target = _value_type_target(cls)
     arrow = "->" if _needs_pointer_call(cls) else "."
@@ -346,7 +392,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
             ret_kind = type_map.class_kind(ret_base)
-            if ret_kind == ClassKind.REF_COUNTED:
+            if ret_kind == ClassKind.REF_COUNTED or ret_base in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
             else:
                 # VALUE/TOPODS_SHAPE: dereference handle into native storage
@@ -354,15 +400,23 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             lines.append("    return wrapper;")
         elif type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
-            # Any wrapped type return (value, toposhape, builder): create Ref<T> + _native
+            # Any wrapped type return (value, toposhape, builder): create Ref<T>
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            lines.append("    wrapper->_native = result;")
+            if ret_base in HANDLE_COLLECTION_TYPES:
+                lines.append("    wrapper->_handle = result;")
+            else:
+                lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
+        elif has_ostream:
+            lines.append("    {};".format(call))
+            lines.append("    return String(ocg_os.str().c_str());")
         else:
             lines.append("    return {};".format(call))
     else:
         lines.append("    {};".format(call))
+        if has_ostream:
+            lines.append("    return String(ocg_os.str().c_str());")
 
     lines.append("}")
     lines.append("")
@@ -373,6 +427,10 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
     wname = cls.wrapper_name
     unique = get_method_unique_name(method)
     ret = type_map.cpp_type_for_return(method.return_type)
+    has_ostream = _has_ostream_param(method)
+    has_istream = _has_istream_param(method)
+    if has_ostream:
+        ret = "String"
     params = _gen_param_list(method, type_map)
     const = " const" if method.is_const else ""
     args = _occt_args_for_call(method, type_map)
@@ -383,6 +441,12 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
         _null_check_for_refcounted(lines, ret)
     elif cls.kind == ClassKind.BUILDER:
         _null_check_for_builder(lines, ret)
+
+    if has_ostream:
+        lines.append("    std::ostringstream ocg_os;")
+    if has_istream:
+        lines.append("    std::istringstream ocg_is({}.utf8().get_data());".format(
+            next(p.name for p in method.parameters if p.type.base_name == "Standard_IStream")))
 
     target = _value_type_target(cls)
     arrow = "->" if _needs_pointer_call(cls) else "."
@@ -398,18 +462,29 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            lines.append("    wrapper->_handle = result;")
+            if ret_base in HANDLE_COLLECTION_TYPES:
+                lines.append("    wrapper->_handle = result;")
+            else:
+                lines.append("    wrapper->_handle = result;")
             lines.append("    return wrapper;")
         elif type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            lines.append("    wrapper->_native = result;")
+            if ret_base in HANDLE_COLLECTION_TYPES:
+                lines.append("    wrapper->_handle = result;")
+            else:
+                lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
+        elif has_ostream:
+            lines.append("    {};".format(call))
+            lines.append("    return String(ocg_os.str().c_str());")
         else:
             lines.append("    return {};".format(call))
     else:
         lines.append("    {};".format(call))
+        if has_ostream:
+            lines.append("    return String(ocg_os.str().c_str());")
 
     lines.append("}")
     lines.append("")
@@ -420,14 +495,25 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     wname = cls.wrapper_name
     unique = get_method_unique_name(method)
     ret = type_map.cpp_type_for_return(method.return_type)
+    has_ostream = _has_ostream_param(method)
+    has_istream = _has_istream_param(method)
+    if has_ostream:
+        ret = "String"
     params = _gen_param_list(method, type_map)
     args = _occt_args_for_call(method, type_map)
 
     lines.append("{} {}::{}({}) {{".format(ret, wname, unique, params))
 
+    if has_ostream:
+        lines.append("    std::ostringstream ocg_os;")
+    if has_istream:
+        lines.append("    std::istringstream ocg_is({}.utf8().get_data());".format(
+            next(p.name for p in method.parameters if p.type.base_name == "Standard_IStream")))
+
+    static_call = "::{}::{}({})".format(cls.name, method.name, args)
+
     if method.return_type and not method.return_type.is_void:
         ret_base = method.return_type.base_name
-        static_call = "::{}::{}({})".format(cls.name, method.name, args)
         if method.return_type.is_pointer and ret_base in ("char", "Standard_CString"):
             lines.append("    return String({});".format(static_call))
         elif type_map._is_enum(ret_base):
@@ -436,18 +522,31 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(static_call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            lines.append("    wrapper->_handle = result;")
+            if ret_base in HANDLE_COLLECTION_TYPES:
+                lines.append("    wrapper->_handle = result;")
+            else:
+                lines.append("    wrapper->_handle = result;")
             lines.append("    return wrapper;")
         elif type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(static_call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            lines.append("    wrapper->_native = result;")
+            if ret_base in HANDLE_COLLECTION_TYPES:
+                lines.append("    wrapper->_handle = result;")
+            else:
+                lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
+        elif has_ostream:
+            lines.append("    {};".format(static_call))
+            lines.append("    return String(ocg_os.str().c_str());")
         else:
             lines.append("    return {};".format(static_call))
     else:
-        lines.append("    {}::{}({});".format(cls.name, method.name, args))
+        if has_ostream:
+            lines.append("    {};".format(static_call))
+            lines.append("    return String(ocg_os.str().c_str());")
+        else:
+            lines.append("    {}::{}({});".format(cls.name, method.name, args))
 
     lines.append("}")
     lines.append("")
@@ -458,6 +557,14 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap) -> str:
     parts = []
     for p in method.parameters:
         base = p.type.base_name
+        # Standard_OStream → local ostringstream
+        if base == "Standard_OStream" and p.type.is_ref:
+            parts.append("ocg_os")
+            continue
+        # Standard_IStream → local istringstream
+        if base == "Standard_IStream" and p.type.is_ref:
+            parts.append("ocg_is")
+            continue
         if p.type.is_handle:
             # Handle params need ._handle (ref-counted wrapper) not ._native
             if type_map.is_wrapped(base):
@@ -470,7 +577,7 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap) -> str:
             # Non-const ref output params: pass mutable reference to wrapper's internal storage
             if type_map.is_wrapped(base):
                 # Wrapped class: pass ref->_native (VALUE) or *ref->_handle.get() (REF_COUNTED)
-                if type_map.is_refcounted(base):
+                if type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:
                     parts.append("*{}->_handle.get()".format(p.name))
                 else:
                     parts.append("{}->_native".format(p.name))
@@ -481,7 +588,8 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap) -> str:
                 parts.append(p.name)
         elif type_map.is_wrapped(base):
             # REF_COUNTED classes always use _handle (even when passed as non-handle ref/value)
-            if type_map.is_refcounted(base):
+            # HANDLE_COLLECTION_TYPES also use _handle
+            if type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:
                 # For non-handle params, dereference the handle to get the object reference
                 if p.type.is_ref:
                     parts.append("*{}->_handle.get()".format(p.name))
@@ -512,6 +620,8 @@ def _gen_param_list(method: MethodDecl, type_map: TypeMap) -> str:
     parts = []
     for p in method.parameters:
         ctype = type_map.cpp_type_for_param(p.type)
+        if not ctype:
+            continue  # OStream or absorbed param
         name = p.name or "arg"
         parts.append("{} {}".format(ctype, name))
     return ", ".join(parts)
@@ -524,5 +634,7 @@ def _gen_bind_params(method: MethodDecl, unique_name: str) -> str:
     """
     parts = ['"{}"'.format(unique_name)]
     for p in method.parameters:
+        if p.type.base_name == "Standard_OStream":
+            continue  # OStream is not exposed to GDScript
         parts.append('"{}"'.format(p.name))
     return ", ".join(parts)
