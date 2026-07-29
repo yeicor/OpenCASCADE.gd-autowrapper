@@ -7,7 +7,7 @@ from pathlib import Path
 from clang.cindex import Cursor, CursorKind, AccessSpecifier
 
 from model import ClassDecl, ClassKind, OCCTType
-from occast.type_utils import get_direct_bases, is_transient_descendant, make_occt_type
+from occast.type_utils import get_direct_bases, is_failure_descendant, is_transient_descendant, make_occt_type
 from occast.methods import extract_methods
 from occast.fields import extract_fields
 from occast.enums import extract_nested_enums
@@ -67,19 +67,34 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
     if "HArray" in name or "HSequence" in name:
         return None
 
+    # Skip template classes (CursorKind.CLASS_TEMPLATE) — they can't be wrapped
+    # without concrete template arguments. Check both the cursor kind and whether
+    # it has TEMPLATE_TYPE_PARAMETER children (primary templates may appear as
+    # CLASS_DECL with template parameter children).
+    if cursor.kind == CursorKind.CLASS_TEMPLATE:
+        print(f"  SKIPPING template class '{name}' (CursorKind.CLASS_TEMPLATE)", file=__import__('sys').stderr)
+        return None
+    for child in cursor.get_children():
+        if child.kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
+            print(f"  SKIPPING template class '{name}' (has TEMPLATE_TYPE_PARAMETER children)", file=__import__('sys').stderr)
+            return None
+
     # Check for protected/private destructor or constructors — can't wrap
+    # pywrap-inspired rule: only PUBLIC access is wrappable. INVALID means
+    # libclang could not determine access (e.g. namespace-level entity, or
+    # misconfiguration) — treat as non-public to be safe.
     has_protected_dtor = False
     has_protected_ctor = False
     has_pure_virtual = False
     has_public_default_ctor = False
     for child in cursor.get_children():
         if child.kind == CursorKind.DESTRUCTOR:
-            if child.access_specifier in (AccessSpecifier.PRIVATE, AccessSpecifier.PROTECTED):
+            if child.access_specifier != AccessSpecifier.PUBLIC:
                 has_protected_dtor = True
         if child.kind == CursorKind.CONSTRUCTOR:
-            if child.access_specifier in (AccessSpecifier.PRIVATE, AccessSpecifier.PROTECTED):
+            if child.access_specifier != AccessSpecifier.PUBLIC:
                 has_protected_ctor = True
-            elif child.access_specifier in (AccessSpecifier.PUBLIC, AccessSpecifier.INVALID):
+            else:
                 if len([p for p in child.get_children() if p.kind == CursorKind.PARM_DECL]) == 0:
                     has_public_default_ctor = True
         if child.kind == CursorKind.CXX_METHOD and child.is_pure_virtual_method():
@@ -147,6 +162,13 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
     if transient:
         known_transient.add(name)
 
+    # Skip OCCT exception classes (Standard_Failure descendants).
+    # System OCCT has them inherit from Standard_Transient, but vcpkg
+    # has them inherit from std::exception, making handle<T> invalid.
+    if is_failure_descendant(cursor):
+        print(f"  SKIPPING exception class '{name}' (Standard_Failure descendant)", file=__import__('sys').stderr)
+        return None
+
     # Extract methods
     constructors, methods, operators, static_methods = extract_methods(cursor, known_transient)
 
@@ -178,6 +200,7 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
         header_file=header_file,
         doc=doc,
         has_public_default_ctor=has_public_default_ctor,
+        has_pure_virtual=has_pure_virtual,
     )
 
     return cls

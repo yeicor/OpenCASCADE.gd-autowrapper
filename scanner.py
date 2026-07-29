@@ -265,6 +265,10 @@ def scan_all_modules(
                     cls.transitive_occt_includes = result["transitive_includes"]
                     # Avoid duplicates
                     if not any(c.name == cls.name for c in mod.classes):
+                        from classify.skippable import SKIP_CLASSES
+                        if cls.name in SKIP_CLASSES:
+                            print(f"  SKIPPING class '{cls.name}' — in SKIP_CLASSES", file=sys.stderr)
+                            continue
                         mod.classes.append(cls)
 
                 for enum in result["enums"]:
@@ -387,13 +391,14 @@ def _find_occt_include(occt_include_dir: str | None = None) -> Path:
         if p.exists():
             return p
 
-    # Prefer system OCCT headers for parsing — the vcpkg version uses a newer
-    # Standard_Handle.hxx whose handle<T> template libclang can't resolve.
-    # System headers use an older but fully compatible handle implementation.
+    # Use vcpkg OCCT headers for parsing — system headers differ in exception
+    # class hierarchy (inheriting Standard_Transient vs std::exception), causing
+    # REF_COUNTED/class-kind mismatches with actual compilation.
+    vcpkg_occt = Path.home() / "Projects" / "OpenCASCADE.gd" / "vcpkg" / "installed" / "x64-linux" / "include" / "opencascade"
     candidates = [
+        vcpkg_occt,
         Path("/usr/include/opencascade"),
         Path("/usr/local/include/opencascade"),
-        Path.home() / "Projects" / "OpenCASCADE.gd" / "vcpkg" / "installed" / "x64-linux" / "include" / "opencascade",
     ]
     for c in candidates:
         if c.exists() and (c / "gp_Pnt.hxx").exists():

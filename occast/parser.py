@@ -81,28 +81,11 @@ class ClangParser:
                 continue
             filtered.append(arg)
 
-        # Replace vcpkg OCCT include path with system path for parsing.
-        # The vcpkg Standard_Handle.hxx has a newer handle<T> template
-        # that libclang can't resolve. System OCCT works correctly.
-        result = []
-        skip_next = False
-        vcpkg_occt = str(Path.home() / "Projects" / "OpenCASCADE.gd" / "vcpkg"
-                         / "installed" / "x64-linux" / "include" / "opencascade")
-        system_occt = "/usr/include/opencascade"
-        for i, arg in enumerate(filtered):
-            if skip_next:
-                skip_next = False
-                if arg == vcpkg_occt and os.path.isdir(system_occt):
-                    result.append(system_occt)
-                    continue
-            if arg in ('-I', '-isystem') and i + 1 < len(filtered):
-                skip_next = True
-                if filtered[i + 1] == vcpkg_occt and os.path.isdir(system_occt):
-                    result.append(arg)
-                    continue
-            result.append(arg)
-
-        return result
+        # Use vcpkg OCCT include path directly (no system header substitution).
+        # Vcpkg and system OCCT differ in exception class hierarchy (std::exception
+        # vs Standard_Transient), so we must parse with the same headers used for
+        # compilation to avoid REF_COUNTED/class-kind mismatches.
+        return filtered
 
     def _fallback_args(self) -> list[str]:
         """Fallback compiler flags if compilation database is unavailable."""

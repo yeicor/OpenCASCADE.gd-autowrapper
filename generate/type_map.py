@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from model import ClassDecl, ClassKind, EnumDecl, OCCTType, occt_name_to_wrapper
 from classify.skippable import _resolve_handle_inner
 
@@ -73,130 +75,124 @@ PRIMITIVE_WRAPPER_CPP_TYPE = {
     "OcgStandardULongInteger": "uint64_t",
 }
 
-# Collection wrapper types: OCCT typedef'd NCollection instantiations that can't
-# be extracted as standalone classes.  Maps OCCT name → (OCCT C++ type, include).
-# These are opaque VALUE types wrapped in RefCounted for godot-cpp.
-COLLECTION_TYPES: dict[str, tuple[str, str]] = {
-    # Lists (NCollection_List<T>)
-    "TopTools_ListOfShape":          ("NCollection_List<TopoDS_Shape>",          "<TopTools_ListOfShape.hxx>"),
-    "TColStd_ListOfInteger":         ("NCollection_List<Standard_Integer>",      "<TColStd_ListOfInteger.hxx>"),
-    "TColStd_ListOfAsciiString":     ("NCollection_List<TCollection_AsciiString>","<TColStd_ListOfAsciiString.hxx>"),
-    "TColStd_ListOfReal":            ("NCollection_List<Standard_Real>",         "<TColStd_ListOfReal.hxx>"),
-    "TColStd_ListOfTransient":       ("NCollection_List<opencascade::handle<Standard_Transient>>", "<TColStd_ListOfTransient.hxx>"),
-    # Sequences (NCollection_Sequence<T>)
-    "TDF_LabelSequence":             ("NCollection_Sequence<TDF_Label>",         "<TDF_LabelSequence.hxx>"),
-    "TopTools_SequenceOfShape":      ("NCollection_Sequence<TopoDS_Shape>",      "<TopTools_SequenceOfShape.hxx>"),
-    "TColStd_SequenceOfHAsciiString":("NCollection_Sequence<opencascade::handle<TCollection_HAsciiString>>", "<TColStd_SequenceOfHAsciiString.hxx>"),
-    "TColStd_SequenceOfExtendedString": ("NCollection_Sequence<TCollection_ExtendedString>", "<TColStd_SequenceOfExtendedString.hxx>"),
-    "TColStd_SequenceOfHExtendedString":("NCollection_Sequence<opencascade::handle<TCollection_HExtendedString>>", "<TColStd_SequenceOfHExtendedString.hxx>"),
-    "TColgp_SequenceOfPnt":          ("NCollection_Sequence<gp_Pnt>",            "<TColgp_SequenceOfPnt.hxx>"),
-    # Array1 (NCollection_Array1<T>)
-    "TColgp_Array1OfPnt":            ("NCollection_Array1<gp_Pnt>",              "<TColgp_Array1OfPnt.hxx>"),
-    "TColgp_Array1OfPnt2d":          ("NCollection_Array1<gp_Pnt2d>",            "<TColgp_Array1OfPnt2d.hxx>"),
-    "TColgp_Array1OfVec":            ("NCollection_Array1<gp_Vec>",              "<TColgp_Array1OfVec.hxx>"),
-    "TColStd_Array1OfReal":          ("NCollection_Array1<Standard_Real>",       "<TColStd_Array1OfReal.hxx>"),
-    "TColStd_Array1OfInteger":       ("NCollection_Array1<Standard_Integer>",    "<TColStd_Array1OfInteger.hxx>"),
-    # Array2 (NCollection_Array2<T>)
-    "TColgp_Array2OfPnt":            ("NCollection_Array2<gp_Pnt>",              "<TColgp_Array2OfPnt.hxx>"),
-    "TColStd_Array2OfReal":          ("NCollection_Array2<Standard_Real>",       "<TColStd_Array2OfReal.hxx>"),
-    # DataMaps (NCollection_DataMap<K,V>)
-    "TopTools_DataMapOfShapeListOfShape": ("NCollection_DataMap<TopoDS_Shape,TopTools_ListOfShape,TopTools_ShapeMapHasher>", "<TopTools_DataMapOfShapeListOfShape.hxx>"),
-    "TopTools_DataMapOfShapeShape":  ("NCollection_DataMap<TopoDS_Shape,TopoDS_Shape,TopTools_ShapeMapHasher>", "<TopTools_DataMapOfShapeShape.hxx>"),
-    "TopTools_DataMapOfShapeBox":    ("NCollection_DataMap<TopoDS_Shape,Bnd_Box,TopTools_ShapeMapHasher>", "<TopTools_DataMapOfShapeBox.hxx>"),
-    "TColStd_DataMapOfStringInteger":("NCollection_DataMap<TCollection_AsciiString,Standard_Integer,TCollection_AsciiString::StringMapHasher>", "<TColStd_DataMapOfStringInteger.hxx>"),
-    "TDataStd_DataMapOfStringString":("NCollection_DataMap<TCollection_AsciiString,TCollection_AsciiString,TCollection_AsciiString::StringMapHasher>", "<TDataStd_DataMapOfStringString.hxx>"),
-    "TDataStd_DataMapOfStringReal":  ("NCollection_DataMap<TCollection_AsciiString,Standard_Real,TCollection_AsciiString::StringMapHasher>", "<TDataStd_DataMapOfStringReal.hxx>"),
-    "TDataStd_DataMapOfStringByte":  ("NCollection_DataMap<TCollection_AsciiString,Standard_Byte,TCollection_AsciiString::StringMapHasher>", "<TDataStd_DataMapOfStringByte.hxx>"),
-    # Maps
-    "TopTools_IndexedMapOfShape":     ("NCollection_IndexedMap<TopoDS_Shape,TopTools_ShapeMapHasher>", "<TopTools_IndexedMapOfShape.hxx>"),
-    "TopTools_IndexedDataMapOfShapeReal": ("NCollection_IndexedDataMap<TopoDS_Shape,Standard_Real,TopTools_ShapeMapHasher>", "<TopTools_IndexedDataMapOfShapeReal.hxx>"),
-    "TopTools_MapOfShape":           ("NCollection_Map<TopoDS_Shape,TopTools_ShapeMapHasher>", "<TopTools_MapOfShape.hxx>"),
-    "TDF_LabelMap":                  ("NCollection_Map<TDF_Label>",              "<TDF_LabelMap.hxx>"),
-    "TDF_LabelIndexedMap":           ("NCollection_IndexedMap<TDF_Label>",       "<TDF_LabelIndexedMap.hxx>"),
-    "IMeshData::MapOfInteger":       ("NCollection_Map<int>",                    "<IMeshData_MapOfInteger.hxx>"),
-    # TDF sequences/lists/arrays
-    "TDF_DeltaList":                 ("NCollection_Sequence<opencascade::handle<TDF_Delta>>", "<TDF_DeltaList.hxx>"),
-    "TDF_AttributeArray1":           ("NCollection_Array1<opencascade::handle<TDF_Attribute>>", "<TDF_AttributeArray1.hxx>"),
-    "TDF_AttributeDeltaList":        ("NCollection_Sequence<opencascade::handle<TDF_AttributeDelta>>", "<TDF_AttributeDeltaList.hxx>"),
-    "TDF_LabelList":                 ("NCollection_Sequence<TDF_Label>",         "<TDF_LabelList.hxx>"),
-    # More collection types from other modules
-    "AIS_ListOfInteractive":         ("NCollection_List<opencascade::handle<AIS_InteractiveObject>>", "<AIS_ListOfInteractive.hxx>"),
-    "TDF_AttributeMap":              ("NCollection_Map<opencascade::handle<TDF_Attribute>>", "<TDF_AttributeMap.hxx>"),
-    "Graphic3d_MapOfStructure":      ("NCollection_Map<opencascade::handle<Graphic3d_Structure>>", "<Graphic3d_MapOfStructure.hxx>"),
-    "TColGeom_SequenceOfCurve":      ("NCollection_Sequence<opencascade::handle<Geom_Curve>>", "<TColGeom_SequenceOfCurve.hxx>"),
-    "TColStd_SequenceOfAsciiString": ("NCollection_Sequence<TCollection_AsciiString>", "<TColStd_SequenceOfAsciiString.hxx>"),
-    "TColStd_IndexedDataMapOfStringString": ("NCollection_IndexedDataMap<TCollection_AsciiString,TCollection_AsciiString,TCollection_AsciiString::StringMapHasher>", "<TColStd_IndexedDataMapOfStringString.hxx>"),
-    "IntRes2d_SequenceOfIntersectionPoint": ("NCollection_Sequence<IntRes2d_IntersectionPoint>", "<IntRes2d_SequenceOfIntersectionPoint.hxx>"),
-    "SelectMgr_SequenceOfOwner":     ("NCollection_Sequence<opencascade::handle<SelectMgr_EntityOwner>>", "<SelectMgr_SequenceOfOwner.hxx>"),
-    "V3d_ListOfLight":               ("NCollection_List<opencascade::handle<V3d_Light>>", "<V3d_ListOfLight.hxx>"),
-    "Poly_ListOfTriangulation":      ("NCollection_List<opencascade::handle<Poly_Triangulation>>", "<Poly_ListOfTriangulation.hxx>"),
-    "Poly_Array1OfTriangle":         ("NCollection_Array1<Poly_Triangle>", "<Poly_Array1OfTriangle.hxx>"),
-    "Message_ListOfAlert":           ("NCollection_List<opencascade::handle<Message_Alert>>", "<Message_ListOfAlert.hxx>"),
-    "Message_SequenceOfPrinters":    ("NCollection_Sequence<opencascade::handle<Message_Printer>>", "<Message_SequenceOfPrinters.hxx>"),
-    "BRepCheck_ListOfStatus":        ("NCollection_List<TopAbs_ShapeEnum>", "<BRepCheck_ListOfStatus.hxx>"),
-    "PrsMgr_ListOfPresentableObjects": ("NCollection_List<opencascade::handle<PrsMgr_PresentableObject>>", "<PrsMgr_ListOfPresentableObjects.hxx>"),
-    "Graphic3d_SequenceOfGroup":     ("NCollection_Sequence<opencascade::handle<Graphic3d_Group>>", "<Graphic3d_SequenceOfGroup.hxx>"),
-    "Aspect_SequenceOfColor":        ("NCollection_Sequence<Quantity_Color>", "<Aspect_SequenceOfColor.hxx>"),
-    "TDataStd_LabelArray1":          ("NCollection_Array1<TDF_Label>", "<TDataStd_LabelArray1.hxx>"),
-    "TDataStd_ListOfExtendedString": ("NCollection_List<TCollection_ExtendedString>", "<TDataStd_ListOfExtendedString.hxx>"),
-    "TDataStd_ListOfByte":           ("NCollection_List<Standard_Byte>", "<TDataStd_ListOfByte.hxx>"),
-    "TDocStd_SequenceOfApplicationDelta": ("NCollection_Sequence<opencascade::handle<TDocStd_ApplicationDelta>>", "<TDocStd_SequenceOfApplicationDelta.hxx>"),
-    "TDocStd_SequenceOfDocument":    ("NCollection_Sequence<opencascade::handle<TDocStd_Document>>", "<TDocStd_SequenceOfDocument.hxx>"),
-    "AIS_NArray1OfEntityOwner":      ("NCollection_Array1<opencascade::handle<SelectMgr_EntityOwner>>", "<AIS_NArray1OfEntityOwner.hxx>"),
-    "AIS_DataMapOfShapeDrawer":      ("NCollection_DataMap<TopoDS_Shape,opencascade::handle<AIS_ShapeDrawer>,TopTools_ShapeMapHasher>", "<AIS_DataMapOfShapeDrawer.hxx>"),
-    "SelectMgr_MapOfOwners":         ("NCollection_Map<opencascade::handle<SelectMgr_EntityOwner>>", "<SelectMgr_MapOfOwners.hxx>"),
-    "SelectMgr_IndexedMapOfHSensitive": ("NCollection_IndexedMap<opencascade::handle<SelectMgr_BaseEntity>,SelectMgr_EntityOwner::HashCode >", "<SelectMgr_IndexedMapOfHSensitive.hxx>"),
+# Collection wrapper types: auto-discovered from method signatures.
+# These are OCCT NCollection template typedef aliases that can't be
+# extracted as standalone classes by libclang.
+# Maps OCCT name → (OCCT C++ type, include header).
+# These are opaque VALUE types with _native storage.
+COLLECTION_TYPES: dict[str, tuple[str, str]] = {}
+
+# Handle wrapper types: auto-discovered from method signatures.
+# These are Standard_Transient subclasses (handle types with _handle storage)
+# from modules not in our MODULES list.
+# Maps OCCT name → (class name for handle, include header).
+HANDLE_COLLECTION_TYPES: dict[str, tuple[str, str]] = {}
+
+
+# Additional value types from unscanned OCCT modules that are NOT NCollection
+# template aliases and NOT handle types, but ARE default-constructible value types
+# that can be wrapped. These are rare and stable across OCCT versions.
+VALUE_TYPE_OVERRIDES: dict[str, tuple[str, str]] = {
+    "Interface_CheckIterator": ("Interface_CheckIterator", "<Interface_CheckIterator.hxx>"),
 }
 
-# Deprecated HSequence/HArray handle types (Standard_Transient subclasses wrapping NCollection).
-# Unlike COLLECTION_TYPES (value types with _native), these are handle types with _handle storage.
-# Maps OCCT name → (handle C++ type, include header).
-HANDLE_COLLECTION_TYPES: dict[str, tuple[str, str]] = {
-    # TColStd HSequence/HArray types
-    "TColStd_HSequenceOfTransient":    ("TColStd_HSequenceOfTransient", "<TColStd_HSequenceOfTransient.hxx>"),
-    "TColStd_HSequenceOfReal":         ("TColStd_HSequenceOfReal", "<TColStd_HSequenceOfReal.hxx>"),
-    "TColStd_HSequenceOfInteger":      ("TColStd_HSequenceOfInteger", "<TColStd_HSequenceOfInteger.hxx>"),
-    "TColStd_HArray1OfReal":           ("TColStd_HArray1OfReal", "<TColStd_HArray1OfReal.hxx>"),
-    "TColStd_HArray1OfByte":           ("TColStd_HArray1OfByte", "<TColStd_HArray1OfByte.hxx>"),
-    "TColStd_HArray1OfInteger":        ("TColStd_HArray1OfInteger", "<TColStd_HArray1OfInteger.hxx>"),
-    "TColStd_HArray1OfAsciiString":    ("TColStd_HArray1OfAsciiString", "<TColStd_HArray1OfAsciiString.hxx>"),
-    "TColStd_HArray1OfBoolean":        ("TColStd_HArray1OfBoolean", "<TColStd_HArray1OfBoolean.hxx>"),
-    "TColStd_HArray1OfCharacter":      ("TColStd_HArray1OfCharacter", "<TColStd_HArray1OfCharacter.hxx>"),
-    "TColStd_HArray1OfExtendedString": ("TColStd_HArray1OfExtendedString", "<TColStd_HArray1OfExtendedString.hxx>"),
-    "TColStd_HArray1OfListOfInteger":  ("TColStd_HArray1OfListOfInteger", "<TColStd_HArray1OfListOfInteger.hxx>"),
-    "TColStd_HArray1OfTransient":      ("TColStd_HArray1OfTransient", "<TColStd_HArray1OfTransient.hxx>"),
-    # TColgp HArray types
-    "TColgp_HArray1OfPnt":            ("TColgp_HArray1OfPnt", "<TColgp_HArray1OfPnt.hxx>"),
-    "TColgp_HArray1OfPnt2d":          ("TColgp_HArray1OfPnt2d", "<TColgp_HArray1OfPnt2d.hxx>"),
-    "TColgp_HArray1OfVec":            ("TColgp_HArray1OfVec", "<TColgp_HArray1OfVec.hxx>"),
-    "TColgp_HArray1OfDir":            ("TColgp_HArray1OfDir", "<TColgp_HArray1OfDir.hxx>"),
-    "TColgp_HArray1OfDir2d":          ("TColgp_HArray1OfDir2d", "<TColgp_HArray1OfDir2d.hxx>"),
-    "TColgp_HArray1OfVec2d":          ("TColgp_HArray1OfVec2d", "<TColgp_HArray1OfVec2d.hxx>"),
-    "TColgp_HArray1OfXY":             ("TColgp_HArray1OfXY", "<TColgp_HArray1OfXY.hxx>"),
-    "TColgp_HArray1OfXYZ":            ("TColgp_HArray1OfXYZ", "<TColgp_HArray1OfXYZ.hxx>"),
-    "TColgp_HArray1OfCirc2d":         ("TColgp_HArray1OfCirc2d", "<TColgp_HArray1OfCirc2d.hxx>"),
-    "TColgp_HArray1OfLin2d":          ("TColgp_HArray1OfLin2d", "<TColgp_HArray1OfLin2d.hxx>"),
-    # TopTools HSequence types
-    "TopTools_HSequenceOfShape":      ("TopTools_HSequenceOfShape", "<TopTools_HSequenceOfShape.hxx>"),
-    # TColGeom HArray types
-    "TColGeom_HArray1OfCurve":        ("TColGeom_HArray1OfCurve", "<TColGeom_HArray1OfCurve.hxx>"),
-    "TColGeom2d_HArray1OfCurve":      ("TColGeom2d_HArray1OfCurve", "<TColGeom2d_HArray1OfCurve.hxx>"),
-    # More H types from other modules
-    "TColgp_HArray2OfPnt":            ("TColgp_HArray2OfPnt", "<TColgp_HArray2OfPnt.hxx>"),
-    "TColStd_HArray2OfReal":          ("TColStd_HArray2OfReal", "<TColStd_HArray2OfReal.hxx>"),
-}
+
+def discover_type_aliases(classes: list[ClassDecl]) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, str]]]:
+    """Auto-discover NCollection template aliases, unscanned handle types, and
+    value types from method parameter/return type signatures.
+
+    Uses canonical_spelling (fully desugared libclang type) to detect:
+      - NCollection template aliases (e.g. TopTools_ListOfShape → NCollection_List<TopoDS_Shape>)
+      - Handle types from unscanned modules (e.g. opencascade::handle<Interface_InterfaceModel>)
+
+    Returns (collection_types, handle_types) dicts with same format as COLLECTION_TYPES
+    and HANDLE_COLLECTION_TYPES module-level vars.
+    """
+    scanned_names = {c.name for c in classes}
+    collection = {}
+    handle = {}
+    occt_inc_dir = _vcpkg_occt_dir()
+
+    def _clean_canonical(raw: str) -> str:
+        s = raw.replace("const ", "").replace("&", "").replace("*", "").strip()
+        return s
+
+    def _try_add_ncollection(base_name: str, canonical: str) -> None:
+        if base_name in scanned_names or base_name in collection:
+            return
+        if base_name in PRIMITIVE_MAP:
+            return
+        clean = _clean_canonical(canonical)
+        if "<" not in clean or ">" not in clean:
+            return
+        if "NCollection_" not in clean:
+            return
+        # Skip explicitly unwrappable types (Graphic3d_Vec2, etc.)
+        from classify.skippable import UNWRAPPABLE_TYPES
+        if base_name in UNWRAPPABLE_TYPES:
+            return
+        hdr_path = occt_inc_dir / f"{base_name}.hxx"
+        if not hdr_path.exists():
+            return
+        collection[base_name] = (clean, f"<{base_name}.hxx>")
+
+    def _try_add_handle(inner: str) -> None:
+        if inner in scanned_names or inner in handle:
+            return
+        hdr_path = occt_inc_dir / f"{inner}.hxx"
+        if not hdr_path.exists():
+            return
+        handle[inner] = (inner, f"<{inner}.hxx>")
+
+    for cls in classes:
+        for method in cls.all_methods:
+            ret = method.return_type
+            if ret:
+                if ret.is_handle:
+                    _try_add_handle(ret.handle_inner)
+                elif (not ret.is_pointer
+                      and ret.base_name not in PRIMITIVE_MAP
+                      and ret.base_name not in scanned_names
+                      and ret.canonical_spelling != ret.base_name):
+                    _try_add_ncollection(ret.base_name, ret.canonical_spelling)
+            for param in method.parameters:
+                pt = param.type
+                if pt.is_handle:
+                    _try_add_handle(pt.handle_inner)
+                elif (not pt.is_pointer
+                      and pt.base_name not in PRIMITIVE_MAP
+                      and pt.base_name not in scanned_names
+                      and pt.canonical_spelling != pt.base_name):
+                    _try_add_ncollection(pt.base_name, pt.canonical_spelling)
+
+    # Merge VALUE_TYPE_OVERRIDES (non-NCollection value types from unscanned modules)
+    for name, val in VALUE_TYPE_OVERRIDES.items():
+        if name not in scanned_names and name not in collection and name not in handle:
+            hdr_path = occt_inc_dir / f"{name}.hxx"
+            if hdr_path.exists():
+                collection[name] = val
+
+    return collection, handle
+
+
+def _vcpkg_occt_dir() -> Path:
+    """Get the vcpkg OCCT include directory."""
+    return (Path(__file__).resolve().parent.parent.parent
+            / "vcpkg" / "installed" / "x64-linux" / "include" / "opencascade")
 
 
 class TypeMap:
     """Builds and queries the type mapping for a set of classified classes."""
 
-    def __init__(self, classes: list[ClassDecl], enums: list[EnumDecl] | None = None):
+    def __init__(self, classes: list[ClassDecl], enums: list[EnumDecl] | None = None,
+                 extra_enum_names: set[str] | None = None):
         self._wrapper_names: dict[str, str] = {}  # OCCT name -> wrapper name
         self._classes: dict[str, ClassDecl] = {}  # OCCT name -> ClassDecl
         self._enum_names: set[str] = set()        # known enum type names
-        self._build(classes, enums or [])
+        self._build(classes, enums or [], extra_enum_names or set())
 
-    def _build(self, classes: list[ClassDecl], enums: list[EnumDecl]):
+    def _build(self, classes: list[ClassDecl], enums: list[EnumDecl],
+               extra_enum_names: set[str] = set()):
         for cls in classes:
             self._classes[cls.name] = cls
             self._wrapper_names[cls.name] = cls.wrapper_name
@@ -206,6 +202,9 @@ class TypeMap:
         # Collect standalone enum names
         for e in enums:
             self._enum_names.add(e.name)
+        # Add non-scanned enum names (from modules not in our MODULES list, or nested
+        # enums from scanned modules that libclang couldn't resolve)
+        self._enum_names |= extra_enum_names
         # Register collection wrapper types (VALUE types with _native)
         for occt_name in COLLECTION_TYPES:
             wname = occt_name_to_wrapper(occt_name, "")
@@ -227,12 +226,16 @@ class TypeMap:
     def is_wrapped(self, occt_name: str) -> bool:
         return occt_name in self._wrapper_names
 
+    def has_public_default_ctor(self, occt_name: str) -> bool:
+        cls = self._classes.get(occt_name)
+        return cls.has_public_default_ctor if cls else True
+
     def cpp_type_for_param(self, otype: OCCTType) -> str:
         """Get the C++ parameter type for the wrapper method signature."""
         base = otype.base_name
 
-        # Standard_OStream non-const ref → absorbed (no param in wrapper)
-        if base == "Standard_OStream" and otype.is_ref and not otype.is_const:
+        # Standard_OStream → absorbed (no param in wrapper)
+        if base == "Standard_OStream":
             return ""
 
         # Standard_IStream (any ref) → String (will be converted to istringstream in body)
@@ -324,6 +327,8 @@ class TypeMap:
             if self.is_value_type(base):
                 return "Ref<{}>".format(wname)
             # Non-value wrapped types (handles, etc.)
+            if self.is_refcounted(base) and otype.is_ref and not otype.is_const:
+                return "Ref<{}>".format(wname)
             if otype.is_ref and otype.is_const:
                 return "const {}&".format(wname)
             if otype.is_ref:
@@ -413,3 +418,16 @@ class TypeMap:
     def _is_enum(self, base_name: str) -> bool:
         """Check if a type name is an enum."""
         return base_name in self._enum_names
+
+    def qualified_enum_name(self, base_name: str, cls_name: str | None = None) -> str:
+        """Return the fully-qualified enum name for use in static_cast.
+
+        If base_name is already qualified (contains '::'), return as-is.
+        Otherwise try prepending cls_name:: to form a qualified name.
+        Only qualifies when the qualified name is verified in _enum_names.
+        """
+        if "::" in base_name:
+            return base_name
+        if cls_name and f"{cls_name}::{base_name}" in self._enum_names:
+            return f"{cls_name}::{base_name}"
+        return base_name

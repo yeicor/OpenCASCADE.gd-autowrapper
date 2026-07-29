@@ -75,6 +75,7 @@ class OCCTType:
     """Represents an OCCT C++ type with full qualification info."""
     spelling: str                   # Raw clang spelling (e.g. "const gp_Pnt &")
     base_name: str                  # Clean base name (e.g. "gp_Pnt")
+    canonical_spelling: str = ""    # libclang canonical type (fully desugared)
     is_const: bool = False
     is_ref: bool = False            # &
     is_pointer: bool = False        # *
@@ -185,6 +186,7 @@ class ClassDecl:
     header_file: str = ""
     doc: DocBlock = field(default_factory=DocBlock)
     has_public_default_ctor: bool = False
+    has_pure_virtual: bool = False
     transitive_occt_includes: list[str] = field(default_factory=list)  # OCCT headers transitively included by this header
 
     @property

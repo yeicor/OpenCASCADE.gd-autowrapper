@@ -99,12 +99,6 @@ def main():
         f.write(generate_primitive_wrappers_header())
     print(f"  Generated OcgPrimitiveWrappers.hpp")
 
-    # Generate collection wrapper classes header
-    coll_path = output_dir / "OcgCollectionWrappers.hpp"
-    with open(coll_path, 'w') as f:
-        f.write(generate_collection_wrappers_header())
-    print(f"  Generated OcgCollectionWrappers.hpp")
-
     # Build type map from all modules
     all_classes = [cls for m in modules for cls in m.classes]
     all_enums = [e for m in modules for e in m.enums]
@@ -130,30 +124,39 @@ def main():
                 m.classes = [c for c in m.classes if c in all_classes]
             total_classes = len(all_classes)
 
-    type_map = TypeMap(all_classes, all_enums)
+    # Discover NCollection typedef aliases, unscanned handle types, and value
+    # types from method signatures. These are opaque wrappers that bridge
+    # NCollection containers and unscanned-module types across the FFI.
+    from generate.type_map import discover_type_aliases, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
+    discovered_coll, discovered_handle = discover_type_aliases(all_classes)
+    COLLECTION_TYPES.update(discovered_coll)
+    HANDLE_COLLECTION_TYPES.update(discovered_handle)
+    if discovered_coll or discovered_handle:
+        print(f"  Discovered {len(discovered_coll)} collection types, {len(discovered_handle)} handle types")
 
-    # Re-run skippable marking after vcpkg filtering — some types may have been removed,
-    # leaving methods referencing now-unwrapped types.
-    # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
-    from classify.skippable import mark_skippable_methods
-    from generate.type_map import COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
-    updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
-    updated_enum_names: set[str] = set()
+    # Generate collection wrapper classes header (after type discovery)
+    coll_path = output_dir / "OcgCollectionWrappers.hpp"
+    with open(coll_path, 'w') as f:
+        f.write(generate_collection_wrappers_header())
+    print(f"  Generated OcgCollectionWrappers.hpp")
+
+    # Build complete enum name set (scanned + non-scanned) for type mapping
+    all_enum_names: set[str] = set()
     for e in all_enums:
-        updated_enum_names.add(e.name)
+        all_enum_names.add(e.name)
         if e.is_nested and e.parent_class:
-            updated_enum_names.add(f"{e.parent_class}::{e.name}")
+            all_enum_names.add(f"{e.parent_class}::{e.name}")
     # Non-scanned enum types from OCCT modules not in our MODULES list.
     # These are plain C enums or scoped enums that can be passed as int32_t.
-    NON_SCANNED_ENUMS = {
+    NON_SCANNED_ENUMS: set[str] = {
         # Extrema
         "Extrema_ExtAlgo", "Extrema_ExtFlag",
         # IFSelect
-        "IFSelect_ReturnStatus", "IFSelect_PrintFail",
+        "IFSelect_ReturnStatus", "IFSelect_PrintFail", "IFSelect_PrintCount",
         # Font
         "Font_FontAspect",
         # Aspect (non-scanned nested enums)
-        "Aspect_VKey", "Aspect_FBConfig", "Aspect_HatchStyle",
+        "Aspect_VKey", "Aspect_HatchStyle",
         "Aspect_GraphicsLibrary",
         # PCDM
         "PCDM_StoreStatus", "PCDM_ReaderStatus",
@@ -182,9 +185,9 @@ def main():
         # BRepMesh
         "BRepMesh_GeomTool::IntFlag",
         # XSAlgo
-        "XSAlgo_ShapeProcessor::ProcessingFlags",
+        # "XSAlgo_ShapeProcessor::ProcessingFlags",  # Not an enum (std::pair)
         # ShapeProcess
-        "ShapeProcess::OperationsFlags",
+        # "ShapeProcess::OperationsFlags",  # Not an enum (std::bitset)
         # LocOpe
         "LocOpe_Operation",
         # XCAFPrs
@@ -193,28 +196,32 @@ def main():
         "XCAFDoc_AssemblyGraph::NodeType",
         # FS
         "FS_VARStatuses",
-        # BehaviorOnTransform
-        "BehaviorOnTransform",
-        # AVRational
-        "AVRational",
+        # BehaviorOnTransform (nested in AIS_Manipulator — use qualified name for C++ static_cast)
+        "AIS_Manipulator::BehaviorOnTransform",
         # CullingContext
         "CullingContext",
-        # PeriodicityParams
-        "PeriodicityParams",
+
         # StdSelect
         "StdSelect_TypeOfSelectionImage",
         "AIS_SelectionScheme",
         # Graphic3d
-        "Graphic3d_ValidatedCubeMapOrder",
     }
-    updated_enum_names |= NON_SCANNED_ENUMS
+    all_enum_names |= NON_SCANNED_ENUMS
+
+    type_map = TypeMap(all_classes, all_enums, extra_enum_names=all_enum_names)
+
+    # Re-run skippable marking after vcpkg filtering — some types may have been removed,
+    # leaving methods referencing now-unwrapped types.
+    # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
+    from classify.skippable import mark_skippable_methods
+    updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
     # Reset skip flags and re-run marking with complete type info
     for mod in modules:
         for cls in mod.classes:
             for m in cls.all_methods:
                 m.skip = False
                 m.skip_reason = ""
-            mark_skippable_methods(cls, updated_wrapped_names, updated_enum_names)
+            mark_skippable_methods(cls, updated_wrapped_names, all_enum_names)
 
     files_generated = 0
     for mod in modules:

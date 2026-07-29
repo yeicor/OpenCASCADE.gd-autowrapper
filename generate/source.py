@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
-from model import ClassDecl, ClassKind, MethodDecl, MethodKind
+from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl
 from classify.overloads import get_method_unique_name
 from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
+
+
+def _has_string_member(cls: ClassDecl) -> bool:
+    return any(m.name == "String" for m in cls.methods)
+
+
+def _qstr(cls: ClassDecl | None, t: str) -> str:
+    """Qualify 'String' as '::godot::String' if the class hides it."""
+    if cls is not None and _has_string_member(cls) and t == "String":
+        return "::godot::String"
+    return t
 
 
 def _null_check_for_refcounted(lines: list[str], ret_type: str) -> None:
@@ -21,6 +32,14 @@ def _null_check_for_builder(lines: list[str], ret_type: str) -> None:
         lines.append("    ERR_FAIL_NULL(_builder);")
     else:
         lines.append("    ERR_FAIL_NULL_V(_builder, {}());".format(ret_type))
+
+
+def _null_check_for_native_ptr(lines: list[str], ret_type: str) -> None:
+    """Generate a null check for `_native` when stored as unique_ptr."""
+    if ret_type == "void":
+        lines.append("    ERR_FAIL_NULL(_native);")
+    else:
+        lines.append("    ERR_FAIL_NULL_V(_native, {}());".format(ret_type))
 
 
 def generate_primitive_wrappers_header() -> str:
@@ -82,7 +101,7 @@ def generate_collection_wrappers_header() -> str:
     that inherit from Standard_Transient (stored in _handle).
     """
     from model import occt_name_to_wrapper
-    from generate.type_map import HANDLE_COLLECTION_TYPES
+    from generate.type_map import COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
 
     lines = []
     lines.append("// Auto-generated opaque collection wrapper classes -- DO NOT EDIT")
@@ -154,17 +173,33 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     lines.append("#endif")
     lines.append("")
 
-    # Include headers for all referenced wrapper types (needed for _native access in impl)
+    # Include headers for all referenced wrapper types (needed for _native access in impl).
+    # Collection and handle collection types live in OcgCollectionWrappers.hpp (included via .hpp),
+    # so skip individual includes for those. However, if a COLLECTION_OR_HANDLE type resolves
+    # to a real scanned class via HANDLE_ALIASES (e.g. Prs3d_Presentation → Graphic3d_Structure),
+    # we must include that real class's header too, because the generated code uses the resolved name.
+    from generate.type_map import COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
+    from classify.skippable import _resolve_handle_inner
+    COLLECTION_OR_HANDLE = set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
     referenced = set()
     needs_sstream = False
     for method in cls.all_wrappable_methods:
         if method.return_type and method.return_type.base_name in type_map._wrapper_names:
-            if method.return_type.base_name != cname:
+            if method.return_type.base_name != cname and method.return_type.base_name not in COLLECTION_OR_HANDLE:
                 referenced.add(method.return_type.base_name)
+            elif method.return_type.base_name in COLLECTION_OR_HANDLE:
+                resolved = _resolve_handle_inner(method.return_type.base_name)
+                if resolved != method.return_type.base_name and resolved in type_map._wrapper_names:
+                    referenced.add(resolved)
         for p in method.parameters:
             if p.type.base_name in type_map._wrapper_names:
-                if p.type.base_name != cname:
+                if p.type.base_name != cname and p.type.base_name not in COLLECTION_OR_HANDLE:
                     referenced.add(p.type.base_name)
+            # For collection/handle types that alias a real scanned class, include the real class header
+            if p.type.base_name in COLLECTION_OR_HANDLE:
+                resolved = _resolve_handle_inner(p.type.base_name)
+                if resolved != p.type.base_name and resolved in type_map._wrapper_names:
+                    referenced.add(resolved)
             if p.type.base_name in ("Standard_OStream", "Standard_IStream"):
                 needs_sstream = True
     for ref in sorted(referenced):
@@ -244,7 +279,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
         else:
             lines.append("    // No default constructor — _builder is null; use factory methods")
     elif cls.kind == ClassKind.REF_COUNTED:
-        if has_default_ctor:
+        if has_default_ctor and not cls.has_pure_virtual:
             lines.append("    _handle = new ::{}();".format(cname))
         else:
             lines.append("    // No default constructor — _handle is null; use factory methods")
@@ -268,23 +303,29 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     for ctor in cls.constructors:
         if ctor.skip or len(ctor.parameters) == 0:
             continue
+        if cls.has_pure_virtual:
+            continue  # Abstract class: skip factory methods (can't instantiate)
+
         unique = get_method_unique_name(ctor)
-        params = _gen_param_list(ctor, type_map)
-        args = _occt_args_for_call(ctor, type_map)
+        params = _gen_param_list(ctor, type_map, cls=cls)
+        args = _occt_args_for_call(ctor, type_map, cname)
 
         lines.append("Ref<{}> {}::{}({}) {{".format(wname, wname, unique, params))
         lines.append("    Ref<{}> ref; ref.instantiate();".format(wname))
 
         if cls.kind == ClassKind.BUILDER:
-            lines.append("    ref->_builder = std::make_unique<{}>({});".format(cname, args))
+            lines.append("    ref->_builder = std::make_unique<::{}>({});".format(cname, args))
             lines.append("    ref->_builder->Build();")
             lines.append("    ref->_result = ref->_builder->Shape();")
         elif cls.kind == ClassKind.REF_COUNTED:
             # Use :: prefix to avoid name collision with static factory method of same name
             lines.append("    ref->_handle = new ::{}({});".format(cname, args))
-        else:
+        elif cls.has_public_default_ctor:
             # Placement new avoids copy assignment (some OCCT classes delete operator=)
             lines.append("    new (&ref->_native) ::{}({});".format(cname, args))
+        else:
+            # No default constructor: use smart pointer
+            lines.append("    ref->_native = std::make_unique<::{}>({});".format(cname, args))
 
         lines.append("    return ref;")
         lines.append("}")
@@ -326,7 +367,11 @@ def _value_type_target(cls: ClassDecl) -> str:
 
 def _needs_pointer_call(cls: ClassDecl) -> bool:
     """Check if method calls need -> (pointer) vs . (direct)."""
-    return cls.kind in (ClassKind.BUILDER, ClassKind.REF_COUNTED)
+    if cls.kind in (ClassKind.BUILDER, ClassKind.REF_COUNTED):
+        return True
+    if not cls.has_public_default_ctor:
+        return True  # unique_ptr storage needs ->
+    return False
 
 
 def _native_call_expr(target: str, arrow: str, method: MethodDecl, args: str) -> str:
@@ -349,16 +394,18 @@ def _has_istream_param(method: MethodDecl) -> bool:
 
 def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
     """Generate implementation for a regular method."""
+    from classify.skippable import _resolve_handle_inner
     wname = cls.wrapper_name
     unique = get_method_unique_name(method)
     ret = type_map.cpp_type_for_return(method.return_type)
     has_ostream = _has_ostream_param(method)
     has_istream = _has_istream_param(method)
-    if has_ostream:
-        ret = "String"  # OStream output → return string contents
-    params = _gen_param_list(method, type_map)
+    if has_ostream and (method.return_type is None or method.return_type.is_void):
+        ret = "String"
+    ret = _qstr(cls, ret)
+    params = _gen_param_list(method, type_map, cls=cls)
     const = " const" if method.is_const else ""
-    args = _occt_args_for_call(method, type_map)
+    args = _occt_args_for_call(method, type_map, cls.name)
 
     lines.append("{} {}::{}({}){} {{".format(ret, wname, unique, params, const))
 
@@ -366,6 +413,8 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         _null_check_for_refcounted(lines, ret)
     elif cls.kind == ClassKind.BUILDER:
         _null_check_for_builder(lines, ret)
+    elif not cls.has_public_default_ctor:
+        _null_check_for_native_ptr(lines, ret)
 
     # Create stream variables
     if has_ostream:
@@ -380,10 +429,14 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
 
     # Generate call
     if method.return_type and not method.return_type.is_void:
-        ret_base = method.return_type.base_name
+        ret_base_orig = method.return_type.base_name
+        # Resolve handle aliases (e.g. Prs3d_Presentation → Graphic3d_Structure)
+        ret_base = ret_base_orig
+        if method.return_type.is_handle and ret_base in HANDLE_COLLECTION_TYPES:
+            ret_base = _resolve_handle_inner(ret_base)
         # const char* / Standard_CString return → wrap in String()
-        if method.return_type.is_pointer and ret_base in ("char", "Standard_CString"):
-            lines.append("    return String({});".format(call))
+        if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
+            lines.append("    return ::godot::String({});".format(call))
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
@@ -392,7 +445,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
             ret_kind = type_map.class_kind(ret_base)
-            if ret_kind == ClassKind.REF_COUNTED or ret_base in HANDLE_COLLECTION_TYPES:
+            if ret_kind == ClassKind.REF_COUNTED or ret_base_orig in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
             else:
                 # VALUE/TOPODS_SHAPE: dereference handle into native storage
@@ -400,23 +453,26 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             lines.append("    return wrapper;")
         elif type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
-            # Any wrapped type return (value, toposhape, builder): create Ref<T>
-            lines.append("    auto result = {};".format(call))
+            ref = "&" if method.return_type.is_ref and not method.return_type.is_const else ""
+            lines.append("    auto{} result = {};".format(ref, call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            if ret_base in HANDLE_COLLECTION_TYPES:
+            if ret_base_orig in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
+            elif type_map.is_refcounted(ret_base):
+                lines.append("    wrapper->_handle = opencascade::handle<::{}>(&result);".format(ret_base))
+            elif not type_map.has_public_default_ctor(ret_base):
+                lines.append("    wrapper->_native = std::make_unique<::{}>(result);".format(ret_base))
             else:
                 lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
         elif has_ostream:
-            lines.append("    {};".format(call))
-            lines.append("    return String(ocg_os.str().c_str());")
+            lines.append("    return {};".format(call))
         else:
             lines.append("    return {};".format(call))
     else:
         lines.append("    {};".format(call))
         if has_ostream:
-            lines.append("    return String(ocg_os.str().c_str());")
+            lines.append("    return ::godot::String(ocg_os.str().c_str());")
 
     lines.append("}")
     lines.append("")
@@ -424,16 +480,18 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
 
 def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
     """Generate implementation for an operator method."""
+    from classify.skippable import _resolve_handle_inner
     wname = cls.wrapper_name
     unique = get_method_unique_name(method)
     ret = type_map.cpp_type_for_return(method.return_type)
     has_ostream = _has_ostream_param(method)
     has_istream = _has_istream_param(method)
-    if has_ostream:
+    if has_ostream and (method.return_type is None or method.return_type.is_void):
         ret = "String"
-    params = _gen_param_list(method, type_map)
+    ret = _qstr(cls, ret)
+    params = _gen_param_list(method, type_map, cls=cls)
     const = " const" if method.is_const else ""
-    args = _occt_args_for_call(method, type_map)
+    args = _occt_args_for_call(method, type_map, cls.name)
 
     lines.append("{} {}::{}({}){} {{".format(ret, wname, unique, params, const))
 
@@ -441,6 +499,8 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
         _null_check_for_refcounted(lines, ret)
     elif cls.kind == ClassKind.BUILDER:
         _null_check_for_builder(lines, ret)
+    elif not cls.has_public_default_ctor:
+        _null_check_for_native_ptr(lines, ret)
 
     if has_ostream:
         lines.append("    std::ostringstream ocg_os;")
@@ -453,16 +513,17 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
     call = _native_call_expr(target, arrow, method, args)
 
     if method.return_type and not method.return_type.is_void:
-        ret_base = method.return_type.base_name
-        if method.return_type.is_pointer and ret_base in ("char", "Standard_CString"):
-            lines.append("    return String({});".format(call))
+        ret_base_orig = method.return_type.base_name
+        ret_base = _resolve_handle_inner(ret_base_orig) if ret_base_orig in HANDLE_COLLECTION_TYPES else ret_base_orig
+        if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
+            lines.append("    return ::godot::String({});".format(call))
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            if ret_base in HANDLE_COLLECTION_TYPES:
+            if ret_base_orig in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
             else:
                 lines.append("    wrapper->_handle = result;")
@@ -471,20 +532,21 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            if ret_base in HANDLE_COLLECTION_TYPES:
+            if ret_base_orig in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
+            elif not type_map.has_public_default_ctor(ret_base):
+                lines.append("    wrapper->_native = std::make_unique<::{}>(result);".format(ret_base))
             else:
                 lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
         elif has_ostream:
-            lines.append("    {};".format(call))
-            lines.append("    return String(ocg_os.str().c_str());")
+            lines.append("    return {};".format(call))
         else:
             lines.append("    return {};".format(call))
     else:
         lines.append("    {};".format(call))
         if has_ostream:
-            lines.append("    return String(ocg_os.str().c_str());")
+            lines.append("    return ::godot::String(ocg_os.str().c_str());")
 
     lines.append("}")
     lines.append("")
@@ -492,15 +554,17 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
 
 def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
     """Generate implementation for a static method."""
+    from classify.skippable import _resolve_handle_inner
     wname = cls.wrapper_name
     unique = get_method_unique_name(method)
     ret = type_map.cpp_type_for_return(method.return_type)
     has_ostream = _has_ostream_param(method)
     has_istream = _has_istream_param(method)
-    if has_ostream:
+    if has_ostream and (method.return_type is None or method.return_type.is_void):
         ret = "String"
-    params = _gen_param_list(method, type_map)
-    args = _occt_args_for_call(method, type_map)
+    ret = _qstr(cls, ret)
+    params = _gen_param_list(method, type_map, cls=cls)
+    args = _occt_args_for_call(method, type_map, cls.name)
 
     lines.append("{} {}::{}({}) {{".format(ret, wname, unique, params))
 
@@ -513,16 +577,17 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     static_call = "::{}::{}({})".format(cls.name, method.name, args)
 
     if method.return_type and not method.return_type.is_void:
-        ret_base = method.return_type.base_name
-        if method.return_type.is_pointer and ret_base in ("char", "Standard_CString"):
-            lines.append("    return String({});".format(static_call))
+        ret_base_orig = method.return_type.base_name
+        ret_base = _resolve_handle_inner(ret_base_orig) if ret_base_orig in HANDLE_COLLECTION_TYPES else ret_base_orig
+        if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
+            lines.append("    return ::godot::String({});".format(static_call))
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, static_call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(static_call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            if ret_base in HANDLE_COLLECTION_TYPES:
+            if ret_base_orig in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
             else:
                 lines.append("    wrapper->_handle = result;")
@@ -531,20 +596,23 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(static_call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            if ret_base in HANDLE_COLLECTION_TYPES:
+            if ret_base_orig in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
+            elif type_map.is_refcounted(ret_base):
+                lines.append("    wrapper->_handle = opencascade::handle<::{}>(result);".format(ret_base))
+            elif not type_map.has_public_default_ctor(ret_base):
+                lines.append("    wrapper->_native = std::make_unique<::{}>(result);".format(ret_base))
             else:
                 lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
         elif has_ostream:
-            lines.append("    {};".format(static_call))
-            lines.append("    return String(ocg_os.str().c_str());")
+            lines.append("    return {};".format(static_call))
         else:
             lines.append("    return {};".format(static_call))
     else:
         if has_ostream:
             lines.append("    {};".format(static_call))
-            lines.append("    return String(ocg_os.str().c_str());")
+            lines.append("    return ::godot::String(ocg_os.str().c_str());")
         else:
             lines.append("    {}::{}({});".format(cls.name, method.name, args))
 
@@ -552,17 +620,20 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     lines.append("")
 
 
-def _occt_args_for_call(method: MethodDecl, type_map: TypeMap) -> str:
+def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "") -> str:
     """Build argument list that extracts ._native from wrapped parameters (via Ref<T> ->)."""
     parts = []
     for p in method.parameters:
         base = p.type.base_name
         # Standard_OStream → local ostringstream
-        if base == "Standard_OStream" and p.type.is_ref:
-            parts.append("ocg_os")
+        if base == "Standard_OStream":
+            if p.type.is_ref:
+                parts.append("ocg_os")
+            else:
+                parts.append("&ocg_os")
             continue
         # Standard_IStream → local istringstream
-        if base == "Standard_IStream" and p.type.is_ref:
+        if base == "Standard_IStream":
             parts.append("ocg_is")
             continue
         if p.type.is_handle:
@@ -576,9 +647,12 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap) -> str:
         elif p.type.is_ref and not p.type.is_const and not p.type.is_handle:
             # Non-const ref output params: pass mutable reference to wrapper's internal storage
             if type_map.is_wrapped(base):
-                # Wrapped class: pass ref->_native (VALUE) or *ref->_handle.get() (REF_COUNTED)
-                if type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:
+                if type_map.class_kind(base) == ClassKind.BUILDER:
+                    parts.append("*{}->_builder.get()".format(p.name))
+                elif type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:
                     parts.append("*{}->_handle.get()".format(p.name))
+                elif not type_map.has_public_default_ctor(base):
+                    parts.append("*{}->_native".format(p.name))
                 else:
                     parts.append("{}->_native".format(p.name))
             elif base in _PRIMITIVE_WRAPPER_MAP:
@@ -587,10 +661,11 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap) -> str:
             else:
                 parts.append(p.name)
         elif type_map.is_wrapped(base):
-            # REF_COUNTED classes always use _handle (even when passed as non-handle ref/value)
-            # HANDLE_COLLECTION_TYPES also use _handle
-            if type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:
-                # For non-handle params, dereference the handle to get the object reference
+            # BUILDER classes use _builder, not _native
+            if type_map.class_kind(base) == ClassKind.BUILDER:
+                parts.append("{}->_builder.get()".format(p.name))
+            elif type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:
+                # REF_COUNTED classes always use _handle
                 if p.type.is_ref:
                     parts.append("*{}->_handle.get()".format(p.name))
                 elif p.type.is_pointer:
@@ -598,9 +673,14 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap) -> str:
                 else:
                     parts.append("*{}->_handle.get()".format(p.name))
             else:
-                parts.append("{}->_native".format(p.name))
+                # VALUE/TOPODS_SHAPE: _native may be T or std::unique_ptr<T>
+                if not type_map.has_public_default_ctor(base) and p.type.is_ref:
+                    parts.append("*{}->_native".format(p.name))
+                else:
+                    parts.append("{}->_native".format(p.name))
         elif type_map._is_enum(base):
-            parts.append("static_cast<{}>({})".format(base, p.name))
+            enum_qualified = type_map.qualified_enum_name(base, cls_name)
+            parts.append("static_cast<{}>({})".format(enum_qualified, p.name))
         elif base == "Standard_CString":
             # godot String -> const char* for OCCT
             parts.append("{}.utf8().get_data()".format(p.name))
@@ -615,7 +695,7 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap) -> str:
     return ", ".join(parts)
 
 
-def _gen_param_list(method: MethodDecl, type_map: TypeMap) -> str:
+def _gen_param_list(method: MethodDecl, type_map: TypeMap, *, cls: ClassDecl | None = None) -> str:
     """Generate C++ parameter list for the method signature."""
     parts = []
     for p in method.parameters:
@@ -623,7 +703,7 @@ def _gen_param_list(method: MethodDecl, type_map: TypeMap) -> str:
         if not ctype:
             continue  # OStream or absorbed param
         name = p.name or "arg"
-        parts.append("{} {}".format(ctype, name))
+        parts.append("{} {}".format(_qstr(cls, ctype), name))
     return ", ".join(parts)
 
 

@@ -20,8 +20,24 @@ UNWRAPPABLE_TYPES = {
     "BOPAlgo_PaveFiller",
     # SelectBasics types
     "SelectBasics_PickResult",
+    # Platform-specific GLX frame buffer config (pointer type)
+    "Aspect_FBConfig",
     # IMeshData handle types (internal)
     "IMeshData::IEdgeHandle", "IMeshData::IFaceHandle",
+    # BVH tree template types (BVH_Tree<double, 3> etc.) — scanner misidentifies return type
+    "BVH_Tree",
+    # NCollection_DefaultHasher — template class; libclang resolves it incorrectly
+    "NCollection_DefaultHasher",
+    # ValidatedCubeMapOrder — restricted class with private ctor; not constructible from GDScript
+    "Graphic3d_ValidatedCubeMapOrder",
+    # ShapeProcess types that libclang resolves to int32_t but are actually std::bitset/std::pair
+    "ShapeProcess::OperationsFlags",
+    "XSAlgo_ShapeProcessor::ProcessingFlags",
+    # AVRational from FFmpeg — struct available only as forward declaration (incomplete type)
+    "AVRational",
+    # Standard_SStream — no special absorption in type_map (unlike Standard_OStream/Standard_IStream);
+    # methods using it as param or return can't pass through godot-cpp FFI.
+    "Standard_SStream",
 }
 
 # Handle inner type aliases: typedef'd handle names → the real wrapper class name.
@@ -39,20 +55,49 @@ def _resolve_handle_inner(name: str) -> str:
     """Resolve handle inner type aliases to their real wrapper class names."""
     return HANDLE_ALIASES.get(name, name)
 
+# Classes that should never be wrapped (e.g. protected inheritance issues)
+SKIP_CLASSES = {
+    "Message_LazyProgressScope",  # protected inheritance from Message_ProgressScope makes operator new inaccessible to unique_ptr
+    "Standard_Failure",  # root of OCCT exception hierarchy — skipped explicitly
+    # Template struct — can't be wrapped without concrete template arguments.
+    # libclang doesn't report it as CLASS_TEMPLATE in this environment.
+    "NCollection_DefaultHasher",
+    # System-vcpkg interface mismatches: libclang parses system headers with
+    # different signatures than vcpkg headers used for actual compilation.
+    "TCollection_AsciiString",
+    "TCollection_ExtendedString",
+    "TCollection_HExtendedString",
+    "TColStd_PackedMapOfInteger",
+    "TDataStd_HLabelArray1",
+    "TDF_HAttributeArray1",
+}
+
 # Methods that should always be skipped
 SKIP_METHODS = {
     "InitFromJson",  # JSON streaming
     "ShallowCopy", "ShallowDump",  # Internal OCCT
     "Destroy",  # Internal/debug methods
+    "Dump",  # Debug dump (may be detected incorrectly by libclang)
+    "Statistics",  # May be confused with Dump by libclang
+    "BVH",  # Returns BVH_Tree<double, 3> handle that scanner misidentifies as int32_t
     "operator new", "operator delete",
     "operator new[]", "operator delete[]",
     "DynamicType", "get_type_descriptor", "get_type_name",  # RTTI macros — libclang can't resolve return types
     "TransformShapeFU",  # OCCT packaging bug: symbol only exists in BRepFeat_Form, not MakeLinearForm
     "Transforms",  # System-only static method: exists in system headers but removed in vcpkg OCCT
+    "Reset",  # Returns Type& on abstract REF_COUNTED classes — chaining not useful in GDScript
+    "GetImage",  # Usually protected or internal; GetImage(const handle<>&) is driver-internal
+    "GetStream",  # Returns Standard_OStream& — not useful across FFI
+    "createNewEntity",  # Protected virtual method (AccessSpecifier.INVALID detected as public)
+    "DumpExtent",  # Returns Standard_OStream& — unboundable return type
+    "GetPoints",  # AIS_PointCloud: returns handle<Graphic3d_ArrayOfPoints> — libclang mis-resolves to int32_t
+    "PerformCommonBlocks",  # BOPAlgo_Tools: libclang can't resolve overloaded template types → wrong param count
+    "EntitySetBuilder",  # SelectMgr_ViewerSelector: returns handle<BVH_Builder<...>> — libclang mis-resolves to int32_t
+    "SetAllContext",  # XSControl_WorkSession: param XSControl_WorkSessionMap (templated) mis-resolved to int32_t
 }
 
 
-STREAM_TYPES = {"Standard_OStream", "Standard_IStream", "Standard_SStream"}
+STREAM_TYPES = {"Standard_OStream", "Standard_IStream"}
 
 
 def check_type_wrappable(param_type: OCCTType, context: str,

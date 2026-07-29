@@ -32,6 +32,7 @@ SKIP_METHODS = {
     "operator=", "operator[]",  # subscript can't be named as method
     "ShallowCopy", "ShallowDump",
     "operator<<", "operator>>",  # stream I/O — not representable in GDScript
+    "ObjectIterator",  # returns Iterator typedef that libclang resolves to int
 }
 
 # Operators that can't be wrapped (not representable in GDScript)
@@ -103,7 +104,7 @@ def extract_methods(cursor: Cursor, known_transient: set[str]) -> tuple[
             name = child.spelling
             if name in SKIP_METHODS:
                 continue
-            if child.access_specifier in (AccessSpecifier.PRIVATE, AccessSpecifier.PROTECTED):
+            if child.access_specifier != AccessSpecifier.PUBLIC:
                 continue
 
             method = _extract_method(child, known_transient)
@@ -159,6 +160,19 @@ def _extract_constructor(cursor: Cursor, known_transient: set[str]) -> MethodDec
         except (OSError, IndexError):
             pass
 
+    # Skip deleted constructors (e.g. copy/move `= delete`)
+    try:
+        src_file = cursor.location.file.name
+        if src_file:
+            start_line = cursor.extent.start.line - 1
+            end_line = cursor.extent.end.line
+            src_lines = open(src_file).read().split('\n')
+            src_text = ''.join(src_lines[start_line:end_line]).replace(' ', '')
+            if '=delete' in src_text:
+                return None
+    except (OSError, IndexError):
+        pass
+
     return MethodDecl(
         name=cursor.spelling,
         parameters=params,
@@ -175,39 +189,48 @@ def _extract_method(cursor: Cursor, known_transient: set[str]) -> MethodDecl | N
     doc = extract_doc(cursor)
 
     # Detect libclang template resolution failures: the source declaration may contain
-    # template types (e.g. NCollection_IndexedMap<...>) or qualified typedefs
-    # (e.g. XSAlgo_ShapeProcessor::ParameterMap) that libclang resolves to simple
-    # primitives like 'const int &'. Compare the source line with the resolved type.
+    # template types (e.g. NCollection_IndexedMap<...>) that libclang resolves to simple
+    # primitives like 'int'. Compare the source line with the resolved type.
     # Check both return type AND parameters.
+    primitive_resolved = {"int", "unsigned int",
+                          "const int", "const int &", "int &", "int &&",
+                          "bool", "const bool &", "double", "const double &"}
     if "<" not in return_type.spelling:
         all_resolved = [return_type.spelling] + [p.type.spelling for p in params]
         if not any("<" in r for r in all_resolved):
-            try:
-                src_file = cursor.location.file.name
-                if src_file:
-                    # Read the full method declaration (may span multiple lines)
-                    start_line = cursor.extent.start.line - 1
-                    end_line = cursor.extent.end.line
-                    src_lines = open(src_file).read().split('\n')
-                    src_text = '\n'.join(src_lines[start_line:end_line])
-                    if '<' in src_text:
-                        # Template brackets in source but not in resolved types — failure
-                        return None
-                    # Also detect qualified typedefs (e.g. X::Y) resolving to primitives.
-                    # If source has a :: in a return/param position but resolved type is
-                    # int/bool/double, it's a failed resolution.
-                    primitive_resolved = {"int", "const int &", "int &", "int &&",
-                                          "bool", "const bool &", "double", "const double &"}
-                    if any(r in primitive_resolved for r in all_resolved):
-                        # Check if source has :: qualified names in type positions
-                        if "::" in src_text:
-                            # Extract type portion before each param name
-                            import re
-                            # Look for TypeName::Something patterns before variable names
-                            if re.search(r'\w+::\w+', src_text):
-                                return None
-            except (OSError, IndexError):
-                pass
+            # Check canonical type: if it resolves to a primitive but the
+            # original spelling is different, libclang may have failed.
+            canon_resolved = return_type.canonical_spelling in primitive_resolved
+            spell_resolved = any(r in primitive_resolved for r in all_resolved)
+            if canon_resolved or spell_resolved:
+                try:
+                    src_file = cursor.location.file.name
+                    if src_file:
+                        start_line = cursor.extent.start.line - 1
+                        end_line = cursor.extent.end.line
+                        src_lines = open(src_file).read().split('\n')
+                        src_text = '\n'.join(src_lines[start_line:end_line])
+                        if '<' in src_text or '::' in src_text:
+                            return None
+                        # Macro-defined methods (e.g. DEFINE_DERIVED_ATTRIBUTE):
+                        # libclang can't resolve their return types from macro expansions.
+                        if not src_text.strip().startswith(('virtual', 'Standard_EXPORT', 'static', 'inline')):
+                            return None
+                except (OSError, IndexError):
+                    pass
+
+    # Skip deleted methods (`= delete`)
+    try:
+        src_file = cursor.location.file.name
+        if src_file:
+            start_line = cursor.extent.start.line - 1
+            end_line = cursor.extent.end.line
+            src_lines = open(src_file).read().split('\n')
+            src_text = ''.join(src_lines[start_line:end_line]).replace(' ', '')
+            if '=delete' in src_text:
+                return None
+    except (OSError, IndexError):
+        pass
 
     return MethodDecl(
         name=cursor.spelling,

@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, OCCTType
 from classify.overloads import get_method_unique_name
-from generate.type_map import TypeMap, _PRIMITIVE_WRAPPER_MAP, COLLECTION_TYPES
+from generate.type_map import TypeMap, _PRIMITIVE_WRAPPER_MAP, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
 
 
-def _method_ret_for_header(method: MethodDecl, type_map: TypeMap) -> str:
+def _qualify_godot_type(tname: str, shadowed_names: set[str]) -> str:
+    """If a name is shadowed by a member of the same name, qualify it."""
+    if tname == "String" and "String" in shadowed_names:
+        return "::godot::String"
+    return tname
+
+
+def _method_ret_for_header(method: MethodDecl, type_map: TypeMap, shadowed_names: set[str] | None = None) -> str:
     """Get the return type for the wrapper method declaration,
-    handling OStream (returns String) and standard types."""
-    for p in method.parameters:
-        if p.type.base_name == "Standard_OStream" and p.type.is_ref and not p.type.is_const:
-            return "String"
-    return type_map.cpp_type_for_return(method.return_type)
+    handling OStream (returns String only for void-return methods) and standard types."""
+    has_ostream = any(p.type.base_name == "Standard_OStream" for p in method.parameters)
+    if has_ostream and (method.return_type is None or method.return_type.is_void):
+        return _qualify_godot_type("String", shadowed_names or set())
+    return _qualify_godot_type(type_map.cpp_type_for_return(method.return_type), shadowed_names or set())
 
 
 def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
@@ -27,6 +34,7 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     lines.append("")
     lines.append("#include <godot_cpp/classes/ref_counted.hpp>")
     lines.append("#include <godot_cpp/classes/ref.hpp>")
+    lines.append("#include <godot_cpp/variant/string.hpp>")
     lines.append("#include <godot_cpp/core/class_db.hpp>")
     lines.append("")
     lines.append("#ifdef __GNUC__")
@@ -42,13 +50,13 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
         if method.return_type:
             if method.return_type.base_name in _PRIMITIVE_WRAPPER_MAP:
                 needs_primitive_wrappers = True
-            if method.return_type.base_name in COLLECTION_TYPES:
+            if method.return_type.base_name in COLLECTION_TYPES or method.return_type.base_name in HANDLE_COLLECTION_TYPES:
                 needs_collection_wrappers = True
         # Check parameters
         for p in method.parameters:
             if p.type.base_name in _PRIMITIVE_WRAPPER_MAP:
                 needs_primitive_wrappers = True
-            if p.type.base_name in COLLECTION_TYPES:
+            if p.type.base_name in COLLECTION_TYPES or p.type.base_name in HANDLE_COLLECTION_TYPES:
                 needs_collection_wrappers = True
 
     # Include the class's own OCCT header. All transitive dependencies are
@@ -65,28 +73,34 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     if needs_collection_wrappers:
         lines.append('#include "OcgCollectionWrappers.hpp"')
 
-    # Forward-declare all referenced wrapper types (Ref<T> only needs forward decl)
-    referenced = set()
+    # Collect wrapper type names referenced by this class's methods.
+    # Resolve handle aliases (e.g. V3d_Light → Graphic3d_CLight) so the
+    # forward-declared class matches what cpp_type_for_return / cpp_type_for_param emit.
+    # Skip types defined in OcgCollectionWrappers.hpp (already included).
+    from classify.skippable import _resolve_handle_inner
+    collection_or_handle = set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
+    referenced_wnames: set[str] = set()
     for method in cls.all_wrappable_methods:
-        if method.return_type and method.return_type.base_name in type_map._wrapper_names:
-            if method.return_type.base_name != cname:
-                referenced.add(method.return_type.base_name)
-        for p in method.parameters:
-            if p.type.base_name in type_map._wrapper_names:
-                if p.type.base_name != cname:
-                    referenced.add(p.type.base_name)
+        for otype in ([method.return_type] if method.return_type and not method.return_type.is_void else []) + [p.type for p in method.parameters]:
+            base = otype.base_name
+            # Resolve handle aliases to get the real wrapper class name
+            if otype.is_handle:
+                base = _resolve_handle_inner(otype.handle_inner)
+            if base in collection_or_handle:
+                continue
+            ref_wname = type_map.wrapper_name(base)
+            if ref_wname and ref_wname != type_map.wrapper_name(cname):
+                referenced_wnames.add(ref_wname)
 
     lines.append("")
     lines.append("namespace godot {")
     lines.append("")
 
-    if referenced:
+    if referenced_wnames:
         lines.append("// Forward declarations")
-    for ref in sorted(referenced):
-        wname_ref = type_map.wrapper_name(ref)
-        if wname_ref:
-            lines.append("class {};".format(wname_ref))
-    if referenced:
+    for wname_ref in sorted(referenced_wnames):
+        lines.append("class {};".format(wname_ref))
+    if referenced_wnames:
         lines.append("")
     lines.append("")
     lines.append("class {} : public RefCounted {{".format(wname))
@@ -102,11 +116,17 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     elif cls.kind == ClassKind.TOPODS_SHAPE:
         lines.append("    {} _native;".format(cname))
     elif cls.kind == ClassKind.VALUE:
-        lines.append("    {} _native;".format(cname))
+        if cls.has_public_default_ctor:
+            lines.append("    {} _native;".format(cname))
+        else:
+            lines.append("    std::unique_ptr<{}> _native = nullptr;".format(cname))
     elif cls.kind == ClassKind.REF_COUNTED:
         lines.append("    opencascade::handle<{}> _handle;".format(cname))
     else:
-        lines.append("    {} _native;".format(cname))
+        if cls.has_public_default_ctor:
+            lines.append("    {} _native;".format(cname))
+        else:
+            lines.append("    std::unique_ptr<{}> _native = nullptr;".format(cname))
 
     lines.append("")
     lines.append("    static void _bind_methods();")
@@ -116,6 +136,18 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     lines.append("    {}();".format(wname))
     lines.append("")
 
+    # Collect method names to detect shadowing of godot types (e.g. String)
+    shadowed_names: set[str] = set()
+    for method in cls.methods:
+        if not method.skip:
+            shadowed_names.add(get_method_unique_name(method))
+    for op in cls.operators:
+        if not op.skip:
+            shadowed_names.add(get_method_unique_name(op))
+    for sm in cls.static_methods:
+        if not sm.skip:
+            shadowed_names.add(get_method_unique_name(sm))
+
     # Static factory methods for constructors
     has_ctors = False
     for ctor in cls.constructors:
@@ -123,7 +155,7 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         has_ctors = True
         unique = get_method_unique_name(ctor)
-        params = _gen_param_list(ctor, type_map)
+        params = _gen_param_list(ctor, type_map, shadowed_names)
         lines.append("    static Ref<{}> {}({});".format(wname, unique, params))
 
     if has_ctors:
@@ -136,8 +168,8 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         has_methods = True
         unique = get_method_unique_name(method)
-        ret = _method_ret_for_header(method, type_map)
-        params = _gen_param_list(method, type_map)
+        ret = _method_ret_for_header(method, type_map, shadowed_names)
+        params = _gen_param_list(method, type_map, shadowed_names)
         const = " const" if method.is_const else ""
         lines.append("    {} {}({}){};".format(ret, unique, params, const))
 
@@ -151,8 +183,8 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         has_ops = True
         unique = get_method_unique_name(op)
-        ret = _method_ret_for_header(op, type_map)
-        params = _gen_param_list(op, type_map)
+        ret = _method_ret_for_header(op, type_map, shadowed_names)
+        params = _gen_param_list(op, type_map, shadowed_names)
         const = " const" if op.is_const else ""
         lines.append("    {} {}({}){};".format(ret, unique, params, const))
 
@@ -166,8 +198,8 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         has_static = True
         unique = get_method_unique_name(sm)
-        ret = _method_ret_for_header(sm, type_map)
-        params = _gen_param_list(sm, type_map)
+        ret = _method_ret_for_header(sm, type_map, shadowed_names)
+        params = _gen_param_list(sm, type_map, shadowed_names)
         lines.append("    static {} {}({});".format(ret, unique, params))
 
     if has_static:
@@ -187,13 +219,14 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _gen_param_list(method: MethodDecl, type_map: TypeMap) -> str:
+def _gen_param_list(method: MethodDecl, type_map: TypeMap, shadowed_names: set[str] | None = None) -> str:
     """Generate a C++ parameter list for the method signature."""
     parts = []
     for p in method.parameters:
         ctype = type_map.cpp_type_for_param(p.type)
         if not ctype:
             continue  # OStream or absorbed param
+        ctype = _qualify_godot_type(ctype, shadowed_names or set())
         name = p.name or "arg"
         parts.append("{} {}".format(ctype, name))
     return ", ".join(parts)
