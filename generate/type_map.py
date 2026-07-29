@@ -36,6 +36,7 @@ PRIMITIVE_MAP = {
     "long double": "double",
     "Standard_CString": "String",
     "Standard_Size": "uint64_t",
+    "unsigned long": "uint64_t",
     "Standard_ExtCharacter": "int32_t",
     "Standard_ExtString": "String",
     "Graphic3d_ZLayerId": "int32_t",
@@ -198,9 +199,10 @@ class TypeMap:
         for cls in classes:
             self._classes[cls.name] = cls
             self._wrapper_names[cls.name] = cls.wrapper_name
-            # Collect nested enum full names (e.g. "gp_Dir::D")
+            # Collect nested enum full names (e.g. "gp_Dir::D") and bare names
             for ne in cls.nested_enums:
                 self._enum_names.add(f"{cls.name}::{ne.name}")
+                self._enum_names.add(ne.name)
         # Collect standalone enum names
         for e in enums:
             self._enum_names.add(e.name)
@@ -284,6 +286,19 @@ class TypeMap:
         wname = self._wrapper_names.get(base)
         if wname:
             return f"Ref<{wname}>"
+
+        # Check canonical spelling for typedef aliases (e.g. "Point" → "gp_XYZ")
+        if otype.canonical_spelling:
+            canon_clean = otype.canonical_spelling.replace("const ", "").strip()
+            canon_base = canon_clean.rstrip("&").rstrip("*").strip()
+            if canon_base != base:
+                wname = self._wrapper_names.get(canon_base)
+                if wname:
+                    return f"Ref<{wname}>"
+                if self._is_enum(canon_base):
+                    return "int32_t"
+                if canon_base in PRIMITIVE_MAP:
+                    return PRIMITIVE_MAP[canon_base]
 
         # Unwrapped OCCT types: pass through as-is
         if otype.is_const and otype.is_ref:
@@ -418,18 +433,27 @@ class TypeMap:
         return False
 
     def _is_enum(self, base_name: str) -> bool:
-        """Check if a type name is an enum."""
-        return base_name in self._enum_names
+        """Check if a type name is an enum (bare or qualified)."""
+        if base_name in self._enum_names:
+            return True
+        if "::" in base_name:
+            bare = base_name.split("::")[-1]
+            return bare in self._enum_names
+        return False
 
     def qualified_enum_name(self, base_name: str, cls_name: str | None = None) -> str:
         """Return the fully-qualified enum name for use in static_cast.
 
         If base_name is already qualified (contains '::'), return as-is.
         Otherwise try prepending cls_name:: to form a qualified name.
-        Only qualifies when the qualified name is verified in _enum_names.
+        Falls back to bare name if no qualified form is found.
         """
         if "::" in base_name:
             return base_name
         if cls_name and f"{cls_name}::{base_name}" in self._enum_names:
             return f"{cls_name}::{base_name}"
+        # Search through _enum_names for a matching qualified name
+        for en in self._enum_names:
+            if en.endswith(f"::{base_name}"):
+                return en
         return base_name

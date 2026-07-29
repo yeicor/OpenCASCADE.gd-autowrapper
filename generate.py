@@ -196,8 +196,6 @@ def main():
         "XCAFDoc_AssemblyGraph::NodeType",
         # FS
         "FS_VARStatuses",
-        # BehaviorOnTransform (nested in AIS_Manipulator — use qualified name for C++ static_cast)
-        "AIS_Manipulator::BehaviorOnTransform",
         # CullingContext
         "CullingContext",
 
@@ -205,6 +203,9 @@ def main():
         "StdSelect_TypeOfSelectionImage",
         "AIS_SelectionScheme",
         # Graphic3d
+        # gp_Dir/Dir2d nested enums — scoped enum classes not scanned properly
+        "gp_Dir::D",
+        "gp_Dir2d::D",
     }
     all_enum_names |= NON_SCANNED_ENUMS
 

@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
-from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl
+from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl, OCCTType
 from classify.overloads import get_method_unique_name
 from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
+
+
+def _resolve_via_canonical(otype: OCCTType, type_map: TypeMap) -> str | None:
+    """Resolve a typedef alias to its canonical base name via canonical_spelling."""
+    if not otype.canonical_spelling:
+        return None
+    canon_clean = otype.canonical_spelling.replace("const ", "").strip()
+    canon_base = canon_clean.rstrip("&").rstrip("*").strip()
+    if canon_base == otype.base_name:
+        return None
+    if type_map.is_wrapped(canon_base) or type_map._is_enum(canon_base) or canon_base in PRIMITIVE_MAP:
+        return canon_base
+    return None
 
 
 def _has_string_member(cls: ClassDecl) -> bool:
@@ -719,7 +732,26 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
             # char/int8_t param → cast from int32_t
             parts.append("static_cast<char>({})".format(p.name))
         else:
-            parts.append(p.name)
+            # Check canonical spelling for typedef aliases (e.g. "Point" → "gp_XYZ")
+            canon_base = _resolve_via_canonical(p.type, type_map)
+            if canon_base and type_map.is_wrapped(canon_base):
+                # Convert Ref<OcgXxx> → _native member for VALUE/TOPODS_SHAPE
+                if type_map.class_kind(canon_base) == ClassKind.BUILDER:
+                    parts.append("{}->_builder.get()".format(p.name))
+                elif type_map.is_refcounted(canon_base) or canon_base in HANDLE_COLLECTION_TYPES:
+                    if p.type.is_ref:
+                        parts.append("*{}->_handle.get()".format(p.name))
+                    elif p.type.is_pointer:
+                        parts.append("{}.get()".format(p.name))
+                    else:
+                        parts.append("*{}->_handle.get()".format(p.name))
+                else:
+                    if not type_map.has_public_default_ctor(canon_base) and p.type.is_ref:
+                        parts.append("*{}->_native".format(p.name))
+                    else:
+                        parts.append("{}->_native".format(p.name))
+            else:
+                parts.append(p.name)
     return ", ".join(parts)
 
 

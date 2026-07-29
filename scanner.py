@@ -303,6 +303,24 @@ def scan_all_modules(
             all_enum_names.add(e.name)
             if e.is_nested and e.parent_class:
                 all_enum_names.add(f"{e.parent_class}::{e.name}")
+        # Also include enum names from modules we don't scan (non-scanned enums match)
+        all_enum_names |= {
+            "IFSelect_ReturnStatus", "IFSelect_PrintFail", "IFSelect_PrintCount",
+            "Font_FontAspect",
+            "gp_Dir::D", "gp_Dir2d::D",
+            # Note: AIS_Manipulator::BehaviorOnTransform is a STRUCT, not an enum,
+            # so it's NOT added here despite being in extra_enum_names historically.
+            "Draft_ErrorStatus",
+            "ChFi3d_FilletShape",
+            "ChFiDS_ErrorStatus", "ChFiDS_ChamfMode",
+            "ChFi2d_ConstructionError",
+            "GeomFill_Trihedron",
+            "BRepFill_TypeOfContact", "BRepFill_ThruSectionErrorStatus",
+            "BRepOffset_Mode",
+            "BRepMesh_GeomTool::IntFlag",
+            "LocOpe_Operation",
+            "Extrema_ExtAlgo", "Extrema_ExtFlag",
+        }
 
         # Mark skippable methods
         for cls in mod.classes:

@@ -23,7 +23,8 @@ UNWRAPPABLE_TYPES = {
     # Platform-specific GLX frame buffer config (pointer type)
     "Aspect_FBConfig",
     # IMeshData handle types (internal)
-    "IMeshData::IEdgeHandle", "IMeshData::IFaceHandle",
+    "IMeshData::IEdgeHandle", "IMeshData::IFaceHandle", "IMeshData::IWireHandle",
+    "IMeshData::ICurveHandle", "IMeshData::IPCurveHandle",
     # BVH tree template types (BVH_Tree<double, 3> etc.) — scanner misidentifies return type
     "BVH_Tree",
     # NCollection_DefaultHasher — template class; libclang resolves it incorrectly
@@ -38,6 +39,11 @@ UNWRAPPABLE_TYPES = {
     # Standard_SStream — no special absorption in type_map (unlike Standard_OStream/Standard_IStream);
     # methods using it as param or return can't pass through godot-cpp FFI.
     "Standard_SStream",
+    # Select3D/Graphic3d BndBox3d — typedef for BVH_Box<double, 3>, a template type we can't wrap
+    "Select3D_BndBox3d",
+    "Graphic3d_BndBox3d",
+    # StreamBuffer — nested helper class in Message_Messenger for operator<< chaining (like std::cout)
+    "StreamBuffer",
 }
 
 # Handle inner type aliases: typedef'd handle names → the real wrapper class name.
@@ -152,14 +158,26 @@ def check_type_wrappable(param_type: OCCTType, context: str,
         elif wrapped_names is not None and base in wrapped_names:
             pass  # wrapped classes use existing wrapper
         else:
-            print(f"  WARNING: skipping '{context}' — non-const reference output param '{param_type.spelling}' has no wrapper",
-                  file=sys.stderr)
-            return False
+            # Check if canonical spelling resolves to a known wrapper
+            if param_type.canonical_spelling:
+                canon_clean = param_type.canonical_spelling.replace("const ", "").strip()
+                canon_base = canon_clean.rstrip("&").rstrip("*").strip()
+                if wrapped_names is not None and canon_base in wrapped_names:
+                    pass  # use existing wrapper
+                else:
+                    print(f"  WARNING: skipping '{context}' — non-const reference output param '{param_type.spelling}' has no wrapper",
+                          file=sys.stderr)
+                    return False
+            else:
+                print(f"  WARNING: skipping '{context}' — non-const reference output param '{param_type.spelling}' has no wrapper",
+                      file=sys.stderr)
+                return False
 
     # Skip template types (containing <>) — they're class templates we can't wrap generically
     # But NOT handle types (opencascade::handle<T>) which are wrappable
-    if ("<" in param_type.spelling and ">" in param_type.spelling
-            and not param_type.is_handle):
+    has_template_chars = ("<" in param_type.spelling and ">" in param_type.spelling) or \
+                         ("<" in param_type.base_name and ">" in param_type.base_name)
+    if has_template_chars and not param_type.is_handle:
         print(f"  WARNING: skipping '{context}' — template type '{param_type.spelling}' is not wrappable",
               file=sys.stderr)
         return False
@@ -187,6 +205,20 @@ def check_type_wrappable(param_type: OCCTType, context: str,
             and not param_type.is_handle
             and not is_enum
             and base not in wrapped_names):
+        # Check if the canonical spelling resolves to a known type
+        # (handles typedefs in template class scopes like "Point" → "gp_XYZ")
+        if param_type.canonical_spelling:
+            from clang.cindex import TypeKind
+            import clang.cindex as cl
+            canon_clean = param_type.canonical_spelling.replace("const ", "").strip()
+            canon_base = canon_clean.rstrip("&").rstrip("*").strip()
+            # Don't accept canonical types that are raw pointers (e.g.
+            # BOPAlgo_PPaveFiller → BOPAlgo_PaveFiller* — opaque pointer)
+            is_canon_pointer = " *" in param_type.canonical_spelling or param_type.canonical_spelling.endswith("*")
+            if not is_canon_pointer and (canon_base in wrapped_names
+                    or canon_base in PRIMITIVE_MAP
+                    or (enum_names is not None and canon_base in enum_names)):
+                return True
         print(f"  WARNING: skipping '{context}' — OCCT type '{base}' has no wrapper",
               file=sys.stderr)
         return False

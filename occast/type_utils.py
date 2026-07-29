@@ -118,8 +118,29 @@ def make_occt_type(cursor_type: Type, known_transient: set[str] | None = None) -
         TypeKind.FLOAT, TypeKind.DOUBLE, TypeKind.LONGDOUBLE,
         TypeKind.WCHAR, TypeKind.CHAR16, TypeKind.CHAR32,
     })
-    if T.kind == TypeKind.TYPEDEF and canonical.kind in _BUILTIN_KINDS:
-        clean = canonical.spelling.replace("const ", "").strip()
+    # Detect handles: first from the original spelling, then from canonical
+    # for handle typedefs (e.g. BOPAlgo_PPaveFiller → opencascade::handle<BOPAlgo_PaveFiller>)
+    is_handle = is_handle_type(pointee_spelling)
+    if not is_handle and T.kind == TypeKind.TYPEDEF:
+        # Check if canonical resolves to a handle type
+        canonical_is_handle = is_handle_type(canonical.spelling)
+        if canonical_is_handle:
+            is_handle = True
+            # Use canonical spelling for pointee so handle_inner extraction works
+            pointee_spelling_orig = pointee_spelling
+            pointee_spelling = canonical.spelling
+
+    if T.kind == TypeKind.TYPEDEF and not is_handle:
+        if canonical.kind in _BUILTIN_KINDS:
+            clean = canonical.spelling.replace("const ", "").strip()
+        elif canonical.kind == TypeKind.ENUM:
+            clean = canonical.spelling.replace("const ", "").strip()
+        elif canonical.kind == TypeKind.RECORD:
+            # For typedefs resolving to a class/struct, use canonical base name
+            # (e.g. "Point" → "gp_XYZ", "Select3D_BndBox3d" → "BVH_Box<double, 3>")
+            clean = canonical.spelling.replace("const ", "").strip()
+        else:
+            clean = pointee_spelling.replace("const ", "").strip()
     else:
         clean = pointee_spelling.replace("const ", "").strip()
 
@@ -131,7 +152,6 @@ def make_occt_type(cursor_type: Type, known_transient: set[str] | None = None) -
     if is_enum_type:
         clean = canonical.spelling.replace("const ", "").strip()
 
-    is_handle = is_handle_type(pointee_spelling)
     handle_inner = extract_handle_inner(pointee_spelling) if is_handle else ""
 
     # For handle types, base_name should be the inner type (not "opencascade::handle<T>")
