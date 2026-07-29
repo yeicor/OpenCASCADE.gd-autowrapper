@@ -439,6 +439,15 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             lines.append("    return ::godot::String({});".format(call))
         elif ret_base_orig in ("TCollection_AsciiString",):
             lines.append("    return ::godot::String({}.ToCString());".format(call))
+        elif ret_base_orig in ("TCollection_ExtendedString",):
+            lines.append("    auto ocg_result = {};".format(call))
+            lines.append("    Standard_Integer ocg_len = ocg_result.LengthOfCString();")
+            lines.append("    char* ocg_buf = new char[ocg_len + 1];")
+            lines.append("    ocg_result.ToUTF8CString(ocg_buf);")
+            lines.append("    ocg_buf[ocg_len] = '\\0';")
+            lines.append("    ::godot::String ocg_ret(ocg_buf);")
+            lines.append("    delete[] ocg_buf;")
+            lines.append("    return ocg_ret;")
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
@@ -588,6 +597,15 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             lines.append("    return ::godot::String({});".format(static_call))
         elif ret_base_orig in ("TCollection_AsciiString",):
             lines.append("    return ::godot::String({}.ToCString());".format(static_call))
+        elif ret_base_orig in ("TCollection_ExtendedString",):
+            lines.append("    auto ocg_result = {};".format(static_call))
+            lines.append("    Standard_Integer ocg_len = ocg_result.LengthOfCString();")
+            lines.append("    char* ocg_buf = new char[ocg_len + 1];")
+            lines.append("    ocg_result.ToUTF8CString(ocg_buf);")
+            lines.append("    ocg_buf[ocg_len] = '\\0';")
+            lines.append("    ::godot::String ocg_ret(ocg_buf);")
+            lines.append("    delete[] ocg_buf;")
+            lines.append("    return ocg_ret;")
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, static_call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):

@@ -95,6 +95,7 @@ SKIP_METHODS = {
     "PerformCommonBlocks",  # BOPAlgo_Tools: libclang can't resolve overloaded template types → wrong param count
     "EntitySetBuilder",  # SelectMgr_ViewerSelector: returns handle<BVH_Builder<...>> — libclang mis-resolves to int32_t
     "SetAllContext",  # XSControl_WorkSession: param XSControl_WorkSessionMap (templated) mis-resolved to int32_t
+    "EvalD1", "EvalD2", "EvalD3",  # Geom_*: return Geom_{Surface,Curve}::ResD{1,2,3} nested structs — not wrappable across FFI
 }
 
 

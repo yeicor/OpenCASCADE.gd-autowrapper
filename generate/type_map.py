@@ -41,6 +41,7 @@ PRIMITIVE_MAP = {
     "Graphic3d_ZLayerId": "int32_t",
     "Graphic3d_ArrayFlags": "int32_t",
     "TCollection_AsciiString": "String",
+    "TCollection_ExtendedString": "String",
 }
 
 # Mapping from OCCT primitive type to wrapper class name for non-const ref output params.
