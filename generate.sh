@@ -21,7 +21,7 @@ if [ ! -f "$BUILD_DIR/compile_commands.json" ]; then
         -DCMAKE_BUILD_TYPE=Debug \
         -DGODOTCPP_TARGET=template_debug \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-        -DCMAKE_PREFIX_PATH="$PROJECT_ROOT/vcpkg/installed/x64-linux" \
+        -DCMAKE_PREFIX_PATH="$PROJECT_ROOT/vcpkg/installed/${VCPKG_DEFAULT_TRIPLET:-x64-linux}" \
         2>&1 | tail -5
     echo ""
 fi
