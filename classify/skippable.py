@@ -59,6 +59,7 @@ def _resolve_handle_inner(name: str) -> str:
 SKIP_CLASSES = {
     "Message_LazyProgressScope",  # protected inheritance from Message_ProgressScope makes operator new inaccessible to unique_ptr
     "Standard_Failure",  # root of OCCT exception hierarchy — skipped explicitly
+    "Graphic3d_CubeMap",  # abstract base class; subclasses (Packed, Separate) provide concrete implementations
     # Template struct — can't be wrapped without concrete template arguments.
     # libclang doesn't report it as CLASS_TEMPLATE in this environment.
     "NCollection_DefaultHasher",

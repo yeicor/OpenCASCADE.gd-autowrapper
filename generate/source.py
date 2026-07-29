@@ -437,6 +437,8 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         # const char* / Standard_CString return → wrap in String()
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(call))
+        elif ret_base_orig in ("TCollection_AsciiString",):
+            lines.append("    return ::godot::String({}.ToCString());".format(call))
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
@@ -517,13 +519,16 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
         ret_base = _resolve_handle_inner(ret_base_orig) if ret_base_orig in HANDLE_COLLECTION_TYPES else ret_base_orig
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(call))
+        elif ret_base_orig in ("TCollection_AsciiString",):
+            lines.append("    return ::godot::String({}.ToCString());".format(call))
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
             lines.append("    auto result = {};".format(call))
             lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
-            if ret_base_orig in HANDLE_COLLECTION_TYPES:
+            ret_kind = type_map.class_kind(ret_base)
+            if ret_kind == ClassKind.REF_COUNTED or ret_base_orig in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
             else:
                 lines.append("    wrapper->_handle = result;")
@@ -581,6 +586,8 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         ret_base = _resolve_handle_inner(ret_base_orig) if ret_base_orig in HANDLE_COLLECTION_TYPES else ret_base_orig
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(static_call))
+        elif ret_base_orig in ("TCollection_AsciiString",):
+            lines.append("    return ::godot::String({}.ToCString());".format(static_call))
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, static_call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
@@ -687,6 +694,9 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
         elif p.type.is_pointer and base in ("char",):
             # const char* param → String
             parts.append("{}.utf8().get_data()".format(p.name))
+        elif base in ("TCollection_AsciiString", "TCollection_ExtendedString"):
+            # godot String → TCollection_{Ascii,Extended}String
+            parts.append("{}({}.utf8().get_data())".format(base, p.name))
         elif base in ("char", "Standard_Character"):
             # char/int8_t param → cast from int32_t
             parts.append("static_cast<char>({})".format(p.name))
