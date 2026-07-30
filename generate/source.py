@@ -281,7 +281,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     # --- Default constructor ---
     lines.append("{}::{}() : RefCounted() {{".format(wname, wname))
 
-    # Check if the class has a zero-arg constructor
+    # Check if the class has a zero-arg native constructor
     has_default_ctor = any(len(c.parameters) == 0 for c in cls.constructors)
 
     if cls.kind == ClassKind.BUILDER:
@@ -298,8 +298,11 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             lines.append("    // No default constructor — _handle is null; use factory methods")
     elif cls.kind in (ClassKind.VALUE, ClassKind.TOPODS_SHAPE):
         if has_default_ctor:
-            # Rely on implicit member default construction — avoids copy assignment issues
-            # (some OCCT classes like AIS_ViewController have deleted operator=)
+            # VALUE/TOPODS_SHAPE with default ctor: _native member is implicitly
+            # default-constructed (C++ guarantees this before the constructor body).
+            # We do NOT add an explicit initializer because some OCCT classes
+            # (e.g. AIS_ViewController) have deleted operator=, and GCC may
+            # generate spurious -Wchanges-meaning warnings with explicit init.
             pass
         else:
             lines.append("    // No default constructor — use factory methods")

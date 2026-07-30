@@ -57,7 +57,7 @@ def is_failure_descendant(cursor: Cursor) -> bool:
 
 
 def is_handle_type(type_spelling: str) -> bool:
-    """Check if a type is opencascade::handle<T>.
+    """Check if a type is opencascade::handle<T> or occ::handle<T>.
 
     Only matches when the type itself is a handle, not when handles
     appear as template arguments of another type.
@@ -66,14 +66,14 @@ def is_handle_type(type_spelling: str) -> bool:
     # Strip leading qualifiers to reach the core type name
     for _ in range(4):
         s = s.removeprefix("const ").removeprefix("volatile ").strip()
-    if s.startswith("opencascade::handle<") or s.startswith("Handle("):
+    if s.startswith("opencascade::handle<") or s.startswith("occ::handle<") or s.startswith("Handle("):
         return True
     return False
 
 
 def extract_handle_inner(type_spelling: str) -> str:
-    """Extract T from opencascade::handle<T> or Handle(T)."""
-    for prefix in ("opencascade::handle<", "Handle("):
+    """Extract T from opencascade::handle<T>, occ::handle<T> or Handle(T)."""
+    for prefix in ("opencascade::handle<", "occ::handle<", "Handle("):
         if prefix in type_spelling:
             start = type_spelling.index(prefix) + len(prefix)
             end = type_spelling.rindex(">")
@@ -104,6 +104,9 @@ def make_occt_type(cursor_type: Type, known_transient: set[str] | None = None) -
     else:
         pointee = T
         pointee_spelling = spelling
+
+    # For ref-to-pointer types (e.g. const char*&), the pointee is itself a pointer.
+    pointee_is_ptr = is_ref and pointee.kind == TypeKind.POINTER
 
     is_const = "const" in pointee_spelling or "const" in spelling
 
@@ -140,9 +143,20 @@ def make_occt_type(cursor_type: Type, known_transient: set[str] | None = None) -
             # (e.g. "Point" → "gp_XYZ", "Select3D_BndBox3d" → "BVH_Box<double, 3>")
             clean = canonical.spelling.replace("const ", "").strip()
         else:
-            clean = pointee_spelling.replace("const ", "").strip()
+            clean = pointee_spelling
     else:
-        clean = pointee_spelling.replace("const ", "").strip()
+        clean = pointee_spelling
+
+    # Strip const/ref/ptr qualifiers from base name.
+    # For ref-to-pointer types like "const char*&", the pointee is "const char *"
+    # — strip trailing whitespace and '*' only when neither the outer layer
+    # nor the pointee is a pointer.
+    clean = clean.replace("const ", "").strip()
+    if not is_pointer and not pointee_is_ptr:
+        clean = clean.rstrip(" *").strip()
+    if not is_ref:
+        clean = clean.rstrip("&").strip()
+    clean = clean.strip()
 
     # Use canonical kind to detect enums (libclang may report just "D" for "gp_Dir::D")
     try:

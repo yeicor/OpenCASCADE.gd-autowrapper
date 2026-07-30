@@ -37,6 +37,7 @@ PRIMITIVE_MAP = {
     "Standard_CString": "String",
     "Standard_Size": "uint64_t",
     "unsigned long": "uint64_t",
+    "char16_t": "int32_t",
     "Standard_ExtCharacter": "int32_t",
     "Standard_ExtString": "String",
     "Graphic3d_ZLayerId": "int32_t",
@@ -120,9 +121,11 @@ def discover_type_aliases(classes: list[ClassDecl]) -> tuple[dict[str, tuple[str
         s = raw.replace("const ", "").replace("&", "").replace("*", "").strip()
         return s
 
-    def _try_add_ncollection(base_name: str, canonical: str) -> None:
+    def _try_add_ncollection(raw_base: str, canonical: str) -> None:
+        base_name = raw_base.replace("*", "").replace(" ", "")
         if base_name in scanned_names or base_name in collection:
             return
+
         if base_name in PRIMITIVE_MAP:
             return
         clean = _clean_canonical(canonical)
@@ -134,13 +137,26 @@ def discover_type_aliases(classes: list[ClassDecl]) -> tuple[dict[str, tuple[str
         from classify.skippable import UNWRAPPABLE_TYPES
         if base_name in UNWRAPPABLE_TYPES:
             return
+        # Handle raw template instantiations (e.g. NCollection_Array2<gp_Pnt>) — no typedef alias
+        if "<" in base_name and ">" in base_name:
+            template_name = base_name.split("<")[0]
+            hdr_path = occt_inc_dir / f"{template_name}.hxx"
+            if not hdr_path.exists():
+                return
+            collection[base_name] = (clean, f"<{template_name}.hxx>")
+            return
+        # Original logic for typedef aliases (e.g. TopTools_ListOfShape → NCollection_List<TopoDS_Shape>)
         hdr_path = occt_inc_dir / f"{base_name}.hxx"
         if not hdr_path.exists():
             return
         collection[base_name] = (clean, f"<{base_name}.hxx>")
 
-    def _try_add_handle(inner: str) -> None:
-        if inner in scanned_names or inner in handle:
+    def _try_add_handle(raw_inner: str) -> None:
+        inner = raw_inner.rstrip("* ")
+        if inner in scanned_names or inner in handle or inner in collection:
+            return
+        from classify.skippable import UNWRAPPABLE_TYPES
+        if inner in UNWRAPPABLE_TYPES:
             return
         hdr_path = occt_inc_dir / f"{inner}.hxx"
         if not hdr_path.exists():

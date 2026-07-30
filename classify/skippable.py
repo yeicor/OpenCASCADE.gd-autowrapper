@@ -44,6 +44,114 @@ UNWRAPPABLE_TYPES = {
     "Graphic3d_BndBox3d",
     # StreamBuffer — nested helper class in Message_Messenger for operator<< chaining (like std::cout)
     "StreamBuffer",
+    # IMeshData collection/pointer types (internal mesh structures)
+    "IMeshData::ListOfPnt2d",
+    "IMeshData::VectorOfVertex",
+    "IMeshData::MapOfInteger",
+    "IMeshData::IFacePtr",
+    "IMeshData::MapOfIEdgePtr",
+    # IntPolyh array types (internal intersection data)
+    "IntPolyh_ArrayOfEdges",
+    "IntPolyh_ArrayOfPoints",
+    "IntPolyh_ArrayOfTriangles",
+    "IntPolyh_ArrayOfPointNormal",
+    # BOPAlgo pointer/collection types
+    "BOPAlgo_PPaveFiller",
+    "BOPAlgo_PBuilder",
+    "BOPDS_PDS",
+    "BOPDS_PIterator",
+    "BOPDS_DS",
+    # Graphic3d template types
+    "Graphic3d_BndBox4f",
+    # Pointer types that can't be wrapped
+    "BOPAlgo_PaveFiller",
+    "V3d_ViewerPointer",
+    "Standard_PCharacter",
+    "Standard_PExtCharacter",
+    "TDF_LabelNodePtr",
+    "TDocStd_XLinkPtr",
+    "BRepMesh_DiscretRoot",
+    # Nested structs inside classes (not wrapped individually)
+    "AxisAspect",
+    "BehaviorOnTransform",
+    "PeriodicityParams",
+    "HalfSizes",
+    "Limits",
+    "CullingContext",
+    "Aspect_XRSession::InfoString",
+    # Template/internal NCollection types
+    "NCollection_ForwardRangeSentinel",
+    "NCollection_String",
+    # Function pointer / callback types
+    "CallbackOnUpdate_t",
+    "Graphic3d_MediaTextureSet::CallbackOnUpdate_t",
+    "MinMaxValuesCallback",
+    "TPCallBackFunc",
+    # System / platform-specific types
+    "AVStream",
+    "clocale_t",
+    "WNT_HIDSpaceMouse",
+    "SignalException",
+    "NewDerived",
+    "NCollection_DefaultHasher",
+    # Skipped classes that still appear as parameter types
+    "IntPolyh_Triangle",
+    "IntPolyh_StartPoint",
+    "IntPolyh_Couple",
+    "Poly_CoherentTriPtr::Iterator",
+    "Poly_CoherentTriangle",
+    # IMeshTools
+    "IMeshTools_Parameters",
+    # Image
+    "Image_VideoParams",
+    # DE
+    "DE_ShapeFixParameters",
+    # Interface module types (module not scanned)
+    "Interface_Graph",
+    "Interface_CheckIterator",
+    "Interface_EntityIterator",
+    "IGESToBRep_CurveAndSurface",
+    # DESTEP module types (module not scanned)
+    "DESTEP_Parameters",
+    # BRepSweep module types (module not scanned)
+    "BRepSweep_Revol",
+    "BRepSweep_Prism",
+    # BRepFill module types (module not scanned)
+    "BRepFill_Pipe",
+    "BRepFill_Evolved",
+    # BRepOffset module types (module not scanned)
+    "BRepOffset_MakeOffset",
+    # BRepAdaptor module types (module not scanned)
+    "BRepAdaptor_Curve",
+    # Extrema module types (module not scanned)
+    "Extrema_ExtSS",
+    "Extrema_ExtPS",
+    "Extrema_ExtCS",
+    "Extrema_ExtCC",
+    "Extrema_ExtPC",
+    # C array types
+    "int[3]",
+    "gp_XYZ[3]",
+    "gp_XYZ[4]",
+    "gp_Pnt[3]",
+    "Poly_CoherentTriangle[2]",
+    "Poly_CoherentTriangle *[2]",
+    # TDF/TColStd internal collection types (in SKIP_CLASSES but also needed here for param use)
+    "TDF_IDFilter",
+    "TDF_IDMap",
+    "TColStd_PackedMapOfInteger",
+    # OSD module types (module not scanned)
+    "OSD_Path",
+    # BOPAlgo nested structs
+    "BOPAlgo_MakePeriodic::PeriodicityParams",
+    # Deprecated NCollection handle types (templates without args — libclang mis-reports them)
+    "NCollection_HArray1",
+    "NCollection_HArray2",
+    "NCollection_HSequence",
+    # Unscanned module types that appear as handle inner types
+    "Geom2dEval_RepCurveDesc",
+    "GeomEval_RepCurveDesc",
+    "GeomEval_RepSurfaceDesc",
 }
 
 # Handle inner type aliases: typedef'd handle names → the real wrapper class name.
@@ -77,6 +185,37 @@ SKIP_CLASSES = {
     "TColStd_PackedMapOfInteger",
     "TDataStd_HLabelArray1",
     "TDF_HAttributeArray1",
+    # BRepPrim internal implementation classes (accessed via Make* wrappers)
+    "BRepPrim_Wedge",
+    "BRepPrim_Cone",
+    "BRepPrim_Cylinder",
+    "BRepPrim_Revolution",
+    "BRepPrim_Sphere",
+    "BRepPrim_Torus",
+    # IntPolyh internal classes
+    "IntPolyh_Couple",
+    "IntPolyh_Triangle",
+    "IntPolyh_StartPoint",
+    "IntPolyh_ArrayOfTangentZones",
+    "IntPolyh_ArrayOfSectionLines",
+    # Platform/OS-specific
+    "OSD_File",
+    "OSD_Path",
+    "OSD_Environment",
+    "OSD_Directory",
+    "OSD_Protection",
+    "OSD_Signal",
+    "OSD_Chronometer",
+    "OSD_Thread",
+    "OSD_Mutex",
+    "OSD_Semaphore",
+    "OSD_SharedMemory",
+    # TDF internal types
+    "TDF_IDFilter",
+    "TDF_IDMap",
+    "TDF_DataSet",
+    # IntPolyh: incomplete types cause compilation errors
+    "IntPolyh_MaillageAffinage",
 }
 
 # Methods that should always be skipped
@@ -174,13 +313,18 @@ def check_type_wrappable(param_type: OCCTType, context: str,
                 return False
 
     # Skip template types (containing <>) — they're class templates we can't wrap generically
-    # But NOT handle types (opencascade::handle<T>) which are wrappable
+    # But NOT handle types (opencascade::handle<T>, occ::handle<T>) which are wrappable
+    # Also allow if the type is already in wrapped_names (NCollection template instantiations
+    # auto-registered as collection types via discover_type_aliases).
     has_template_chars = ("<" in param_type.spelling and ">" in param_type.spelling) or \
                          ("<" in param_type.base_name and ">" in param_type.base_name)
     if has_template_chars and not param_type.is_handle:
-        print(f"  WARNING: skipping '{context}' — template type '{param_type.spelling}' is not wrappable",
-              file=sys.stderr)
-        return False
+        if wrapped_names is not None and param_type.base_name in wrapped_names:
+            pass  # auto-registered collection type
+        else:
+            print(f"  WARNING: skipping '{context}' — template type '{param_type.spelling}' is not wrappable",
+                  file=sys.stderr)
+            return False
 
     # Handle types with unwrapped inner type cannot be passed across FFI
     if param_type.is_handle:

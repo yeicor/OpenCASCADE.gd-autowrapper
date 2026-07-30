@@ -320,6 +320,23 @@ def scan_all_modules(
             "BRepMesh_GeomTool::IntFlag",
             "LocOpe_Operation",
             "Extrema_ExtAlgo", "Extrema_ExtFlag",
+            # Additional enum names that libclang fails to auto-detect
+            "Select3D_TypeOfSensitivity",
+            "AIS_SelectionScheme",
+            "Approx_ParametrizationType",
+            "DsgPrs_ArrowSide",
+            "Interface_CheckStatus",
+            "Interface_ParamType",
+            "IMeshTools_MeshAlgoType",
+            "AIS_Manipulator::ManipulatorSkin",
+            "Aspect_XRSession::TrackingUniverseOrigin",
+            "Bnd_Range::IntersectStatus",
+            "Graphic3d_Camera::Projection",
+            "Graphic3d_Camera::IODType",
+            "Graphic3d_Camera::FocusType",
+            "Graphic3d_RenderingParams::PerfCounters",
+            "XCAFDoc_AssemblyGraph::NodeType",
+
         }
 
         # Mark skippable methods

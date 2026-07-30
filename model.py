@@ -210,16 +210,27 @@ class ModuleDecl:
 # Naming utilities
 # ---------------------------------------------------------------------------
 
+def _sanitize_identifier(s: str) -> str:
+    """Replace chars invalid in C++ identifiers (<> etc.) with underscores."""
+    s = s.replace("<", "_").replace(">", "_").replace(",", "_")
+    s = s.replace(" ", "_").replace("*", "_ptr")
+    while "__" in s:
+        s = s.replace("__", "_")
+    s = s.strip("_")
+    return s
+
+
 def occt_name_to_wrapper(occt_name: str, module_name: str) -> str:
     """Convert an OCCT class name to a wrapper name with Ocg prefix.
 
     Examples:
-        gp_Pnt, gp       -> OcgGpPnt
-        TopoDS_Shape, TopoDS -> OcgTopoDSShape
-        BRepPrimAPI_MakeBox, BRepPrimAPI -> OcgBRepPrimAPIMakeBox
+        gp_Pnt, gp              -> OcgGpPnt
+        TopoDS_Shape, TopoDS    -> OcgTopoDSShape
+        BRepPrimAPI_MakeBox, ... -> OcgBRepPrimAPIMakeBox
+        NCollection_Array2<gp_Pnt> -> OcgNCollectionArray2_gp_Pnt
     """
-    # Convert underscores and special chars to camel case
-    parts = occt_name.replace("::", "_").split("_")
+    clean = _sanitize_identifier(occt_name)
+    parts = clean.replace("::", "_").split("_")
     camel = "".join(p.capitalize() if not p.isupper() else p for p in parts)
     return f"Ocg{camel}"
 

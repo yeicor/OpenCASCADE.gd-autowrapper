@@ -196,8 +196,7 @@ def main():
         "XCAFDoc_AssemblyGraph::NodeType",
         # FS
         "FS_VARStatuses",
-        # CullingContext
-        "CullingContext",
+
 
         # StdSelect
         "StdSelect_TypeOfSelectionImage",
@@ -206,6 +205,24 @@ def main():
         # gp_Dir/Dir2d nested enums — scoped enum classes not scanned properly
         "gp_Dir::D",
         "gp_Dir2d::D",
+        # Interface module (not scanned)
+        "Interface_CheckStatus",
+        "Interface_ParamType",
+        # IMeshTools
+        "IMeshTools_MeshAlgoType",
+        # AIS
+        "AIS_Manipulator::ManipulatorSkin",
+        "AIS_SelectionScheme",
+        # Aspect
+        "Aspect_XRSession::TrackingUniverseOrigin",
+        # Bnd
+        "Bnd_Range::IntersectStatus",
+        # Graphic3d
+        "Graphic3d_Camera::Projection",
+        "Graphic3d_Camera::IODType",
+        "Graphic3d_Camera::FocusType",
+        "Graphic3d_RenderingParams::PerfCounters",
+
     }
     all_enum_names |= NON_SCANNED_ENUMS
 
