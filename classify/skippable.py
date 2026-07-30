@@ -39,9 +39,8 @@ UNWRAPPABLE_TYPES = {
     # Standard_SStream — no special absorption in type_map (unlike Standard_OStream/Standard_IStream);
     # methods using it as param or return can't pass through godot-cpp FFI.
     "Standard_SStream",
-    # Select3D/Graphic3d BndBox3d — typedef for BVH_Box<double, 3>, a template type we can't wrap
-    "Select3D_BndBox3d",
-    "Graphic3d_BndBox3d",
+    # Select3D_BndBox3d and Graphic3d_BndBox3d — typedefs for BVH_Box<double, 3>
+    # Wrapped as collection types (discovered via discover_type_aliases or VALUE_TYPE_OVERRIDES).
     # StreamBuffer — nested helper class in Message_Messenger for operator<< chaining (like std::cout)
     "StreamBuffer",
     # IMeshData collection/pointer types (internal mesh structures)
@@ -108,7 +107,6 @@ UNWRAPPABLE_TYPES = {
     "DE_ShapeFixParameters",
     # Interface module types (module not scanned)
     "Interface_Graph",
-    "Interface_CheckIterator",
     "Interface_EntityIterator",
     "IGESToBRep_CurveAndSurface",
     # DESTEP module types (module not scanned)
@@ -228,7 +226,7 @@ SKIP_METHODS = {
     "BVH",  # Returns BVH_Tree<double, 3> handle that scanner misidentifies as int32_t
     "operator new", "operator delete",
     "operator new[]", "operator delete[]",
-    "DynamicType", "get_type_descriptor", "get_type_name",  # RTTI macros — libclang can't resolve return types
+    "DynamicType", "get_type_descriptor",  # RTTI macros — libclang can't resolve return types (handle<Standard_Type>&)
     "TransformShapeFU",  # OCCT packaging bug: symbol only exists in BRepFeat_Form, not MakeLinearForm
     "Transforms",  # System-only static method: exists in system headers but removed in vcpkg OCCT
     "Reset",  # Returns Type& on abstract REF_COUNTED classes — chaining not useful in GDScript
@@ -321,6 +319,17 @@ def check_type_wrappable(param_type: OCCTType, context: str,
     if has_template_chars and not param_type.is_handle:
         if wrapped_names is not None and param_type.base_name in wrapped_names:
             pass  # auto-registered collection type
+        elif wrapped_names is not None:
+            # Fallback: check if the raw spelling (minus const/ref/ptr) is in wrapped_names.
+            # Handles typedef aliases whose base_name gets canonicalized to a template type
+            # (e.g. Select3D_BndBox3d → BVH_Box<double, 3>).
+            raw_spelling = param_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+            if raw_spelling in wrapped_names:
+                pass
+            else:
+                print(f"  WARNING: skipping '{context}' — template type '{param_type.spelling}' is not wrappable",
+                      file=sys.stderr)
+                return False
         else:
             print(f"  WARNING: skipping '{context}' — template type '{param_type.spelling}' is not wrappable",
                   file=sys.stderr)

@@ -98,6 +98,8 @@ HANDLE_COLLECTION_TYPES: dict[str, tuple[str, str]] = {}
 # that can be wrapped. These are rare and stable across OCCT versions.
 VALUE_TYPE_OVERRIDES: dict[str, tuple[str, str]] = {
     "Interface_CheckIterator": ("Interface_CheckIterator", "<Interface_CheckIterator.hxx>"),
+    "Select3D_BndBox3d": ("Select3D_BndBox3d", "<Select3D_BndBox3d.hxx>"),
+    "Graphic3d_BndBox3d": ("Graphic3d_BndBox3d", "<Graphic3d_BndBox3d.hxx>"),
 }
 
 
