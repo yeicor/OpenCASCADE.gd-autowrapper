@@ -19,7 +19,7 @@ UNWRAPPABLE_TYPES = {
     # BOPAlgo types
     "BOPAlgo_PaveFiller",
     # SelectBasics types
-    "SelectBasics_PickResult",
+    # SelectBasics_PickResult — simple struct, wrappable via VALUE_TYPE_OVERRIDES
     # Platform-specific GLX frame buffer config (pointer type)
     "Aspect_FBConfig",
     # IMeshData handle types (internal)
@@ -360,6 +360,7 @@ def check_type_wrappable(param_type: OCCTType, context: str,
             and base not in wrapped_names):
         # Check if the canonical spelling resolves to a known type
         # (handles typedefs in template class scopes like "Point" → "gp_XYZ")
+        can_accept = False
         if param_type.canonical_spelling:
             from clang.cindex import TypeKind
             import clang.cindex as cl
@@ -371,7 +372,15 @@ def check_type_wrappable(param_type: OCCTType, context: str,
             if not is_canon_pointer and (canon_base in wrapped_names
                     or canon_base in PRIMITIVE_MAP
                     or (enum_names is not None and canon_base in enum_names)):
-                return True
+                can_accept = True
+        # Also check raw spelling (minus const/ref/ptr) — catches typedefs whose base_name
+        # is the canonical template type (e.g. Select3D_BndBox3d → BVH_Box<double, 3>).
+        if not can_accept:
+            raw_clean = param_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+            if wrapped_names is not None and raw_clean in wrapped_names:
+                can_accept = True
+        if can_accept:
+            return True
         print(f"  WARNING: skipping '{context}' — OCCT type '{base}' has no wrapper",
               file=sys.stderr)
         return False
