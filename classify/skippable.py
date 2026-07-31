@@ -443,12 +443,9 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
             method.skip_reason = "deleted method"
             continue
 
-        # Skip pure virtual methods
-        if method.is_pure_virtual:
-            method.skip = True
-            method.skip_reason = "pure virtual method"
-            print(f"  WARNING: skipping {context} — pure virtual", file=sys.stderr)
-            continue
+        # Note: pure virtual methods are NOT skipped. They dispatch through the
+        # vtable, so calling e.g. Geom_Curve::D0 on a handle holding a concrete
+        # Geom_BSplineCurve is valid C++. Null handles are guarded by null-checks.
 
         # Check return type
         if method.return_type and not method.return_type.is_void:
