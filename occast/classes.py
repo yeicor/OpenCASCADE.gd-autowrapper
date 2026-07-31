@@ -88,16 +88,22 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
     has_any_public_ctor = False
     has_pure_virtual = False
     has_public_default_ctor = False
+    has_declared_ctor = False
     has_copy_assignment = True
     for child in cursor.get_children():
         if child.kind == CursorKind.DESTRUCTOR:
             if child.access_specifier != AccessSpecifier.PUBLIC:
                 has_protected_dtor = True
         if child.kind == CursorKind.CONSTRUCTOR:
+            has_declared_ctor = True
             if child.access_specifier != AccessSpecifier.PUBLIC:
                 has_any_nonpublic_ctor = True
             else:
                 has_any_public_ctor = True
+                # A deleted constructor (X() = delete) suppresses the implicit
+                # default constructor and cannot be called — ignore it.
+                if child.is_deleted_method():
+                    continue
                 parm_decls = [p for p in child.get_children() if p.kind == CursorKind.PARM_DECL]
                 if len(parm_decls) == 0:
                     has_public_default_ctor = True
@@ -115,6 +121,13 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
         if child.kind == CursorKind.CXX_METHOD:
             if child.spelling.replace(" ", "") == "operator=" and child.is_deleted_method():
                 has_copy_assignment = False
+
+    # A class with NO user-declared constructors at all is implicitly
+    # default-constructible (e.g. Bnd_Box2d, StlAPI_Reader). Without this, such
+    # classes get std::unique_ptr storage with no factory methods, making the
+    # wrapper impossible to instantiate from GDScript.
+    if not has_declared_ctor:
+        has_public_default_ctor = True
 
     # Also check base classes for pure virtual methods (not overridden in this class)
     if not has_pure_virtual:

@@ -331,35 +331,44 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     lines.append("")
 
     # --- Default constructor ---
-    lines.append("{}::{}() : RefCounted() {{".format(wname, wname))
+    # Value-member storage (VALUE/TOPODS_SHAPE/OTHER with a default ctor) is
+    # explicitly initialized with _native() so the OCCT default constructor is
+    # visibly called — leaving it implicit is identical in effect, but the
+    # explicit form makes the generated code self-documenting.
+    uses_value_member = cls.kind not in (ClassKind.BUILDER, ClassKind.REF_COUNTED) and cls.has_public_default_ctor
+    init_list = ", _native()" if uses_value_member else ""
+    lines.append("{}::{}() : RefCounted(){} {{".format(wname, wname, init_list))
 
-    # Check if the class has a zero-arg native constructor
-    has_default_ctor = any(len(c.parameters) == 0 for c in cls.constructors)
+    # Declared default ctor: a public, non-deleted zero-arg constructor. Only
+    # this enables BUILDER/REF_COUNTED allocation — implicitly default-constructible
+    # classes (no declared ctors, e.g. Bnd_Box2d) may still be abstract (e.g.
+    # TDataStd_GenericExtString), so we never allocate them via `new`.
+    has_declared_default_ctor = any(len(c.parameters) == 0 for c in cls.constructors)
 
     if cls.kind == ClassKind.BUILDER:
-        if has_default_ctor:
+        if has_declared_default_ctor:
             lines.append("    _builder = std::make_unique<{}>();".format(cname))
             lines.append("    _builder->Build();")
             lines.append("    _result = _builder->Shape();")
         else:
             lines.append("    // No default constructor — _builder is null; use factory methods")
     elif cls.kind == ClassKind.REF_COUNTED:
-        if has_default_ctor and not cls.has_pure_virtual:
+        if has_declared_default_ctor and not cls.has_pure_virtual:
             lines.append("    _handle = new ::{}();".format(cname))
         else:
             lines.append("    // No default constructor — _handle is null; use factory methods")
     elif cls.kind in (ClassKind.VALUE, ClassKind.TOPODS_SHAPE):
-        if has_default_ctor:
-            # VALUE/TOPODS_SHAPE with default ctor: _native member is implicitly
-            # default-constructed (C++ guarantees this before the constructor body).
-            # We do NOT add an explicit initializer because some OCCT classes
-            # (e.g. AIS_ViewController) have deleted operator=, and GCC may
-            # generate spurious -Wchanges-meaning warnings with explicit init.
+        if cls.has_public_default_ctor:
+            # VALUE/TOPODS_SHAPE with default ctor (declared or implicit): _native
+            # member is implicitly default-constructed (C++ guarantees this before
+            # the constructor body). We do NOT add an explicit initializer because
+            # some OCCT classes (e.g. AIS_ViewController) have deleted operator=,
+            # and GCC may generate spurious -Wchanges-meaning warnings with it.
             pass
         else:
             lines.append("    // No default constructor — use factory methods")
     else:
-        if has_default_ctor:
+        if cls.has_public_default_ctor:
             pass  # implicit default construction
         else:
             lines.append("    // No default constructor — use factory methods")
