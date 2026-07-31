@@ -132,14 +132,26 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
     # Also check base classes for pure virtual methods (not overridden in this class)
     if not has_pure_virtual:
         from occast.type_utils import get_all_bases
-        own_virtuals = set()
+        all_bases = get_all_bases(cursor)
+        # Collect the names of every non-pure virtual method defined in the
+        # current class or ANY base class. A pure virtual method is only
+        # "un-overridden" if no class between it and the current class provides
+        # a non-pure definition with the same name (name-based C++ overriding).
+        # Checking only the current class's own methods wrongly marks concrete
+        # classes as abstract when an intermediate base supplies the override
+        # (e.g. PrsDim_Dimension::ComputeSelection → PrsDim_AngleDimension).
+        defined_names: set[str] = set()
         for child in cursor.get_children():
-            if child.kind == CursorKind.CXX_METHOD:
-                own_virtuals.add(child.spelling)
-        for base_def in get_all_bases(cursor):
+            if child.kind == CursorKind.CXX_METHOD and not child.is_pure_virtual_method():
+                defined_names.add(child.spelling)
+        for base_def in all_bases:
+            for child in base_def.get_children():
+                if child.kind == CursorKind.CXX_METHOD and not child.is_pure_virtual_method():
+                    defined_names.add(child.spelling)
+        for base_def in all_bases:
             for child in base_def.get_children():
                 if child.kind == CursorKind.CXX_METHOD and child.is_pure_virtual_method():
-                    if child.spelling not in own_virtuals:
+                    if child.spelling not in defined_names:
                         has_pure_virtual = True
                         break
             if has_pure_virtual:

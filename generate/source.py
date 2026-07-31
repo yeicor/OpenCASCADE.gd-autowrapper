@@ -5,7 +5,10 @@ from __future__ import annotations
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl, OCCTType
 from classify.overloads import get_method_unique_name
 from classify.skippable import _resolve_handle_inner
-from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES, resd_members_for_type
+from generate.type_map import (TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP,
+                               PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES,
+                               HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES,
+                               resd_members_for_type)
 
 
 def _resolve_via_canonical(otype: OCCTType, type_map: TypeMap) -> str | None:
@@ -143,7 +146,7 @@ def generate_primitive_wrappers_header() -> str:
     return "\n".join(lines) + "\n"
 
 
-def generate_collection_wrappers_header() -> str:
+def generate_collection_wrappers_header(exclude: set[str] | None = None) -> str:
     """Generate OcgCollectionWrappers.hpp with opaque RefCounted wrapper classes
     for NCollection-based typedefs (lists, sequences, arrays, maps).
 
@@ -153,10 +156,14 @@ def generate_collection_wrappers_header() -> str:
 
     Also generates handle-based wrappers for deprecated HSequence/HArray types
     that inherit from Standard_Transient (stored in _handle).
+
+    `exclude` lists OCCT names that now have REAL generated wrappers (see
+    generate/collections.py) and must not be emitted here.
     """
     from model import occt_name_to_wrapper
     from generate.type_map import COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
 
+    exclude = exclude or set()
     lines = []
     lines.append("// Auto-generated opaque collection wrapper classes -- DO NOT EDIT")
     lines.append("#pragma once")
@@ -175,6 +182,8 @@ def generate_collection_wrappers_header() -> str:
 
     # Include headers for value-type collections
     for occt_name, (cpp_type, include) in sorted(COLLECTION_TYPES.items()):
+        if occt_name in exclude:
+            continue
         lines.append("#include {}".format(include))
     # Include headers for handle-type collections
     for occt_name, (cpp_type, include) in sorted(HANDLE_COLLECTION_TYPES.items()):
@@ -183,6 +192,8 @@ def generate_collection_wrappers_header() -> str:
 
     # Generate value-type wrappers (_native storage)
     for occt_name, (cpp_type, include) in sorted(COLLECTION_TYPES.items()):
+        if occt_name in exclude:
+            continue
         wname = occt_name_to_wrapper(occt_name, "")
         lines.append("class {} : public RefCounted {{".format(wname))
         lines.append("    GDCLASS({}, RefCounted)".format(wname))
@@ -248,8 +259,9 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
 
     def _maybe_add_referenced(name: str) -> None:
         # Collection/handle-collection types are defined in OcgCollectionWrappers.hpp
-        # (already included via the class header), so skip individual includes.
-        if name in COLLECTION_OR_HANDLE:
+        # (already included via the class header), so skip individual includes —
+        # EXCEPT synthesized collections, which have their own real wrapper headers.
+        if name in COLLECTION_OR_HANDLE and name not in SYNTHESIZED_COLLECTION_TYPES:
             return
         if name != cname and name in type_map._wrapper_names:
             referenced.add(name)
@@ -288,6 +300,8 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     for ctor in cls.constructors:
         if ctor.skip or len(ctor.parameters) == 0:
             continue
+        if cls.has_pure_virtual:
+            continue  # Abstract class: skip factory methods (can't instantiate)
         unique = get_method_unique_name(ctor)
         bind_params = _gen_bind_params(ctor, unique)
         lines.append('    ClassDB::bind_static_method("{}", D_METHOD({}), &{}::{});'.format(

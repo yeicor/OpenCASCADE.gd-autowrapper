@@ -396,7 +396,12 @@ def _extract_method(cursor: Cursor, known_transient: set[str]) -> MethodDecl | N
                     return None
                 # Macro-defined methods (e.g. DEFINE_DERIVED_ATTRIBUTE):
                 # libclang can't resolve their return types from macro expansions.
-                elif not src_text.strip().startswith(('virtual', 'Standard_EXPORT', 'static', 'inline')):
+                # Normal declarations may start with modern C++ specifiers that the
+                # macro heuristic must not mistake for a macro (constexpr accessors
+                # like gp_Pnt::X(), [[nodiscard]] attributes, etc.).
+                decl_head = re.sub(r'^(\[\s*\[.*?\]\s*\])+', '', src_text.strip(), flags=re.DOTALL)
+                if not decl_head.startswith(('virtual', 'Standard_EXPORT', 'static', 'inline',
+                                             'constexpr', 'template', 'friend')):
                     return None
 
     # Skip deleted methods (`= delete`)

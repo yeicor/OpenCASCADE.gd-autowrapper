@@ -142,6 +142,21 @@ COLLECTION_TYPES: dict[str, tuple[str, str]] = {}
 # Maps OCCT name → (class name for handle, include header).
 HANDLE_COLLECTION_TYPES: dict[str, tuple[str, str]] = {}
 
+# NCollection instantiations that now have REAL generated wrapper classes
+# (synthesized by generate/collections.py) instead of opaque entries in
+# OcgCollectionWrappers.hpp.  Registered here (as bare OCCT cpp_type names)
+# so TypeMap and the header/source generators resolve them like scanned classes
+# rather than assuming they live in the opaque collection header.
+SYNTHESIZED_COLLECTION_TYPES: set[str] = set()
+
+# libclang spelling variants of synthesized NCollection instantiations that name
+# the SAME underlying C++ type as another entry (e.g. "NCollection_Array1<BVHThread>"
+# → "NCollection_Array1<SelectMgr_BVHThreadPool::BVHThread>", or
+# "NCollection_List<unsigned char>" → "NCollection_List<uint8_t>").  Key = spelling
+# that appears in signatures; value = canonical cpp_type that has the real wrapper.
+# Signatures using the spelling must resolve to the canonical wrapper's name.
+COLLECTION_SPELLING_ALIASES: dict[str, str] = {}
+
 
 # Additional value types from unscanned OCCT modules that are NOT NCollection
 # template aliases and NOT handle types, but ARE default-constructible value types
@@ -296,6 +311,17 @@ class TypeMap:
         for occt_name in HANDLE_COLLECTION_TYPES:
             wname = occt_name_to_wrapper(occt_name, "")
             self._wrapper_names[occt_name] = wname
+        # Register synthesized collection wrappers (real generated classes).
+        # These must win over the COLLECTION_TYPES registration above so the
+        # wrapper name matches the actual generated class.
+        for occt_name in SYNTHESIZED_COLLECTION_TYPES:
+            if occt_name in COLLECTION_SPELLING_ALIASES:
+                continue  # handled below — spelling maps to the canonical wrapper
+            self._wrapper_names[occt_name] = occt_name_to_wrapper(occt_name, "")
+        # Register spelling aliases (no generated class of their own) to point at
+        # the canonical instantiation's wrapper class.
+        for spelling, canonical in COLLECTION_SPELLING_ALIASES.items():
+            self._wrapper_names[spelling] = occt_name_to_wrapper(canonical, "")
 
     def wrapper_name(self, occt_name: str) -> str | None:
         """Get the wrapper name for an OCCT type, or None if not wrapped."""

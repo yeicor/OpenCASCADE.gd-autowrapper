@@ -8,10 +8,7 @@ from model import ModuleDecl
 
 
 def generate_module_header(modules: list[ModuleDecl], output_dir: Path) -> str:
-    """Generate module.h with all includes and registration calls."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    file_path = output_dir / "module.h"
-
+    """Generate module.h content with all includes and registration calls."""
     includes = []
     registrations = []
 
@@ -43,5 +40,4 @@ inline void gdext_uninitialize_module_auto(godot::ModuleInitializationLevel p_le
 #endif // AUTOWRAPPER_MODULE_H
 """
 
-    file_path.write_text(content)
-    return str(file_path)
+    return content

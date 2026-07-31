@@ -16,7 +16,7 @@ from occast.classes import extract_classes
 from occast.enums import extract_tu_enums
 from classify.kind import classify_all
 from classify.skippable import NON_SCANNED_ENUMS, mark_skippable_methods
-from classify.overloads import group_overloads
+from classify.overloads import dedupe_methods, group_overloads
 
 
 # Module definitions: (module_name, header_prefixes)
@@ -318,6 +318,11 @@ def scan_all_modules(
         # Group overloads
         for cls in mod.classes:
             group_overloads(cls)
+
+        # Drop methods whose wrapped signatures collide (handle& vs X&, int vs
+        # size_t under libclang, typedef vs canonical collection spellings).
+        for cls in mod.classes:
+            dedupe_methods(cls)
 
         modules.append(mod)
 

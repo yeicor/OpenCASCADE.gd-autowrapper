@@ -13,7 +13,7 @@ from classify.overloads import get_method_unique_name
 def generate_doc_xml(cls: ClassDecl, output_dir: Path) -> str | None:
     """Generate a Godot XML doc file for a class.
 
-    Returns the file path if docs were generated, None if no docs.
+    Returns the XML content if docs were generated, None if no docs.
     """
     # Check if there's any documentation to write
     has_class_doc = cls.doc.brief or cls.doc.raw
@@ -22,7 +22,6 @@ def generate_doc_xml(cls: ClassDecl, output_dir: Path) -> str | None:
         return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    file_path = output_dir / f"{cls.wrapper_name}.xml"
 
     # Build XML
     root = ET.Element("class", name=cls.wrapper_name, inherits="RefCounted")
@@ -35,38 +34,44 @@ def generate_doc_xml(cls: ClassDecl, output_dir: Path) -> str | None:
     desc = ET.SubElement(root, "description")
     desc.text = cls.doc.raw or cls.doc.brief or f"Wrapper for OCCT class {cls.name}."
 
-    # Methods (must be inside <methods> container for Godot 4)
-    methods_elem = ET.SubElement(root, "methods")
-    for method in cls.all_wrappable_methods:
-        if method.skip:
-            continue
-        if not method.doc.brief and not method.doc.raw:
-            continue
+    # Methods (must be inside <methods> container for Godot 4).
+    # Only emit the container when it has children: an empty self-closing
+    # <methods /> element breaks Godot's doc parser, which sees the next
+    # <class> element as a nested node inside <methods> and aborts with
+    # "Invalid tag in doc file: class, expected method".
+    documented_methods = [
+        m for m in cls.all_wrappable_methods
+        if not m.skip and (m.doc.brief or m.doc.raw)
+    ]
+    if documented_methods:
+        methods_elem = ET.SubElement(root, "methods")
+        for method in documented_methods:
+            unique_name = get_method_unique_name(method)
+            qualifiers = []
+            if method.kind == MethodKind.CONSTRUCTOR or method.kind == MethodKind.STATIC_METHOD:
+                qualifiers.append("static")
+            if method.is_const:
+                qualifiers.append("const")
 
-        unique_name = get_method_unique_name(method)
-        qualifiers = []
-        if method.kind == MethodKind.CONSTRUCTOR or method.kind == MethodKind.STATIC_METHOD:
-            qualifiers.append("static")
-        if method.is_const:
-            qualifiers.append("const")
+            method_elem = ET.SubElement(methods_elem, "method", name=unique_name)
+            if qualifiers:
+                method_elem.set("qualifiers", " ".join(qualifiers))
 
-        method_elem = ET.SubElement(methods_elem, "method", name=unique_name)
-        if qualifiers:
-            method_elem.set("qualifiers", " ".join(qualifiers))
+            # Return type
+            # (omitting return type element for now — it's complex to map correctly)
 
-        # Return type
-        # (omitting return type element for now — it's complex to map correctly)
-
-        # Description
-        mdesc = ET.SubElement(method_elem, "description")
-        mdesc.text = method.doc.brief or method.doc.raw or ""
+            # Description
+            mdesc = ET.SubElement(method_elem, "description")
+            mdesc.text = method.doc.brief or method.doc.raw or ""
 
     # Write file
     tree = ET.ElementTree(root)
     ET.indent(tree, space="    ")
-    tree.write(str(file_path), encoding="unicode", xml_declaration=True)
+    import io
+    buf = io.StringIO()
+    tree.write(buf, encoding="unicode", xml_declaration=True)
 
-    return str(file_path)
+    return buf.getvalue()
 
 
 def _extract_first_sentence(text: str) -> str:

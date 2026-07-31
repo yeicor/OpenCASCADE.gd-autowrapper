@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, OCCTType
 from classify.overloads import get_method_unique_name
-from generate.type_map import TypeMap, _PRIMITIVE_WRAPPER_MAP, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
+from generate.type_map import (TypeMap, _PRIMITIVE_WRAPPER_MAP, COLLECTION_TYPES,
+                               HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES)
 
 
 def _qualify_godot_type(tname: str, shadowed_names: set[str]) -> str:
@@ -98,9 +99,13 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             if otype.is_handle:
                 base = _resolve_handle_inner(otype.handle_inner)
             # Skip collection/handle-collection types (defined in OcgCollectionWrappers.hpp,
-            # which is already included above). Check the RESOLVED name: the original otype
-            # may carry an alias spelling (e.g. V3d_Light) that resolves to a real class.
-            if base in collection_or_handle or _type_in_set(otype, collection_or_handle):
+            # which is already included above) — EXCEPT synthesized collections, which are
+            # real generated wrapper classes needing a forward declaration. Check the
+            # RESOLVED name: the original otype may carry an alias spelling (e.g. V3d_Light)
+            # that resolves to a real class.
+            if base in collection_or_handle and base not in SYNTHESIZED_COLLECTION_TYPES:
+                continue
+            if _type_in_set(otype, collection_or_handle - SYNTHESIZED_COLLECTION_TYPES):
                 continue
             ref_wname = type_map.wrapper_name(base)
             if ref_wname and ref_wname != type_map.wrapper_name(cname):

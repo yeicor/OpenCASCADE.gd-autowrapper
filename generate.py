@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from model import ModuleDecl, ClassKind
 from scanner import scan_all_modules, MODULES
 from classify.skippable import NON_SCANNED_ENUMS
+from generate.fileio import write_if_changed
 from generate.type_map import TypeMap
 from generate.header import generate_header
 from generate.source import generate_source, generate_primitive_wrappers_header, generate_collection_wrappers_header
@@ -48,7 +49,7 @@ def main():
     else:
         output_dir = project_root / "src" / "autowrapper"
 
-    doc_dir = Path(args.doc_dir) if args.doc_dir else project_root / "doc_classes"
+    doc_dir = Path(args.doc_dir) if args.doc_dir else project_root / "doc_classes" / "autowrapper"
 
     print("OpenCASCADE Autowrapper Generator (libclang)")
     print(f"  compile_commands: {args.compile_commands}")
@@ -77,27 +78,26 @@ def main():
     print("Step 2: Generating godot-cpp wrapper code ...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Track every generated file so stale wrappers (classes that were removed
+    # or skipped) can be deleted without touching unchanged files' mtimes.
+    generated_files: set[Path] = set()
+
     # Generate the OCCT compatibility header
     compat_path = output_dir / "occt_compat.hxx"
-    with open(compat_path, 'w') as f:
-        f.write("// Auto-generated OCCT compatibility header — DO NOT EDIT\n")
-        f.write("// Includes all OCCT headers in topological dependency order.\n")
-        f.write("// Derived from libclang's include graphs, not hardcoded knowledge.\n")
-        f.write("#pragma once\n")
-        for hdr in occt_compat_includes:
-            f.write("#include <{}>\n".format(hdr))
+    compat_content = "// Auto-generated OCCT compatibility header — DO NOT EDIT\n"
+    compat_content += "// Includes all OCCT headers in topological dependency order.\n"
+    compat_content += "// Derived from libclang's include graphs, not hardcoded knowledge.\n"
+    compat_content += "#pragma once\n"
+    for hdr in occt_compat_includes:
+        compat_content += "#include <{}>\n".format(hdr)
+    write_if_changed(compat_path, compat_content)
+    generated_files.add(compat_path)
     print(f"  Generated occt_compat.hxx ({len(occt_compat_includes)} headers)")
 
-    # Clean old generated files to avoid stale wrappers from skipped classes
-    for old_file in output_dir.glob("Ocg*.hpp"):
-        old_file.unlink()
-    for old_file in output_dir.glob("Ocg*.cpp"):
-        old_file.unlink()
-
-    # Generate primitive wrapper classes header (after clean to avoid deletion)
+    # Generate primitive wrapper classes header
     prim_path = output_dir / "OcgPrimitiveWrappers.hpp"
-    with open(prim_path, 'w') as f:
-        f.write(generate_primitive_wrappers_header())
+    write_if_changed(prim_path, generate_primitive_wrappers_header())
+    generated_files.add(prim_path)
     print(f"  Generated OcgPrimitiveWrappers.hpp")
 
     # Build type map from all modules
@@ -135,12 +135,6 @@ def main():
     if discovered_coll or discovered_handle:
         print(f"  Discovered {len(discovered_coll)} collection types, {len(discovered_handle)} handle types")
 
-    # Generate collection wrapper classes header (after type discovery)
-    coll_path = output_dir / "OcgCollectionWrappers.hpp"
-    with open(coll_path, 'w') as f:
-        f.write(generate_collection_wrappers_header())
-    print(f"  Generated OcgCollectionWrappers.hpp")
-
     # Build complete enum name set (scanned + non-scanned) for type mapping
     all_enum_names: set[str] = set()
     for e in all_enums:
@@ -149,13 +143,34 @@ def main():
             all_enum_names.add(f"{e.parent_class}::{e.name}")
     all_enum_names |= NON_SCANNED_ENUMS
 
-    type_map = TypeMap(all_classes, all_enums, extra_enum_names=all_enum_names)
+    # Synthesize real wrapper classes for every NCollection instantiation (and
+    # the handful of element types that lack a scanned wrapper).  These replace
+    # their opaque OcgCollectionWrappers.hpp entries, so they are also excluded
+    # from that header below.
+    from generate.collections import synthesize_collections
+    from generate.type_map import SYNTHESIZED_COLLECTION_TYPES
+    syn_classes, syn_names = synthesize_collections(COLLECTION_TYPES,
+                                                    {cls.name for cls in all_classes},
+                                                    all_enum_names)
+    SYNTHESIZED_COLLECTION_TYPES.update(syn_names)
+    if syn_classes:
+        print(f"  Synthesized {len(syn_classes)} collection wrapper classes")
+        modules.append(ModuleDecl(name="autowrapper", classes=syn_classes, enums=[]))
+
+    # Generate collection wrapper classes header (after type discovery and
+    # synthesis, so names with real generated wrappers are excluded)
+    coll_path = output_dir / "OcgCollectionWrappers.hpp"
+    write_if_changed(coll_path, generate_collection_wrappers_header(exclude=SYNTHESIZED_COLLECTION_TYPES))
+    generated_files.add(coll_path)
+    print(f"  Generated OcgCollectionWrappers.hpp")
+
+    type_map = TypeMap(all_classes + syn_classes, all_enums, extra_enum_names=all_enum_names)
 
     # Re-run skippable marking after vcpkg filtering — some types may have been removed,
     # leaving methods referencing now-unwrapped types.
     # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
     from classify.skippable import mark_skippable_methods
-    updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
+    updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys()) | set(SYNTHESIZED_COLLECTION_TYPES)
     updated_copyable_names = {cls.name for cls in all_classes if cls.has_copy_assignment}
     # Reset skip flags and re-run marking with complete type info
     for mod in modules:
@@ -196,12 +211,14 @@ def main():
             # Generate header
             header_content = generate_header(cls, type_map)
             header_path = output_dir / f"{cls.wrapper_name}.hpp"
-            header_path.write_text(header_content)
+            write_if_changed(header_path, header_content)
+            generated_files.add(header_path)
 
             # Generate source
             source_content = generate_source(cls, type_map)
             source_path = output_dir / f"{cls.wrapper_name}.cpp"
-            source_path.write_text(source_content)
+            write_if_changed(source_path, source_content)
+            generated_files.add(source_path)
 
             count += 2
         print(f"{count} files")
@@ -209,9 +226,22 @@ def main():
 
     print()
 
+    # Delete stale wrappers from classes that were removed or skipped in this run.
+    # Only files NOT regenerated now are deleted, so unchanged files keep their mtime.
+    stale_count = 0
+    for pattern in ("Ocg*.hpp", "Ocg*.cpp"):
+        for old_file in output_dir.glob(pattern):
+            if old_file not in generated_files:
+                old_file.unlink()
+                stale_count += 1
+    if stale_count:
+        print(f"  Removed {stale_count} stale wrapper files")
+
     # Step 3: Generate module.h
     print("Step 3: Generating module registration header ...")
-    generate_module_header(modules, output_dir)
+    module_path = output_dir / "module.h"
+    write_if_changed(module_path, generate_module_header(modules, output_dir))
+    generated_files.add(module_path)
     print(f"  Generated module.h")
 
     # Step 4: Generate documentation
@@ -219,8 +249,11 @@ def main():
     doc_count = 0
     for mod in modules:
         for cls in mod.classes:
-            result = generate_doc_xml(cls, doc_dir)
-            if result:
+            content = generate_doc_xml(cls, doc_dir)
+            if content:
+                doc_path = doc_dir / f"{cls.wrapper_name}.xml"
+                write_if_changed(doc_path, content)
+                generated_files.add(doc_path)
                 doc_count += 1
     print(f"  Generated {doc_count} doc files")
     print()

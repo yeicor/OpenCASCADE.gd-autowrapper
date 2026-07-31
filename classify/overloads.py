@@ -58,6 +58,36 @@ def group_overloads(cls: ClassDecl) -> None:
             ctor.overload_index = i
 
 
+def dedupe_methods(cls: ClassDecl) -> None:
+    """Drop methods whose wrapper name collides with an earlier one.
+
+    Distinct OCCT overloads can wrap to the same GDScript signature and
+    therefore the same wrapper name:
+      - handle<X>& vs X& (both resolve to Ref<X>)
+      - int vs size_t under libclang (size_t resolves to int when <stddef.h>
+        is unavailable)
+      - typedef vs canonical collection spellings (TopTools_ListOfShape vs
+        NCollection_List<TopoDS_Shape>)
+      - absorbed out-parameters
+    Emitting both would produce duplicate C++ declarations (header) and
+    duplicate _bind_methods registrations.  Keep the first in emission order
+    (constructors, methods, operators, static methods).
+    """
+    seen: set[str] = set()
+    for lst in (cls.constructors, cls.methods, cls.operators, cls.static_methods):
+        keep: list[MethodDecl] = []
+        for m in lst:
+            if m.skip:
+                keep.append(m)
+                continue
+            name = get_method_unique_name(m)
+            if name in seen:
+                continue
+            seen.add(name)
+            keep.append(m)
+        lst[:] = keep
+
+
 def _type_to_string(t: OCCTType) -> str:
     """Convert an OCCTType to a stable string for use in method names.
 
@@ -75,40 +105,57 @@ def _type_to_string(t: OCCTType) -> str:
     return "_".join(parts)
 
 
-def _sanitize_typename(s: str) -> str:
-    """Sanitize a C++ type name for use in a GDScript method name."""
-    s = s.replace("::", "_")
-    s = s.replace("<", "_of_")
-    s = s.replace(">", "")
-    s = s.replace(", ", "_and_")
-    s = s.replace(",", "_and_")
-    s = s.replace(" ", "_")
-    # Collapse consecutive underscores
-    while "__" in s:
-        s = s.replace("__", "_")
-    s = s.strip("_")
-    if not s:
-        s = "unknown"
-    return s
+# Characters valid in GDScript/C++ identifiers, used to encode the hash.
+# 63 symbols -> 3 chars ~= 17.9 bits, more than enough to disambiguate
+# the handful of overloads that share a name.
+_IDENT_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+
+
+def _hash_suffix(s: str) -> str:
+    """Deterministic 3-char hash (FNV-1a 32-bit, base-63 identifier encoding).
+
+    Stable across runs and Python versions (unlike hash()), and independent of
+    the order/count of other overloads, so names survive overload-set changes.
+    """
+    h = 2166136261
+    for ch in s.encode("utf-8"):
+        h ^= ch
+        h = (h * 16777619) & 0xFFFFFFFF
+    out = []
+    for _ in range(3):
+        out.append(_IDENT_CHARS[h % len(_IDENT_CHARS)])
+        h //= len(_IDENT_CHARS)
+    return "".join(out)
+
+
+def _param_signature(method: MethodDecl) -> str:
+    """Overload-distinguishing signature string for a method.
+
+    Includes the parameter types (with const/ref/ptr qualification) and the
+    method's const-ness, so any two overloads that can coexist in C++ produce
+    different names.
+    """
+    parts = [_type_to_string(p.type) for p in method.parameters]
+    if method.is_const:
+        parts.append("const")
+    return "|".join(parts)
 
 
 def get_method_unique_name(method: MethodDecl, prefix: str = "") -> str:
     """Get a unique method name for binding.
 
-    For non-overloaded methods: returns the original name.
-    For overloaded methods: returns name_N where N is 1-based.
-    For constructors with arguments: returns from_ParamType1_ParamType2_...
+    Non-overloaded methods keep their plain name.  Overloaded methods get a
+    short stable hash of their parameter signature (e.g. Init_g5o).  Parameterized
+    constructors become factory methods named from_<hash>.
     """
-    # Constructors: default ctor -> "default", parameterized -> from_ParamTypes
+    # Constructors: default ctor -> "default", parameterized -> from_<hash>
     if method.kind == MethodKind.CONSTRUCTOR:
         if len(method.parameters) == 0:
             return "default"
-        param_types = [_sanitize_typename(_type_to_string(p.type)) for p in method.parameters]
-        return "from_" + "_".join(param_types)
-
-    if not method.is_overload:
-        safe = OPERATOR_NAME_MAP.get(method.name, method.name)
-        return safe
+        return "from_" + _hash_suffix(_param_signature(method))
 
     safe = OPERATOR_NAME_MAP.get(method.name, method.name)
-    return f"{safe}_{method.overload_index + 1}"
+    if not method.is_overload:
+        return safe
+
+    return "{}_{}".format(safe, _hash_suffix(_param_signature(method)))

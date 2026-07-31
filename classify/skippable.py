@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 
-from model import ClassDecl, MethodDecl, OCCTType
+from model import ClassDecl, MethodDecl, MethodKind, OCCTType
 
 # Types that cannot be wrapped across the FFI boundary
 UNWRAPPABLE_TYPES = {
@@ -216,6 +216,21 @@ SKIP_CLASSES = {
     "Poly_CoherentTriPtr",
 }
 
+# Constructors declared in OCCT headers but never defined in the compiled
+# library (header/library mismatch in OCCT itself). Binding a factory that
+# calls `new ::Cls(...)` for these produces an undefined-symbol error at load
+# time. Key = class name, value = set of parameter type signatures as produced
+# by classify.overloads._type_to_string (e.g. "TopoDS_Wire_const_ref,TopAbs_Orientation").
+SKIP_CONSTRUCTORS: dict[str, set[str]] = {
+    "ShapeFix_WireSegment": {
+        # Declared Standard_EXPORT in the header, but no definition exists in
+        # ShapeFix_WireSegment.cxx (only the default ctor and the
+        # ShapeExtend_WireData ctor are implemented).
+        "TopoDS_Wire_const_ref,TopAbs_Orientation",
+    },
+}
+
+
 # Methods that should always be skipped
 SKIP_METHODS = {
     "ShallowCopy", "ShallowDump",  # Internal OCCT
@@ -231,6 +246,26 @@ SKIP_METHODS = {
     "EntitySetBuilder",  # SelectMgr_ViewerSelector: returns handle<BVH_Builder<...>> — libclang mis-resolves to int32_t
     "SetAllContext",  # XSControl_WorkSession: param XSControl_WorkSessionMap (templated) mis-resolved to int32_t
     "MemoryInfo",  # Graphic3d_GraphicDriver: param size_t& mis-resolved to int32_t by libclang — passing a 4-byte ref where OCCT writes 8 bytes corrupts memory
+}
+
+# Methods that should be skipped only for a specific class. Key = class name,
+# value = set of method names. Used for OCCT header/library mismatches where a
+# method is declared (and Standard_EXPORT) in the header but never defined in
+# the compiled library — wrapping it yields an undefined-symbol error at load.
+SKIP_METHODS_BY_CLASS: dict[str, set[str]] = {
+    "BRepOffsetAPI_FindContigousEdges": {
+        # Declared Standard_EXPORT in the header, but no definition exists in
+        # BRepOffsetAPI_FindContigousEdges.cxx (only NbContigousEdges is implemented).
+        "NbEdges",
+    },
+    # ClearTangents is declared Standard_EXPORT in both headers but never
+    # implemented in the compiled library (OCCT header/library mismatch).
+    "GeomAPI_Interpolate": {
+        "ClearTangents",
+    },
+    "Law_Interpolate": {
+        "ClearTangents",
+    },
 }
 
 
@@ -532,10 +567,27 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
     for method in cls.all_methods:
         context = f"{cls.name}::{method.name}"
 
+        # Skip constructors that are declared but never defined in the OCCT library
+        if method.kind == MethodKind.CONSTRUCTOR and cls.name in SKIP_CONSTRUCTORS:
+            from classify.overloads import _type_to_string
+            sig = ",".join(_type_to_string(p.type) for p in method.parameters)
+            if sig in SKIP_CONSTRUCTORS[cls.name]:
+                method.skip = True
+                method.skip_reason = f"constructor '{cls.name}({sig})' is declared but not defined in the OCCT library"
+                print(f"  WARNING: skipping {context} — {method.skip_reason}", file=sys.stderr)
+                continue
+
         # Skip always-unwrappable methods
         if method.name in SKIP_METHODS:
             method.skip = True
             method.skip_reason = f"method '{method.name}' is not wrappable"
+            print(f"  WARNING: skipping {context} — {method.skip_reason}", file=sys.stderr)
+            continue
+
+        # Skip methods declared but never defined in the OCCT library
+        if method.name in SKIP_METHODS_BY_CLASS.get(cls.name, set()):
+            method.skip = True
+            method.skip_reason = f"method '{method.name}' is declared but not defined in the OCCT library"
             print(f"  WARNING: skipping {context} — {method.skip_reason}", file=sys.stderr)
             continue
 
