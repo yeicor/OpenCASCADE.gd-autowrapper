@@ -311,6 +311,12 @@ class TypeMap:
         if base in ("char", "Standard_CString") and otype.is_pointer:
             return "String"
 
+        # Non-const pointer to a primitive (e.g. bool* theIsInside) — output scalar
+        # written by the callee. Wrapped as Ref<OcgXxx>, its _native is passed by address.
+        if otype.is_pointer and not otype.is_const and not otype.is_handle:
+            if base in _PRIMITIVE_WRAPPER_MAP and base not in ("char", "void"):
+                return "Ref<{}>".format(_PRIMITIVE_WRAPPER_MAP[base])
+
         # char param (not pointer) → int32_t (godot-cpp doesn't support char)
         if base in ("char", "Standard_Character") and not otype.is_pointer:
             return "int32_t"
@@ -462,8 +468,9 @@ class TypeMap:
         base = otype.base_name
 
         # Primitive wrapper types as params → the wrapper class name
-        if base in _PRIMITIVE_WRAPPER_MAP and (otype.is_ref and not otype.is_const):
-            return _PRIMITIVE_WRAPPER_MAP[base]
+        if base in _PRIMITIVE_WRAPPER_MAP and not otype.is_const and not otype.is_handle:
+            if otype.is_ref or otype.is_pointer:
+                return _PRIMITIVE_WRAPPER_MAP[base]
 
         # char (non-pointer) → int (godot-cpp doesn't support char)
         if base in ("char", "Standard_Character") and not otype.is_pointer:

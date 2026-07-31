@@ -16,12 +16,20 @@ UNWRAPPABLE_TYPES = {
     "void*",
     # Template aliases (NCollection_Vec2<T>, etc.) — can't wrap across FFI
     "Graphic3d_Vec2i", "Graphic3d_Vec2", "Graphic3d_Vec3", "Graphic3d_Vec4",
-    # BOPAlgo types
-    "BOPAlgo_PaveFiller",
     # SelectBasics types
     # SelectBasics_PickResult — simple struct, wrappable via VALUE_TYPE_OVERRIDES
     # Platform-specific GLX frame buffer config (pointer type)
     "Aspect_FBConfig",
+    # BOPAlgo pointer/collection types
+    "BOPAlgo_PPaveFiller",
+    "BOPAlgo_PBuilder",
+    "BOPDS_PDS",
+    "BOPDS_PIterator",
+    "BOPDS_DS",
+    # Graphic3d template types
+    "Graphic3d_BndBox4f",
+    # Pointer types that can't be wrapped
+    "V3d_ViewerPointer",
     # IMeshData handle types (internal)
     "IMeshData::IEdgeHandle", "IMeshData::IFaceHandle", "IMeshData::IWireHandle",
     "IMeshData::ICurveHandle", "IMeshData::IPCurveHandle",
@@ -63,7 +71,6 @@ UNWRAPPABLE_TYPES = {
     # Graphic3d template types
     "Graphic3d_BndBox4f",
     # Pointer types that can't be wrapped
-    "BOPAlgo_PaveFiller",
     "V3d_ViewerPointer",
     "Standard_PCharacter",
     "Standard_PExtCharacter",
@@ -252,7 +259,7 @@ def check_type_wrappable(param_type: OCCTType, context: str,
                          enum_names: set[str] | None = None,
                          for_param: bool = False) -> bool:
     """Check if a parameter type can be wrapped. Prints WARNING if not."""
-    from generate.type_map import PRIMITIVE_MAP
+    from generate.type_map import PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP
 
     # Check unwrappable base types
     # For ref-to-pointer types (e.g. BRepMesh_DiscretRoot*&), base_name retains
@@ -289,6 +296,14 @@ def check_type_wrappable(param_type: OCCTType, context: str,
                 print(f"  WARNING: skipping '{context}' — mutable char* param '{param_type.spelling}' is not wrappable",
                       file=sys.stderr)
                 return False
+        elif (for_param
+              and not param_type.is_const
+              and base in _PRIMITIVE_WRAPPER_MAP
+              and base not in ("char", "void")):
+            # Non-const pointer to a primitive (e.g. bool* theIsInside) — an output
+            # scalar written by the callee. Wrapped as Ref<OcgXxx> whose _native is
+            # passed by address.
+            pass
         else:
             print(f"  WARNING: skipping '{context}' — raw pointer type '{param_type.spelling}' is not wrappable",
                   file=sys.stderr)

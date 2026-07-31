@@ -241,6 +241,27 @@ def main():
                 m.skip_reason = ""
             mark_skippable_methods(cls, updated_wrapped_names, all_enum_names)
 
+    # Report final coverage after complete type info is available
+    total_all_methods = sum(len(c.all_methods) for m in modules for c in m.classes)
+    total_skipped = sum(1 for m in modules for c in m.classes for meth in c.all_methods if meth.skip)
+    total_wrapped = total_all_methods - total_skipped
+    pct = (total_wrapped / total_all_methods * 100.0) if total_all_methods else 0.0
+    print(f"  Coverage: {total_wrapped}/{total_all_methods} methods wrapped ({pct:.1f}%)",
+          file=sys.stderr)
+    from collections import Counter
+    reason_counts = Counter()
+    for m in modules:
+        for c in m.classes:
+            for meth in c.all_methods:
+                if meth.skip:
+                    if meth.skip_reason:
+                        reason_counts[meth.skip_reason] += 1
+                    else:
+                        reason_counts["(no reason)"] += 1
+    print("  Top skip reasons:", file=sys.stderr)
+    for reason, count in reason_counts.most_common(15):
+        print(f"    {count:4d}  {reason}", file=sys.stderr)
+
     files_generated = 0
     for mod in modules:
         if not mod.classes:

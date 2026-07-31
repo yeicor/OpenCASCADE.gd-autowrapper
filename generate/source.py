@@ -717,6 +717,13 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
                 # Unwrapped handle type — can't convert Ref<T> to handle<T>
                 # This method should have been skipped, but if not, pass through
                 parts.append(p.name)
+        elif p.type.is_pointer and not p.type.is_const and not p.type.is_handle:
+            # Non-const primitive pointer output (e.g. bool* theIsInside): pass the
+            # address of the primitive inside the caller's wrapper object.
+            if base in _PRIMITIVE_WRAPPER_MAP and base not in ("char", "void"):
+                parts.append("{}.is_valid() ? &{}->_native : nullptr".format(p.name, p.name))
+            else:
+                parts.append(p.name)
         elif p.type.is_ref and not p.type.is_const and not p.type.is_handle:
             # Non-const ref output params: pass mutable reference to wrapper's internal storage
             if type_map.is_wrapped(base):
