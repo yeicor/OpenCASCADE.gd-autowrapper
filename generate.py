@@ -233,13 +233,14 @@ def main():
     # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
     from classify.skippable import mark_skippable_methods
     updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
+    updated_copyable_names = {cls.name for cls in all_classes if cls.has_copy_assignment}
     # Reset skip flags and re-run marking with complete type info
     for mod in modules:
         for cls in mod.classes:
             for m in cls.all_methods:
                 m.skip = False
                 m.skip_reason = ""
-            mark_skippable_methods(cls, updated_wrapped_names, all_enum_names)
+            mark_skippable_methods(cls, updated_wrapped_names, all_enum_names, updated_copyable_names)
 
     # Report final coverage after complete type info is available
     total_all_methods = sum(len(c.all_methods) for m in modules for c in m.classes)

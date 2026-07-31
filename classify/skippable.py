@@ -30,9 +30,6 @@ UNWRAPPABLE_TYPES = {
     "Graphic3d_BndBox4f",
     # Pointer types that can't be wrapped
     "V3d_ViewerPointer",
-    # IMeshData handle types (internal)
-    "IMeshData::IEdgeHandle", "IMeshData::IFaceHandle", "IMeshData::IWireHandle",
-    "IMeshData::ICurveHandle", "IMeshData::IPCurveHandle",
     # BVH tree template types (BVH_Tree<double, 3> etc.) — scanner misidentifies return type
     "BVH_Tree",
     # NCollection_DefaultHasher — template class; libclang resolves it incorrectly
@@ -102,7 +99,6 @@ UNWRAPPABLE_TYPES = {
     "IntPolyh_StartPoint",
     "IntPolyh_Couple",
     "Poly_CoherentTriPtr::Iterator",
-    "Poly_CoherentTriangle",
     # Image
     "Image_VideoParams",
     # DE
@@ -229,9 +225,6 @@ SKIP_METHODS = {
     "operator new[]", "operator delete[]",
     "DynamicType", "get_type_descriptor",  # RTTI macros — libclang can't resolve return types (handle<Standard_Type>&)
     "TransformShapeFU",  # OCCT packaging bug: symbol only exists in BRepFeat_Form, not MakeLinearForm
-    "Transforms",  # System-only static method: exists in system headers but removed in vcpkg OCCT
-    "Reset",  # Returns Type& on abstract REF_COUNTED classes — chaining not useful in GDScript
-    "GetImage",  # Usually protected or internal; GetImage(const handle<>&) is driver-internal
     "createNewEntity",  # Protected virtual method (AccessSpecifier.INVALID detected as public)
     "GetPoints",  # AIS_PointCloud: returns handle<Graphic3d_ArrayOfPoints> — libclang mis-resolves to int32_t
     "PerformCommonBlocks",  # BOPAlgo_Tools: libclang can't resolve overloaded template types → wrong param count
@@ -247,9 +240,10 @@ STREAM_TYPES = {"Standard_OStream", "Standard_IStream", "Standard_SStream"}
 def check_type_wrappable(param_type: OCCTType, context: str,
                          wrapped_names: set[str] | None = None,
                          enum_names: set[str] | None = None,
-                         for_param: bool = False) -> bool:
+                         for_param: bool = False,
+                         copyable_names: set[str] | None = None) -> bool:
     """Check if a parameter type can be wrapped. Prints WARNING if not."""
-    from generate.type_map import PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP
+    from generate.type_map import PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, HANDLE_COLLECTION_TYPES
 
     # Check unwrappable base types
     # For ref-to-pointer types (e.g. BRepMesh_DiscretRoot*&), base_name retains
@@ -288,10 +282,37 @@ def check_type_wrappable(param_type: OCCTType, context: str,
             # Mutable char* (output buffer, e.g. std::streambuf::xsgetn) can't be
             # mapped to a godot String input — only const char* is wrappable.
             # (As a return type, char* can be read as a C-string, so allow it.)
-            if base == "char" and not param_type.is_const and for_param:
+            if base == "char" and not param_type.pointee_is_const and for_param:
                 print(f"  WARNING: skipping '{context}' — mutable char* param '{param_type.spelling}' is not wrappable",
                       file=sys.stderr)
                 return False
+        elif for_param and base == "void":
+            # void* / const void* param (opaque address, e.g. Graphic3d_Structure::SetOwner,
+            # allocator Free methods) — exposed as a raw uint64_t address in GDScript.
+            pass
+        elif for_param and base in ("uint8_t",):
+            # uint8_t* / const uint8_t* param (raw byte buffer) → PackedByteArray
+            pass
+        elif for_param and base == "char16_t" and param_type.pointee_is_const:
+            # const char16_t* param (UTF-16 string) → String
+            pass
+        elif (not for_param
+              and wrapped_names is not None
+              and base in wrapped_names
+              and (param_type.pointee_is_const
+                   or param_type.is_transient_descendant
+                   or base in HANDLE_COLLECTION_TYPES)
+              and (param_type.is_transient_descendant
+                   or base in HANDLE_COLLECTION_TYPES
+                   or copyable_names is None
+                   or base in copyable_names)):
+            # Raw pointer to a wrapped class as a return type. Enabled only when
+            # the pointee is const (read-only → safe copy/ref-grab) or when the
+            # object is refcounted (transient / handle collection). Non-const
+            # pointers to value classes stay skipped (ownership unknown → would
+            # leak or double-free), and non-copyable value classes (deleted
+            # operator=) can't be copied into a wrapper.
+            pass
         elif (for_param
               and not param_type.is_const
               and base in _PRIMITIVE_WRAPPER_MAP
@@ -299,6 +320,14 @@ def check_type_wrappable(param_type: OCCTType, context: str,
             # Non-const pointer to a primitive (e.g. bool* theIsInside) — an output
             # scalar written by the callee. Wrapped as Ref<OcgXxx> whose _native is
             # passed by address.
+            pass
+        elif (for_param
+              and wrapped_names is not None
+              and base in wrapped_names):
+            # Raw pointer to a wrapped class (e.g. Graphic3d_Structure*). The
+            # callee does not take ownership, so passing the wrapper's native
+            # handle/object address is safe. Return-type raw pointers are NOT
+            # enabled (ownership semantics unknown → would double-free).
             pass
         else:
             print(f"  WARNING: skipping '{context}' — raw pointer type '{param_type.spelling}' is not wrappable",
@@ -418,7 +447,8 @@ def check_type_wrappable(param_type: OCCTType, context: str,
 
 
 def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None,
-                           enum_names: set[str] | None = None) -> None:
+                           enum_names: set[str] | None = None,
+                           copyable_names: set[str] | None = None) -> None:
     """Mark methods that cannot be wrapped and print warnings.
 
     Sets method.skip = True for each un-wrappable method.
@@ -453,7 +483,7 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
                     method.skip_reason = "returns internal Standard_OStream&"
                     continue
             if not check_type_wrappable(method.return_type, f"{context} (return type)",
-                                        wrapped_names, enum_names):
+                                        wrapped_names, enum_names, copyable_names=copyable_names):
                 method.skip = True
                 method.skip_reason = f"unwrappable return type '{method.return_type.base_name}'"
                 continue

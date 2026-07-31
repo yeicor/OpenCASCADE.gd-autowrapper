@@ -477,6 +477,35 @@ def _emit_stream_locals(lines: list[str], method: MethodDecl) -> None:
             next(p.name for p in method.parameters if p.type.base_name == "Standard_SStream")))
 
 
+def _try_gen_pointer_return(lines: list[str], method: MethodDecl, type_map: TypeMap, call: str) -> bool:
+    """Generate return wrapping for raw-pointer-to-wrapped-class returns.
+
+    Only const-pointee pointers, transient (refcounted) objects, and handle
+    collections are admitted by check_type_wrappable, so the generated body is
+    always a safe copy (value/collection classes) or ref-grab (transient).
+    Returns True if handled; the caller must then close the function.
+    """
+    rt = method.return_type
+    if not rt or not rt.is_pointer:
+        return False
+    ret_base = _resolve_handle_inner(rt.base_name)
+    wret = type_map.wrapper_name(ret_base)
+    if not wret:
+        wret = type_map._wrapper_name_for_otype(rt)
+        if not wret:
+            return False
+    lines.append("    auto result = {};".format(call))
+    lines.append("    Ref<{}> wrapper; wrapper.instantiate();".format(wret))
+    if ret_base in HANDLE_COLLECTION_TYPES or rt.base_name in HANDLE_COLLECTION_TYPES:
+        lines.append("    if (result) wrapper->_handle = result;")
+    elif type_map.is_refcounted(ret_base):
+        lines.append("    if (result) wrapper->_handle = opencascade::handle<::{}>(result);".format(ret_base))
+    else:
+        lines.append("    if (result) wrapper->_native = *result;")
+    lines.append("    return wrapper;")
+    return True
+
+
 def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
     """Generate implementation for a regular method."""
     from classify.skippable import _resolve_handle_inner
@@ -523,6 +552,10 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             alt = type_map._wrapper_name_for_otype(method.return_type)
             if alt:
                 ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+        if _try_gen_pointer_return(lines, method, type_map, call):
+            lines.append("}")
+            lines.append("")
+            return
         # const char* / Standard_CString return → wrap in String()
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(call))
@@ -638,6 +671,10 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
             alt = type_map._wrapper_name_for_otype(method.return_type)
             if alt:
                 ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+        if _try_gen_pointer_return(lines, method, type_map, call):
+            lines.append("}")
+            lines.append("")
+            return
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(call))
         elif ret_base_orig in ("TCollection_AsciiString",):
@@ -710,6 +747,10 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             alt = type_map._wrapper_name_for_otype(method.return_type)
             if alt:
                 ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+        if _try_gen_pointer_return(lines, method, type_map, static_call):
+            lines.append("}")
+            lines.append("")
+            return
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(static_call))
         elif ret_base_orig in ("TCollection_AsciiString",):
@@ -782,6 +823,24 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
         if base == "Standard_SStream":
             parts.append("ocg_ss")
             continue
+        # void* / const void* → raw address as uint64_t.
+        # NB: is_const is True for BOTH "const void*" (const pointee) and
+        # "void* const" (const pointer, non-const pointee); use pointee_is_const
+        # to distinguish, since a plain void* is required for the latter.
+        if base == "void" and p.type.is_pointer:
+            parts.append("reinterpret_cast<{}void*>({})".format("const " if p.type.pointee_is_const else "", p.name))
+            continue
+        # uint8_t* / const uint8_t* → PackedByteArray data
+        if base == "uint8_t" and p.type.is_pointer:
+            if p.type.pointee_is_const:
+                parts.append("{}.ptr()".format(p.name))
+            else:
+                parts.append("{}.ptrw()".format(p.name))
+            continue
+        # const char16_t* → String UTF-16
+        if base == "char16_t" and p.type.is_pointer and p.type.pointee_is_const:
+            parts.append("{}.utf16()".format(p.name))
+            continue
         if p.type.is_handle:
             # Handle params need ._handle (ref-counted wrapper) not ._native
             # Resolve aliases (e.g. Prs3d_Presentation → Graphic3d_Structure) first,
@@ -798,6 +857,15 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
             # address of the primitive inside the caller's wrapper object.
             if base in _PRIMITIVE_WRAPPER_MAP and base not in ("char", "void"):
                 parts.append("{}.is_valid() ? &{}->_native : nullptr".format(p.name, p.name))
+            elif type_map.is_wrapped(base):
+                # Raw pointer to a wrapped class (no ownership transfer): pass
+                # the native object/handle address.
+                if type_map.class_kind(base) == ClassKind.BUILDER:
+                    parts.append("{}->_builder.get()".format(p.name))
+                elif type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:
+                    parts.append("{}->_handle.get()".format(p.name))
+                else:
+                    parts.append("&{}->_native".format(p.name))
             else:
                 parts.append(p.name)
         elif p.type.is_ref and not p.type.is_const and not p.type.is_handle:
@@ -819,18 +887,24 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
         elif type_map.is_wrapped(base):
             # BUILDER classes use _builder, not _native
             if type_map.class_kind(base) == ClassKind.BUILDER:
-                parts.append("{}->_builder.get()".format(p.name))
+                if p.type.is_pointer:
+                    parts.append("{}->_builder.get()".format(p.name))
+                else:
+                    parts.append("{}->_builder.get()".format(p.name))
             elif type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:
                 # REF_COUNTED classes always use _handle
-                if p.type.is_ref:
+                if p.type.is_pointer:
+                    # Raw pointer to a handle-owned object (no ownership transfer)
+                    parts.append("{}->_handle.get()".format(p.name))
+                elif p.type.is_ref:
                     parts.append("*{}->_handle.get()".format(p.name))
-                elif p.type.is_pointer:
-                    parts.append("{}.get()".format(p.name))
                 else:
                     parts.append("*{}->_handle.get()".format(p.name))
             else:
-                # VALUE/TOPODS_SHAPE: _native may be T or std::unique_ptr<T>
-                if not type_map.has_public_default_ctor(base) and p.type.is_ref:
+                # VALUE/TOPODS_SHAPE: _native may be T or std::unique_ptr<T
+                if p.type.is_pointer:
+                    parts.append("&{}->_native".format(p.name))
+                elif not type_map.has_public_default_ctor(base) and p.type.is_ref:
                     parts.append("*{}->_native".format(p.name))
                 else:
                     parts.append("{}->_native".format(p.name))
@@ -857,10 +931,10 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
                 if type_map.class_kind(canon_base) == ClassKind.BUILDER:
                     parts.append("{}->_builder.get()".format(p.name))
                 elif type_map.is_refcounted(canon_base) or canon_base in HANDLE_COLLECTION_TYPES:
-                    if p.type.is_ref:
+                    if p.type.is_pointer:
+                        parts.append("{}->_handle.get()".format(p.name))
+                    elif p.type.is_ref:
                         parts.append("*{}->_handle.get()".format(p.name))
-                    elif p.type.is_pointer:
-                        parts.append("{}.get()".format(p.name))
                     else:
                         parts.append("*{}->_handle.get()".format(p.name))
                 else:

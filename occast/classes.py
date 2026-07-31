@@ -88,6 +88,7 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
     has_any_public_ctor = False
     has_pure_virtual = False
     has_public_default_ctor = False
+    has_copy_assignment = True
     for child in cursor.get_children():
         if child.kind == CursorKind.DESTRUCTOR:
             if child.access_specifier != AccessSpecifier.PUBLIC:
@@ -110,6 +111,10 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
                     has_public_default_ctor = True
         if child.kind == CursorKind.CXX_METHOD and child.is_pure_virtual_method():
             has_pure_virtual = True
+        # Copy assignment deleted (= delete) → class cannot be copied across FFI
+        if child.kind == CursorKind.CXX_METHOD:
+            if child.spelling.replace(" ", "") == "operator=" and child.is_deleted_method():
+                has_copy_assignment = False
 
     # Also check base classes for pure virtual methods (not overridden in this class)
     if not has_pure_virtual:
@@ -212,6 +217,7 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
         doc=doc,
         has_public_default_ctor=has_public_default_ctor,
         has_pure_virtual=has_pure_virtual,
+        has_copy_assignment=has_copy_assignment,
     )
 
     return cls

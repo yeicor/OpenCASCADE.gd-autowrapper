@@ -82,6 +82,8 @@ class OCCTType:
     is_handle: bool = False         # opencascade::handle<T>
     handle_inner: str = ""          # T if is_handle
     is_transient_descendant: bool = False  # Inherits from Standard_Transient
+    pointee_is_const: bool = False  # For pointers: is the pointee const-qualified?
+                                    # ("const void*" → True; "void* const" → False)
 
     @property
     def is_void(self) -> bool:
@@ -187,6 +189,7 @@ class ClassDecl:
     doc: DocBlock = field(default_factory=DocBlock)
     has_public_default_ctor: bool = False
     has_pure_virtual: bool = False
+    has_copy_assignment: bool = True   # False if copy assignment operator is deleted
     transitive_occt_includes: list[str] = field(default_factory=list)  # OCCT headers transitively included by this header
 
     @property

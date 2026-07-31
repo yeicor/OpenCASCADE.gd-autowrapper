@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from clang.cindex import AccessSpecifier, Cursor, CursorKind
 
@@ -171,6 +172,7 @@ def _extract_constructor(cursor: Cursor, known_transient: set[str]) -> MethodDec
         src_text, void_type, params, cursor.spelling, UNWRAPPABLE_TYPES)
     if handle_fixed:
         _, params = handle_fixed
+    void_type, params = _fix_typedef_handle_types(void_type, params, UNWRAPPABLE_TYPES)
 
     # After fixing, check for remaining misresolved int params that are
     # actually collection types (NCollection_, etc.) — skip the constructor.
@@ -277,6 +279,7 @@ def _extract_method(cursor: Cursor, known_transient: set[str]) -> MethodDecl | N
         src_text, return_type, params, cursor.spelling, UNWRAPPABLE_TYPES)
     if handle_fixed:
         return_type, params = handle_fixed
+    return_type, params = _fix_typedef_handle_types(return_type, params, UNWRAPPABLE_TYPES)
 
     # After fixing handles, check if any remaining misresolved-int params or return type
     # have collection-template types (NCollection_List<handle<T>> etc.) in the source.
@@ -436,6 +439,26 @@ def _extract_params(cursor: Cursor, known_transient: set[str]) -> list[Parameter
     return params
 
 
+def _make_handle_occt_type(
+    inner: str,
+    unwrappable_types: set[str] | None = None,
+) -> OCCTType | None:
+    """Build an OCCTType representing a const-ref handle to the given inner type."""
+    if unwrappable_types and inner in unwrappable_types:
+        return None
+    return OCCTType(
+        spelling=f"const occ::handle<{inner}>&",
+        base_name=inner,
+        canonical_spelling=f"opencascade::handle<{inner}>",
+        is_const=True,
+        is_ref=True,
+        is_pointer=False,
+        is_handle=True,
+        handle_inner=inner,
+        is_transient_descendant=True,
+    )
+
+
 def _fix_handle_types_from_source(
     src_text: str,
     return_type: OCCTType,
@@ -471,63 +494,50 @@ def _fix_handle_types_from_source(
     def _is_misresolved_int(t: OCCTType) -> bool:
         return t.base_name in primitive_ints or t.spelling in primitive_ints
 
-    def _make_handle_occt_type(inner: str) -> OCCTType | None:
-        if unwrappable_types and inner in unwrappable_types:
-            return None
-        return OCCTType(
-            spelling=f"const occ::handle<{inner}>&",
-            base_name=inner,
-            canonical_spelling=f"opencascade::handle<{inner}>",
-            is_const=True,
-            is_ref=True,
-            is_pointer=False,
-            is_handle=True,
-            handle_inner=inner,
-            is_transient_descendant=True,
-        )
+    # Find the opening paren of the function declaration. Used to distinguish
+    # handles in the return type (before the paren) from handles in the
+    # parameter list (after the paren).
+    if func_name:
+        # Find the LAST occurrence of func_name that is followed by '('
+        # but NOT preceded by '->' or '.' (which would make it a method
+        # call in an inline body, not a declaration).
+        # Also NOT inside a string literal (which would be a false
+        # match in deprecation strings like Standard_DEPRECATED(
+        # "...func_name()...")).
+        func_idx = -1
+        pos = len(src_text)
+        while pos > 0:
+            idx = src_text.rfind(func_name, 0, pos)
+            if idx < 0:
+                break
+            after = idx + len(func_name)
+            ws = 0
+            while after + ws < len(src_text) and src_text[after + ws] in ' \t':
+                ws += 1
+            if after + ws < len(src_text) and src_text[after + ws] == '(':
+                # Skip if inside a string literal (detected by odd quote count before)
+                if src_text[:idx].count('"') % 2 == 1:
+                    pos = idx
+                    continue
+                # Check if preceded by '->' or '.' (method call, not declaration)
+                before = idx - 1
+                while before >= 0 and src_text[before] in ' \t':
+                    before -= 1
+                if not (before >= 1 and src_text[before-1:before+1] == '->') and \
+                   not (before >= 0 and src_text[before] == '.'):
+                    func_idx = idx
+            pos = idx
+        func_paren = -1
+        if func_idx >= 0:
+            func_paren = src_text.find('(', func_idx)
+    else:
+        func_paren = src_text.find('(')
 
     # Fix return type
     new_return_type = return_type
     if _is_misresolved_int(return_type) and handle_spans:
         # Verify the handle appears BEFORE the function name (i.e., in the
-        # return type declaration, not in parameters). Find the function name
-        # via the `(` after the function name.
-        if func_name:
-            # Find the LAST occurrence of func_name that is followed by '('
-            # but NOT preceded by '->' or '.' (which would make it a method
-            # call in an inline body, not a declaration).
-            # Also NOT inside a string literal (which would be a false
-            # match in deprecation strings like Standard_DEPRECATED(
-            # "...func_name()...")).
-            func_idx = -1
-            pos = len(src_text)
-            while pos > 0:
-                idx = src_text.rfind(func_name, 0, pos)
-                if idx < 0:
-                    break
-                after = idx + len(func_name)
-                ws = 0
-                while after + ws < len(src_text) and src_text[after + ws] in ' \t':
-                    ws += 1
-                if after + ws < len(src_text) and src_text[after + ws] == '(':
-                    # Skip if inside a string literal (detected by odd quote count before)
-                    if src_text[:idx].count('"') % 2 == 1:
-                        pos = idx
-                        continue
-                    # Check if preceded by '->' or '.' (method call, not declaration)
-                    before = idx - 1
-                    while before >= 0 and src_text[before] in ' \t':
-                        before -= 1
-                    if not (before >= 1 and src_text[before-1:before+1] == '->') and \
-                       not (before >= 0 and src_text[before] == '.'):
-                        func_idx = idx
-                pos = idx
-            func_paren = -1
-            if func_idx >= 0:
-                func_paren = src_text.find('(', func_idx)
-            
-        else:
-            func_paren = src_text.find('(')
+        # return type declaration, not in parameters).
         first_handle_start = handle_spans[0][0]
         if func_paren > first_handle_start:
             # Check that the first handle is NOT inside a collection template.
@@ -545,7 +555,7 @@ def _fix_handle_types_from_source(
             if not inside_collection:
                 # Use the first handle found for the return type (common case:
                 # the return type IS the handle, like const occ::handle<T>&)
-                ht = _make_handle_occt_type(handle_spans[0][2])
+                ht = _make_handle_occt_type(handle_spans[0][2], unwrappable_types)
                 if ht is not None:
                     new_return_type = ht
 
@@ -575,11 +585,16 @@ def _fix_handle_types_from_source(
                 # this parameter index. Match across ALL handle types,
                 # not just the current inner type.
                 param_pos = sum(1 for j in range(i) if _is_misresolved_int(params[j].type))
-                # Build a list of all non-collection handles in order
+                # Build a list of all non-collection handles in the parameter
+                # list (after the declaration paren), in order. Handles before
+                # the paren belong to the return type and must be excluded so
+                # the positional match is not off by one.
                 all_bare = []
                 for hm_all in re.finditer(
                     r'(?:occ|opencascade)::handle\s*<\s*(\w+)',
                     src_text):
+                    if func_paren >= 0 and hm_all.start() < func_paren:
+                        continue
                     pre_hm = src_text[:hm_all.start()]
                     inside_coll = any(
                         src_text.rfind(p, 0, hm_all.start()) >= 0 and
@@ -602,7 +617,7 @@ def _fix_handle_types_from_source(
             )
             if inside_coll:
                 continue
-            ht = _make_handle_occt_type(inner)
+            ht = _make_handle_occt_type(inner, unwrappable_types)
             if ht is None:
                 continue
             new_params[i] = Parameter(
@@ -611,5 +626,96 @@ def _fix_handle_types_from_source(
             )
             found = True
             break
+
+    return (new_return_type, new_params)
+
+
+# ---------------------------------------------------------------------------
+# Typedef'd handle resolution (occ::handle<X> alias-template misresolution)
+# ---------------------------------------------------------------------------
+
+# libclang resolves `occ::handle<T>` (an alias template) to `int` whenever the
+# spelled type is a typedef of it (e.g. `typedef occ::handle<IMeshData_Edge>
+# IEdgeHandle;`).  `opencascade::handle<T>` spelled directly resolves fine.
+# Recover these from the OCCT headers' typedef declarations.
+
+_TYPEDEF_HANDLE_MAP: dict[str, str] | None = None
+
+_TYPEDEF_HANDLE_PAT = re.compile(
+    r'typedef\s+(?:occ|opencascade)::handle\s*<\s*([A-Za-z_]\w*)\s*>\s+'
+    r'([A-Za-z_]\w*)\s*;'
+    r'|using\s+([A-Za-z_]\w*)\s*=\s*(?:occ|opencascade)::handle\s*<\s*'
+    r'([A-Za-z_]\w*)\s*>\s*;')
+
+
+def _load_handle_typedef_map() -> dict[str, str]:
+    """Map handle-typedef name -> inner handle type, from OCCT headers."""
+    global _TYPEDEF_HANDLE_MAP
+    if _TYPEDEF_HANDLE_MAP is not None:
+        return _TYPEDEF_HANDLE_MAP
+    mapping: dict[str, list[str]] = {}
+    occt_dir = (Path.home() / "Projects" / "OpenCASCADE.gd" / "vcpkg"
+                / "installed" / "x64-linux" / "include" / "opencascade")
+    if occt_dir.is_dir():
+        for h in sorted(occt_dir.glob("*.hxx")):
+            try:
+                src = h.read_text(errors="replace")
+            except OSError:
+                continue
+            for m in _TYPEDEF_HANDLE_PAT.finditer(src):
+                if m.group(1) and m.group(2):
+                    inner, name = m.group(1), m.group(2)
+                else:
+                    name, inner = m.group(3), m.group(4)
+                mapping.setdefault(name, []).append(inner)
+    result: dict[str, str] = {}
+    for name, inners in mapping.items():
+        uniq = list(dict.fromkeys(inners))
+        if len(uniq) == 1:
+            result[name] = uniq[0]
+    _TYPEDEF_HANDLE_MAP = result
+    return result
+
+
+def _resolve_typedef_handle(base_name: str) -> str | None:
+    """If base_name is a typedef alias for a handle, return the inner type."""
+    if not base_name:
+        return None
+    name = base_name.rsplit("::", 1)[-1]
+    if not name.replace("_", "").isalnum():
+        return None
+    return _load_handle_typedef_map().get(name)
+
+
+def _fix_typedef_handle_types(
+    return_type: OCCTType,
+    params: list[Parameter],
+    unwrappable_types: set[str] | None = None,
+) -> tuple[OCCTType, list[Parameter]]:
+    """Recover handle types hidden behind typedefs (e.g. IMeshData::IEdgeHandle).
+
+    libclang collapses `occ::handle<T>` alias-template typedefs to primitive
+    int, losing the handle.  Reconstruct the proper OCCTType for any param or
+    return type whose base name matches a known handle typedef.
+    """
+    def _maybe(t: OCCTType) -> OCCTType | None:
+        if t.is_handle:
+            return None
+        inner = _resolve_typedef_handle(t.base_name)
+        if inner is None:
+            return None
+        return _make_handle_occt_type(inner, unwrappable_types)
+
+    new_return_type = return_type
+    if not return_type.is_void:
+        fixed = _maybe(return_type)
+        if fixed is not None:
+            new_return_type = fixed
+
+    new_params = list(params)
+    for i, p in enumerate(params):
+        fixed = _maybe(p.type)
+        if fixed is not None:
+            new_params[i] = Parameter(type=fixed, name=p.name)
 
     return (new_return_type, new_params)

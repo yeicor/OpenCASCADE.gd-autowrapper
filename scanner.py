@@ -286,11 +286,16 @@ def scan_all_modules(
 
         # Collect all known wrapper names (from all modules so far + current)
         all_wrapped_names: set[str] = set()
+        copyable_names: set[str] = set()
         for prev_mod in modules:
             for c in prev_mod.classes:
                 all_wrapped_names.add(c.name)
+                if c.has_copy_assignment:
+                    copyable_names.add(c.name)
         for cls in mod.classes:
             all_wrapped_names.add(cls.name)
+            if cls.has_copy_assignment:
+                copyable_names.add(cls.name)
 
         # Collect all known enum names (from all modules so far + current)
         all_enum_names: set[str] = set()
@@ -341,7 +346,7 @@ def scan_all_modules(
 
         # Mark skippable methods
         for cls in mod.classes:
-            mark_skippable_methods(cls, all_wrapped_names, all_enum_names)
+            mark_skippable_methods(cls, all_wrapped_names, all_enum_names, copyable_names)
 
         # Group overloads
         for cls in mod.classes:

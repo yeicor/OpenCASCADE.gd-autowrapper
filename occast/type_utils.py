@@ -110,6 +110,14 @@ def make_occt_type(cursor_type: Type, known_transient: set[str] | None = None) -
 
     is_const = "const" in pointee_spelling or "const" in spelling
 
+    # Distinguish pointee-const from pointer-const:
+    #   "const void*"   → pointee is const-qualified → pointee_is_const=True
+    #   "void* const"   → the pointer itself is const → pointee_is_const=False
+    if is_pointer:
+        pointee_is_const = pointee.is_const_qualified()
+    else:
+        pointee_is_const = is_const
+
     # For typedef aliases to built-in C++ types, use canonical spelling
     _BUILTIN_KINDS = frozenset({
         TypeKind.BOOL,
@@ -189,6 +197,7 @@ def make_occt_type(cursor_type: Type, known_transient: set[str] | None = None) -
         is_handle=is_handle,
         handle_inner=handle_inner,
         is_transient_descendant=is_transient,
+        pointee_is_const=pointee_is_const,
     )
 
 

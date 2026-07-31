@@ -17,6 +17,8 @@ PRIMITIVE_MAP = {
     "Standard_Character": "char",
     "unsigned char": "uint8_t",
     "Standard_Byte": "uint8_t",
+    "uint8_t": "uint8_t",
+    "int8_t": "int8_t",
     "short": "int16_t",
     "unsigned short": "uint16_t",
     "uint16_t": "uint16_t",
@@ -365,6 +367,18 @@ class TypeMap:
         if base in ("char", "Standard_CString") and otype.is_pointer:
             return "String"
 
+        # void* / const void* params → raw address as uint64_t (opaque pointers)
+        if base == "void" and otype.is_pointer:
+            return "uint64_t"
+
+        # uint8_t* / const uint8_t* params → PackedByteArray (raw byte buffer)
+        if base == "uint8_t" and otype.is_pointer:
+            return "PackedByteArray"
+
+        # const char16_t* params → String (UTF-16 input)
+        if base == "char16_t" and otype.is_pointer and otype.pointee_is_const:
+            return "String"
+
         # Non-const pointer to a primitive (e.g. bool* theIsInside) — output scalar
         # written by the callee. Wrapped as Ref<OcgXxx>, its _native is passed by address.
         if otype.is_pointer and not otype.is_const and not otype.is_handle:
@@ -444,6 +458,15 @@ class TypeMap:
         # Standard_OStream returns (dump-style with absorbed ostream param) → String
         if base == "Standard_OStream":
             return "String"
+
+        # Raw pointer to a wrapped class returned by value → Ref<Wrapper>.
+        # check_type_wrappable only admits const pointers, transient objects,
+        # and handle collections, so this is always a copy/ref-grab (never an
+        # ownership transfer to GDScript).
+        if otype.is_pointer:
+            wname = self._wrapper_names.get(base)
+            if wname:
+                return "Ref<{}>".format(wname)
 
         # const char* / char* returns → String
         if base in ("char", "Standard_CString") and otype.is_pointer:
@@ -598,6 +621,18 @@ class TypeMap:
         if cls:
             return cls.kind == ClassKind.REF_COUNTED
         return False
+
+    def is_copyable(self, occt_name: str) -> bool:
+        """Check if an OCCT value class has a usable copy assignment operator.
+
+        Classes that declare `operator= = delete` cannot be copied into a
+        wrapper's _native storage, so pointer/ref-return copy-wrapping must be
+        skipped for them.
+        """
+        cls = self._classes.get(occt_name)
+        if cls:
+            return cls.has_copy_assignment
+        return True
 
     def _is_enum(self, base_name: str) -> bool:
         """Check if a type name is an enum (bare or qualified)."""
