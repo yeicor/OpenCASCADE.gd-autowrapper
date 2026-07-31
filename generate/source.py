@@ -222,7 +222,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
                 needs_array = True
         for p in method.parameters:
             _maybe_add_referenced(_resolve_ref_name(p.type))
-            if p.type.base_name in ("Standard_OStream", "Standard_IStream"):
+            if p.type.base_name in ("Standard_OStream", "Standard_IStream", "Standard_SStream"):
                 needs_sstream = True
     for ref in sorted(referenced):
         wname_ref = type_map.wrapper_name(ref)
@@ -340,6 +340,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
 
         lines.append("Ref<{}> {}::{}({}) {{".format(wname, wname, unique, params))
         lines.append("    Ref<{}> ref; ref.instantiate();".format(wname))
+        _emit_stream_locals(lines, ctor)
 
         if cls.kind == ClassKind.BUILDER:
             lines.append("    ref->_builder = std::make_unique<::{}>({});".format(cname, args))
@@ -419,6 +420,22 @@ def _has_istream_param(method: MethodDecl) -> bool:
     """Check if method has a Standard_IStream input parameter."""
     return any(p.type.base_name == "Standard_IStream" for p in method.parameters)
 
+def _has_sstream_param(method: MethodDecl) -> bool:
+    """Check if method has a Standard_SStream (stringstream) input parameter."""
+    return any(p.type.base_name == "Standard_SStream" for p in method.parameters)
+
+
+def _emit_stream_locals(lines: list[str], method: MethodDecl) -> None:
+    """Emit local stream variables for absorbed ostream/istream/stringstream params."""
+    if _has_ostream_param(method):
+        lines.append("    std::ostringstream ocg_os;")
+    if _has_istream_param(method):
+        lines.append("    std::istringstream ocg_is({}.utf8().get_data());".format(
+            next(p.name for p in method.parameters if p.type.base_name == "Standard_IStream")))
+    if _has_sstream_param(method):
+        lines.append("    std::stringstream ocg_ss({}.utf8().get_data());".format(
+            next(p.name for p in method.parameters if p.type.base_name == "Standard_SStream")))
+
 
 def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
     """Generate implementation for a regular method."""
@@ -428,6 +445,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     ret = type_map.cpp_type_for_return(method.return_type)
     has_ostream = _has_ostream_param(method)
     has_istream = _has_istream_param(method)
+    has_sstream = _has_sstream_param(method)
     if has_ostream and (method.return_type is None or method.return_type.is_void):
         ret = "String"
     ret = _qstr(cls, ret)
@@ -444,12 +462,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     elif not cls.has_public_default_ctor:
         _null_check_for_native_ptr(lines, ret)
 
-    # Create stream variables
-    if has_ostream:
-        lines.append("    std::ostringstream ocg_os;")
-    if has_istream:
-        lines.append("    std::istringstream ocg_is({}.utf8().get_data());".format(
-            next(p.name for p in method.parameters if p.type.base_name == "Standard_IStream")))
+    _emit_stream_locals(lines, method)
 
     target = _value_type_target(cls)
     arrow = "->" if _needs_pointer_call(cls) else "."
@@ -551,6 +564,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
     ret = type_map.cpp_type_for_return(method.return_type)
     has_ostream = _has_ostream_param(method)
     has_istream = _has_istream_param(method)
+    has_sstream = _has_sstream_param(method)
     if has_ostream and (method.return_type is None or method.return_type.is_void):
         ret = "String"
     ret = _qstr(cls, ret)
@@ -567,11 +581,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
     elif not cls.has_public_default_ctor:
         _null_check_for_native_ptr(lines, ret)
 
-    if has_ostream:
-        lines.append("    std::ostringstream ocg_os;")
-    if has_istream:
-        lines.append("    std::istringstream ocg_is({}.utf8().get_data());".format(
-            next(p.name for p in method.parameters if p.type.base_name == "Standard_IStream")))
+    _emit_stream_locals(lines, method)
 
     target = _value_type_target(cls)
     arrow = "->" if _needs_pointer_call(cls) else "."
@@ -636,6 +646,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     ret = type_map.cpp_type_for_return(method.return_type)
     has_ostream = _has_ostream_param(method)
     has_istream = _has_istream_param(method)
+    has_sstream = _has_sstream_param(method)
     if has_ostream and (method.return_type is None or method.return_type.is_void):
         ret = "String"
     ret = _qstr(cls, ret)
@@ -644,11 +655,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
 
     lines.append("{} {}::{}({}) {{".format(ret, wname, unique, params))
 
-    if has_ostream:
-        lines.append("    std::ostringstream ocg_os;")
-    if has_istream:
-        lines.append("    std::istringstream ocg_is({}.utf8().get_data());".format(
-            next(p.name for p in method.parameters if p.type.base_name == "Standard_IStream")))
+    _emit_stream_locals(lines, method)
 
     static_call = "::{}::{}({})".format(cls.name, method.name, args)
 
@@ -730,6 +737,10 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
         # Standard_IStream → local istringstream
         if base == "Standard_IStream":
             parts.append("ocg_is")
+            continue
+        # Standard_SStream → local stringstream
+        if base == "Standard_SStream":
+            parts.append("ocg_ss")
             continue
         if p.type.is_handle:
             # Handle params need ._handle (ref-counted wrapper) not ._native

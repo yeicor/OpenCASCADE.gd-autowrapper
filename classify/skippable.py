@@ -44,9 +44,6 @@ UNWRAPPABLE_TYPES = {
     "XSAlgo_ShapeProcessor::ProcessingFlags",
     # AVRational from FFmpeg — struct available only as forward declaration (incomplete type)
     "AVRational",
-    # Standard_SStream — no special absorption in type_map (unlike Standard_OStream/Standard_IStream);
-    # methods using it as param or return can't pass through godot-cpp FFI.
-    "Standard_SStream",
     # Select3D_BndBox3d and Graphic3d_BndBox3d — typedefs for BVH_Box<double, 3>
     # Wrapped as collection types (discovered via discover_type_aliases or VALUE_TYPE_OVERRIDES).
     # StreamBuffer — nested helper class in Message_Messenger for operator<< chaining (like std::cout)
@@ -246,7 +243,7 @@ SKIP_METHODS = {
 }
 
 
-STREAM_TYPES = {"Standard_OStream", "Standard_IStream"}
+STREAM_TYPES = {"Standard_OStream", "Standard_IStream", "Standard_SStream"}
 
 
 def check_type_wrappable(param_type: OCCTType, context: str,

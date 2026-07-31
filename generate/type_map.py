@@ -337,6 +337,10 @@ class TypeMap:
         if base == "Standard_IStream" and otype.is_ref:
             return "String"
 
+        # Standard_SStream (any ref) → String (will be converted to stringstream in body)
+        if base == "Standard_SStream" and otype.is_ref:
+            return "String"
+
         # Non-const ref output params of primitives → Ref<OcgPrimitiveWrapper>
         if otype.is_ref and not otype.is_const and not otype.is_handle:
             if base in PRIMITIVE_MAP and base != "void":
