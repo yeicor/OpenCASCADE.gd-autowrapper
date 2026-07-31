@@ -103,8 +103,6 @@ UNWRAPPABLE_TYPES = {
     "IntPolyh_Couple",
     "Poly_CoherentTriPtr::Iterator",
     "Poly_CoherentTriangle",
-    # IMeshTools
-    "IMeshTools_Parameters",
     # Image
     "Image_VideoParams",
     # DE
@@ -224,7 +222,6 @@ SKIP_CLASSES = {
 
 # Methods that should always be skipped
 SKIP_METHODS = {
-    "InitFromJson",  # JSON streaming
     "ShallowCopy", "ShallowDump",  # Internal OCCT
     "Destroy",  # Internal/debug methods
     "BVH",  # Returns BVH_Tree<double, 3> handle that scanner misidentifies as int32_t
