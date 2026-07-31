@@ -243,7 +243,6 @@ SKIP_METHODS = {
     "PerformCommonBlocks",  # BOPAlgo_Tools: libclang can't resolve overloaded template types → wrong param count
     "EntitySetBuilder",  # SelectMgr_ViewerSelector: returns handle<BVH_Builder<...>> — libclang mis-resolves to int32_t
     "SetAllContext",  # XSControl_WorkSession: param XSControl_WorkSessionMap (templated) mis-resolved to int32_t
-    "EvalD1", "EvalD2", "EvalD3",  # Geom_*: return Geom_{Surface,Curve}::ResD{1,2,3} nested structs — not wrappable across FFI
 }
 
 
@@ -277,6 +276,12 @@ def check_type_wrappable(param_type: OCCTType, context: str,
     # Stream types are wrappable with special handling (absorbed or mapped to String)
     if base in STREAM_TYPES:
         return True
+
+    # Geom_*::ResD{0,1,2,3} nested struct returns are packed into a Godot Array
+    if not for_param:
+        from generate.type_map import resd_members_for_type
+        if resd_members_for_type(param_type):
+            return True
 
     # Enum types are always wrappable (mapped to int32_t with static_cast)
     is_enum = (enum_names is not None and base in enum_names)

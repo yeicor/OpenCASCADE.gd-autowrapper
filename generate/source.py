@@ -5,7 +5,7 @@ from __future__ import annotations
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl, OCCTType
 from classify.overloads import get_method_unique_name
 from classify.skippable import _resolve_handle_inner
-from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
+from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES, resd_members_for_type
 
 
 def _resolve_via_canonical(otype: OCCTType, type_map: TypeMap) -> str | None:
@@ -197,6 +197,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     COLLECTION_OR_HANDLE = set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
     referenced = set()
     needs_sstream = False
+    needs_array = False
 
     def _resolve_ref_name(otype: OCCTType) -> str:
         """Resolve a method return/param type to the real wrapper class name,
@@ -216,6 +217,9 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     for method in cls.all_wrappable_methods:
         if method.return_type:
             _maybe_add_referenced(_resolve_ref_name(method.return_type))
+            for member_type, _ in (resd_members_for_type(method.return_type) or []):
+                _maybe_add_referenced(member_type)
+                needs_array = True
         for p in method.parameters:
             _maybe_add_referenced(_resolve_ref_name(p.type))
             if p.type.base_name in ("Standard_OStream", "Standard_IStream"):
@@ -228,6 +232,9 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     lines.append("")
     if needs_sstream:
         lines.append("#include <sstream>")
+        lines.append("")
+    if needs_array:
+        lines.append("#include <godot_cpp/variant/array.hpp>")
         lines.append("")
     lines.append("#include <godot_cpp/core/error_macros.hpp>")
     lines.append("")
@@ -482,6 +489,19 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             # return its contents as a String.
             lines.append("    {};".format(call))
             lines.append("    return ::godot::String(ocg_os.str().c_str());")
+        elif resd_members_for_type(method.return_type):
+            # Geom_*::ResD{0,1,2,3} nested struct return → Array of wrapped gp values.
+            resd = resd_members_for_type(method.return_type)
+            lines.append("    auto ocg_result = {};".format(call))
+            lines.append("    Array ocg_ret;")
+            for i, (member_type, member_name) in enumerate(resd):
+                wmember = type_map.wrapper_name(member_type)
+                lines.append("    {")
+                lines.append("        Ref<{}> ocg_m{}; ocg_m{}.instantiate();".format(wmember, i, i))
+                lines.append("        ocg_m{}->_native = ocg_result.{};".format(i, member_name))
+                lines.append("        ocg_ret.append(ocg_m{});".format(i))
+                lines.append("    }")
+            lines.append("    return ocg_ret;")
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
