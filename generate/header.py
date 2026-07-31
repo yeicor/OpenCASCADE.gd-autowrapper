@@ -42,6 +42,17 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     lines.append("#endif")
     lines.append("")
 
+    def _type_in_set(otype: OCCTType, type_set: set[str]) -> bool:
+        """Check if an OCCTType's base_name, canonical spelling, or original spelling
+        is in the given set. Handles typedef aliases (e.g. Graphic3d_BndBox3d → BVH_Box<double, 3>)."""
+        candidates = [otype.base_name]
+        if otype.canonical_spelling:
+            c = otype.canonical_spelling.replace("const ", "").rstrip("&").rstrip("*").strip()
+            candidates.append(c)
+        s = otype.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+        candidates.append(s)
+        return any(c in type_set for c in candidates if c)
+
     # Check if any methods use primitive wrapper types
     needs_primitive_wrappers = False
     needs_collection_wrappers = False
@@ -50,13 +61,13 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
         if method.return_type:
             if method.return_type.base_name in _PRIMITIVE_WRAPPER_MAP:
                 needs_primitive_wrappers = True
-            if method.return_type.base_name in COLLECTION_TYPES or method.return_type.base_name in HANDLE_COLLECTION_TYPES:
+            if _type_in_set(method.return_type, set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())):
                 needs_collection_wrappers = True
         # Check parameters
         for p in method.parameters:
             if p.type.base_name in _PRIMITIVE_WRAPPER_MAP:
                 needs_primitive_wrappers = True
-            if p.type.base_name in COLLECTION_TYPES or p.type.base_name in HANDLE_COLLECTION_TYPES:
+            if _type_in_set(p.type, set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())):
                 needs_collection_wrappers = True
 
     # Include the class's own OCCT header. All transitive dependencies are
@@ -86,7 +97,10 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             # Resolve handle aliases to get the real wrapper class name
             if otype.is_handle:
                 base = _resolve_handle_inner(otype.handle_inner)
-            if base in collection_or_handle:
+            # Skip collection/handle-collection types (defined in OcgCollectionWrappers.hpp,
+            # which is already included above). Check the RESOLVED name: the original otype
+            # may carry an alias spelling (e.g. V3d_Light) that resolves to a real class.
+            if base in collection_or_handle or _type_in_set(otype, collection_or_handle):
                 continue
             ref_wname = type_map.wrapper_name(base)
             if ref_wname and ref_wname != type_map.wrapper_name(cname):

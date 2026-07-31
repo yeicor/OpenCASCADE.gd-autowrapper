@@ -156,6 +156,14 @@ def discover_type_aliases(classes: list[ClassDecl]) -> tuple[dict[str, tuple[str
 
     def _try_add_handle(raw_inner: str) -> None:
         inner = raw_inner.rstrip("* ")
+        # Resolve handle aliases (e.g. V3d_Light → Graphic3d_CLight) so that
+        # aliased types pointing to real scanned classes are not added to
+        # HANDLE_COLLECTION_TYPES. Otherwise the forward-declaration logic
+        # in header.py would skip them (seeing them as collection types).
+        from classify.skippable import _resolve_handle_inner
+        resolved = _resolve_handle_inner(inner)
+        if resolved in scanned_names or resolved in handle or resolved in collection:
+            return
         if inner in scanned_names or inner in handle or inner in collection:
             return
         from classify.skippable import UNWRAPPABLE_TYPES
@@ -241,6 +249,26 @@ class TypeMap:
         """Get the wrapper name for an OCCT type, or None if not wrapped."""
         return self._wrapper_names.get(occt_name)
 
+    def _wrapper_name_for_otype(self, otype: OCCTType) -> str | None:
+        """Like wrapper_name(), but also checks canonical and original spelling
+        to resolve typedef aliases (e.g. Graphic3d_BndBox3d → BVH_Box<double, 3>)."""
+        base = otype.base_name
+        wname = self._wrapper_names.get(base)
+        if wname:
+            return wname
+        if otype.canonical_spelling:
+            c = otype.canonical_spelling.replace("const ", "").rstrip("&").rstrip("*").strip()
+            if c != base:
+                wname = self._wrapper_names.get(c)
+                if wname:
+                    return wname
+        s = otype.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+        if s != base and (not otype.canonical_spelling or s != otype.canonical_spelling.replace("const ", "").rstrip("&").rstrip("*").strip()):
+            wname = self._wrapper_names.get(s)
+            if wname:
+                return wname
+        return None
+
     def class_kind(self, occt_name: str) -> ClassKind | None:
         """Get the ClassKind for a wrapped OCCT type, or None."""
         cls = self._classes.get(occt_name)
@@ -319,6 +347,18 @@ class TypeMap:
                 if canon_base in PRIMITIVE_MAP:
                     return PRIMITIVE_MAP[canon_base]
 
+        # Check original spelling (pre-canonicalization) — the typedef name itself
+        # may be in _wrapper_names (e.g. Graphic3d_BndBox3d via VALUE_TYPE_OVERRIDES).
+        orig_base = otype.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+        if orig_base != base and (not otype.canonical_spelling or orig_base != canon_base):
+            wname = self._wrapper_names.get(orig_base)
+            if wname:
+                return f"Ref<{wname}>"
+            if self._is_enum(orig_base):
+                return "int32_t"
+            if orig_base in PRIMITIVE_MAP:
+                return PRIMITIVE_MAP[orig_base]
+
         # Unwrapped OCCT types: pass through as-is
         if otype.is_const and otype.is_ref:
             return f"const {base}&"
@@ -370,6 +410,45 @@ class TypeMap:
             if otype.is_ref:
                 return "{}&".format(wname)
             return wname
+
+        # Check canonical spelling for typedef aliases (e.g. "Point" → "gp_XYZ")
+        if otype.canonical_spelling:
+            canon_clean = otype.canonical_spelling.replace("const ", "").strip()
+            canon_base = canon_clean.rstrip("&").rstrip("*").strip()
+            if canon_base != base:
+                wname = self._wrapper_names.get(canon_base)
+                if wname:
+                    base = canon_base
+                    if self.is_value_type(base):
+                        return "Ref<{}>".format(wname)
+                    if self.is_refcounted(base) and otype.is_ref and not otype.is_const:
+                        return "Ref<{}>".format(wname)
+                    if otype.is_ref and otype.is_const:
+                        return "const {}&".format(wname)
+                    if otype.is_ref:
+                        return "{}&".format(wname)
+                    return wname
+                if self._is_enum(canon_base):
+                    return "int32_t"
+                if canon_base in PRIMITIVE_MAP:
+                    return PRIMITIVE_MAP[canon_base]
+
+        # Check original spelling (pre-canonicalization) — the typedef name itself
+        # may be in _wrapper_names (e.g. Graphic3d_BndBox3d via VALUE_TYPE_OVERRIDES).
+        orig_base = otype.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
+        if orig_base != base and (not otype.canonical_spelling or orig_base != canon_base):
+            wname = self._wrapper_names.get(orig_base)
+            if wname:
+                base = orig_base
+                if self.is_value_type(base):
+                    return "Ref<{}>".format(wname)
+                if self.is_refcounted(base) and otype.is_ref and not otype.is_const:
+                    return "Ref<{}>".format(wname)
+                if otype.is_ref and otype.is_const:
+                    return "const {}&".format(wname)
+                if otype.is_ref:
+                    return "{}&".format(wname)
+                return wname
 
         # Unwrapped types: pass through
         if otype.is_ref and otype.is_const:

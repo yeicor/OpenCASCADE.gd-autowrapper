@@ -135,7 +135,6 @@ UNWRAPPABLE_TYPES = {
     "Poly_CoherentTriangle[2]",
     "Poly_CoherentTriangle *[2]",
     # TDF/TColStd internal collection types (in SKIP_CLASSES but also needed here for param use)
-    "TDF_IDFilter",
     "TDF_IDMap",
     "TColStd_PackedMapOfInteger",
     # OSD module types (module not scanned)
@@ -209,11 +208,14 @@ SKIP_CLASSES = {
     "OSD_Semaphore",
     "OSD_SharedMemory",
     # TDF internal types
-    "TDF_IDFilter",
     "TDF_IDMap",
     "TDF_DataSet",
     # IntPolyh: incomplete types cause compilation errors
     "IntPolyh_MaillageAffinage",
+    # Internal allocator list-node types using DEFINE_NCOLLECTION_ALLOC —
+    # restricted operator new makes std::unique_ptr storage impossible.
+    "NCollection_ListNode",
+    "Poly_CoherentTriPtr",
 }
 
 # Methods that should always be skipped
@@ -247,15 +249,25 @@ STREAM_TYPES = {"Standard_OStream", "Standard_IStream"}
 
 def check_type_wrappable(param_type: OCCTType, context: str,
                          wrapped_names: set[str] | None = None,
-                         enum_names: set[str] | None = None) -> bool:
+                         enum_names: set[str] | None = None,
+                         for_param: bool = False) -> bool:
     """Check if a parameter type can be wrapped. Prints WARNING if not."""
     from generate.type_map import PRIMITIVE_MAP
 
     # Check unwrappable base types
+    # For ref-to-pointer types (e.g. BRepMesh_DiscretRoot*&), base_name retains
+    # the trailing " *" — also check the canonical stripped name.
     if param_type.base_name in UNWRAPPABLE_TYPES:
         print(f"  WARNING: skipping '{context}' — parameter type '{param_type.base_name}' is not wrappable",
               file=sys.stderr)
         return False
+    if param_type.canonical_spelling:
+        canon_clean = param_type.canonical_spelling.replace("const ", "").strip()
+        canon_base = canon_clean.rstrip("&").rstrip("*").strip()
+        if canon_base != param_type.base_name and canon_base in UNWRAPPABLE_TYPES:
+            print(f"  WARNING: skipping '{context}' — parameter type '{param_type.spelling}' (base '{canon_base}') is not wrappable",
+                  file=sys.stderr)
+            return False
 
     base = param_type.base_name
 
@@ -270,7 +282,13 @@ def check_type_wrappable(param_type: OCCTType, context: str,
     if param_type.is_pointer and not param_type.is_handle:
         # Allow char* / const char* for return types (converted to String)
         if base in ("char", "Standard_CString") or base == "char":
-            pass  # handled by the type map
+            # Mutable char* (output buffer, e.g. std::streambuf::xsgetn) can't be
+            # mapped to a godot String input — only const char* is wrappable.
+            # (As a return type, char* can be read as a C-string, so allow it.)
+            if base == "char" and not param_type.is_const and for_param:
+                print(f"  WARNING: skipping '{context}' — mutable char* param '{param_type.spelling}' is not wrappable",
+                      file=sys.stderr)
+                return False
         else:
             print(f"  WARNING: skipping '{context}' — raw pointer type '{param_type.spelling}' is not wrappable",
                   file=sys.stderr)
@@ -438,7 +456,7 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
         skip = False
         for param in method.parameters:
             if not check_type_wrappable(param.type, f"{context} (param '{param.name}')",
-                                        wrapped_names, enum_names):
+                                        wrapped_names, enum_names, for_param=True):
                 method.skip = True
                 method.skip_reason = f"unwrappable parameter type '{param.type.base_name}'"
                 skip = True

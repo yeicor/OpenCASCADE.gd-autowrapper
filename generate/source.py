@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl, OCCTType
 from classify.overloads import get_method_unique_name
+from classify.skippable import _resolve_handle_inner
 from generate.type_map import TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES, HANDLE_COLLECTION_TYPES
 
 
@@ -196,23 +197,27 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     COLLECTION_OR_HANDLE = set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
     referenced = set()
     needs_sstream = False
+
+    def _resolve_ref_name(otype: OCCTType) -> str:
+        """Resolve a method return/param type to the real wrapper class name,
+        following handle aliases (e.g. Prs3d_Presentation → Graphic3d_Structure)."""
+        if otype.is_handle and otype.handle_inner:
+            return _resolve_handle_inner(otype.handle_inner)
+        return otype.base_name
+
+    def _maybe_add_referenced(name: str) -> None:
+        # Collection/handle-collection types are defined in OcgCollectionWrappers.hpp
+        # (already included via the class header), so skip individual includes.
+        if name in COLLECTION_OR_HANDLE:
+            return
+        if name != cname and name in type_map._wrapper_names:
+            referenced.add(name)
+
     for method in cls.all_wrappable_methods:
-        if method.return_type and method.return_type.base_name in type_map._wrapper_names:
-            if method.return_type.base_name != cname and method.return_type.base_name not in COLLECTION_OR_HANDLE:
-                referenced.add(method.return_type.base_name)
-            elif method.return_type.base_name in COLLECTION_OR_HANDLE:
-                resolved = _resolve_handle_inner(method.return_type.base_name)
-                if resolved != method.return_type.base_name and resolved in type_map._wrapper_names:
-                    referenced.add(resolved)
+        if method.return_type:
+            _maybe_add_referenced(_resolve_ref_name(method.return_type))
         for p in method.parameters:
-            if p.type.base_name in type_map._wrapper_names:
-                if p.type.base_name != cname and p.type.base_name not in COLLECTION_OR_HANDLE:
-                    referenced.add(p.type.base_name)
-            # For collection/handle types that alias a real scanned class, include the real class header
-            if p.type.base_name in COLLECTION_OR_HANDLE:
-                resolved = _resolve_handle_inner(p.type.base_name)
-                if resolved != p.type.base_name and resolved in type_map._wrapper_names:
-                    referenced.add(resolved)
+            _maybe_add_referenced(_resolve_ref_name(p.type))
             if p.type.base_name in ("Standard_OStream", "Standard_IStream"):
                 needs_sstream = True
     for ref in sorted(referenced):
@@ -447,9 +452,17 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     if method.return_type and not method.return_type.is_void:
         ret_base_orig = method.return_type.base_name
         # Resolve handle aliases (e.g. Prs3d_Presentation → Graphic3d_Structure)
+        # whenever the type is a handle, not only for HANDLE_COLLECTION_TYPES —
+        # aliases resolve to real scanned classes that are registered directly.
         ret_base = ret_base_orig
-        if method.return_type.is_handle and ret_base in HANDLE_COLLECTION_TYPES:
-            ret_base = _resolve_handle_inner(ret_base)
+        if method.return_type.is_handle and method.return_type.handle_inner:
+            ret_base = _resolve_handle_inner(method.return_type.handle_inner)
+        # For typedef aliases (e.g. Graphic3d_BndBox3d → BVH_Box<double, 3>),
+        # use the original spelling name for wrapper lookup
+        if not type_map.wrapper_name(ret_base):
+            alt = type_map._wrapper_name_for_otype(method.return_type)
+            if alt:
+                ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
         # const char* / Standard_CString return → wrap in String()
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(call))
@@ -541,7 +554,15 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
 
     if method.return_type and not method.return_type.is_void:
         ret_base_orig = method.return_type.base_name
-        ret_base = _resolve_handle_inner(ret_base_orig) if ret_base_orig in HANDLE_COLLECTION_TYPES else ret_base_orig
+        ret_base = ret_base_orig
+        if method.return_type.is_handle and method.return_type.handle_inner:
+            ret_base = _resolve_handle_inner(method.return_type.handle_inner)
+        # For typedef aliases (e.g. Graphic3d_BndBox3d → BVH_Box<double, 3>),
+        # use the original spelling name for wrapper lookup
+        if not type_map.wrapper_name(ret_base):
+            alt = type_map._wrapper_name_for_otype(method.return_type)
+            if alt:
+                ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(call))
         elif ret_base_orig in ("TCollection_AsciiString",):
@@ -608,7 +629,15 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
 
     if method.return_type and not method.return_type.is_void:
         ret_base_orig = method.return_type.base_name
-        ret_base = _resolve_handle_inner(ret_base_orig) if ret_base_orig in HANDLE_COLLECTION_TYPES else ret_base_orig
+        ret_base = ret_base_orig
+        if method.return_type.is_handle and method.return_type.handle_inner:
+            ret_base = _resolve_handle_inner(method.return_type.handle_inner)
+        # For typedef aliases (e.g. Graphic3d_BndBox3d → BVH_Box<double, 3>),
+        # use the original spelling name for wrapper lookup
+        if not type_map.wrapper_name(ret_base):
+            alt = type_map._wrapper_name_for_otype(method.return_type)
+            if alt:
+                ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(static_call))
         elif ret_base_orig in ("TCollection_AsciiString",):
@@ -679,7 +708,10 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
             continue
         if p.type.is_handle:
             # Handle params need ._handle (ref-counted wrapper) not ._native
-            if type_map.is_wrapped(base):
+            # Resolve aliases (e.g. Prs3d_Presentation → Graphic3d_Structure) first,
+            # since base_name may be an unwrapped alias spelling.
+            resolved_base = _resolve_handle_inner(p.type.handle_inner) if p.type.handle_inner else base
+            if type_map.is_wrapped(base) or type_map.is_wrapped(resolved_base):
                 parts.append("{}->_handle".format(p.name))
             else:
                 # Unwrapped handle type — can't convert Ref<T> to handle<T>

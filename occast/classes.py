@@ -84,7 +84,8 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
     # libclang could not determine access (e.g. namespace-level entity, or
     # misconfiguration) — treat as non-public to be safe.
     has_protected_dtor = False
-    has_protected_ctor = False
+    has_any_nonpublic_ctor = False
+    has_any_public_ctor = False
     has_pure_virtual = False
     has_public_default_ctor = False
     for child in cursor.get_children():
@@ -93,9 +94,19 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
                 has_protected_dtor = True
         if child.kind == CursorKind.CONSTRUCTOR:
             if child.access_specifier != AccessSpecifier.PUBLIC:
-                has_protected_ctor = True
+                has_any_nonpublic_ctor = True
             else:
-                if len([p for p in child.get_children() if p.kind == CursorKind.PARM_DECL]) == 0:
+                has_any_public_ctor = True
+                parm_decls = [p for p in child.get_children() if p.kind == CursorKind.PARM_DECL]
+                if len(parm_decls) == 0:
+                    has_public_default_ctor = True
+                elif all(
+                    any(
+                        c.kind.name not in ('TYPE_REF', 'DECL_REF_EXPR', 'TEMPLATE_REF', 'NAMESPACE_REF', 'ANNOTATE_ATTR')
+                        for c in p.get_children()
+                    )
+                    for p in parm_decls
+                ):
                     has_public_default_ctor = True
         if child.kind == CursorKind.CXX_METHOD and child.is_pure_virtual_method():
             has_pure_virtual = True
@@ -124,7 +135,7 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
 
     # Skip classes where all constructors are protected/private (can't instantiate)
     # Transient descendants are exempt — they get null handles instead.
-    if has_protected_ctor and not has_public_default_ctor and not is_transient_descendant(cursor):
+    if has_any_nonpublic_ctor and not has_any_public_ctor and not is_transient_descendant(cursor):
         return None
 
     # Skip abstract classes that are NOT transient descendants.
