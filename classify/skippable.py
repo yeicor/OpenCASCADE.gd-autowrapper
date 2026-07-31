@@ -230,8 +230,6 @@ SKIP_METHODS = {
     "InitFromJson",  # JSON streaming
     "ShallowCopy", "ShallowDump",  # Internal OCCT
     "Destroy",  # Internal/debug methods
-    "Dump",  # Debug dump (may be detected incorrectly by libclang)
-    "Statistics",  # May be confused with Dump by libclang
     "BVH",  # Returns BVH_Tree<double, 3> handle that scanner misidentifies as int32_t
     "operator new", "operator delete",
     "operator new[]", "operator delete[]",
@@ -240,9 +238,7 @@ SKIP_METHODS = {
     "Transforms",  # System-only static method: exists in system headers but removed in vcpkg OCCT
     "Reset",  # Returns Type& on abstract REF_COUNTED classes — chaining not useful in GDScript
     "GetImage",  # Usually protected or internal; GetImage(const handle<>&) is driver-internal
-    "GetStream",  # Returns Standard_OStream& — not useful across FFI
     "createNewEntity",  # Protected virtual method (AccessSpecifier.INVALID detected as public)
-    "DumpExtent",  # Returns Standard_OStream& — unboundable return type
     "GetPoints",  # AIS_PointCloud: returns handle<Graphic3d_ArrayOfPoints> — libclang mis-resolves to int32_t
     "PerformCommonBlocks",  # BOPAlgo_Tools: libclang can't resolve overloaded template types → wrong param count
     "EntitySetBuilder",  # SelectMgr_ViewerSelector: returns handle<BVH_Builder<...>> — libclang mis-resolves to int32_t
@@ -449,6 +445,13 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
 
         # Check return type
         if method.return_type and not method.return_type.is_void:
+            if method.return_type.base_name == "Standard_OStream":
+                # Wrappable only when the stream comes in as a param we absorb into
+                # a local ostringstream (dump-style methods returning the stream by ref).
+                if not any(p.type.base_name == "Standard_OStream" for p in method.parameters):
+                    method.skip = True
+                    method.skip_reason = "returns internal Standard_OStream&"
+                    continue
             if not check_type_wrappable(method.return_type, f"{context} (return type)",
                                         wrapped_names, enum_names):
                 method.skip = True

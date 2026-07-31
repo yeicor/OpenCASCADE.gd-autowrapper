@@ -477,6 +477,11 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             lines.append("    ::godot::String ocg_ret(ocg_buf);")
             lines.append("    delete[] ocg_buf;")
             lines.append("    return ocg_ret;")
+        elif ret_base_orig == "Standard_OStream":
+            # Dump-style method: emit the call into the absorbed ostream, then
+            # return its contents as a String.
+            lines.append("    {};".format(call))
+            lines.append("    return ::godot::String(ocg_os.str().c_str());")
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):

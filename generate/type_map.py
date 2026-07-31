@@ -383,6 +383,10 @@ class TypeMap:
 
         base = otype.base_name
 
+        # Standard_OStream returns (dump-style with absorbed ostream param) → String
+        if base == "Standard_OStream":
+            return "String"
+
         # const char* / char* returns → String
         if base in ("char", "Standard_CString") and otype.is_pointer:
             return "String"
