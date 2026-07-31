@@ -318,7 +318,7 @@ def check_type_wrappable(param_type: OCCTType, context: str,
                          for_param: bool = False,
                          copyable_names: set[str] | None = None) -> bool:
     """Check if a parameter type can be wrapped. Prints WARNING if not."""
-    from generate.type_map import PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, HANDLE_COLLECTION_TYPES
+    from generate.type_map import PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, HANDLE_COLLECTION_TYPES, COLLECTION_TYPES
 
     # Check unwrappable base types
     # For ref-to-pointer types (e.g. BRepMesh_DiscretRoot*&), base_name retains
@@ -379,6 +379,7 @@ def check_type_wrappable(param_type: OCCTType, context: str,
                    or base in HANDLE_COLLECTION_TYPES)
               and (param_type.is_transient_descendant
                    or base in HANDLE_COLLECTION_TYPES
+                   or base in COLLECTION_TYPES
                    or copyable_names is None
                    or base in copyable_names)):
             # Raw pointer to a wrapped class as a return type. Enabled only when

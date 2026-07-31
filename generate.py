@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from model import ModuleDecl, ClassKind
 from scanner import scan_all_modules, MODULES
+from classify.skippable import NON_SCANNED_ENUMS
 from generate.type_map import TypeMap
 from generate.header import generate_header
 from generate.source import generate_source, generate_primitive_wrappers_header, generate_collection_wrappers_header
@@ -153,7 +154,7 @@ def main():
     # Re-run skippable marking after vcpkg filtering — some types may have been removed,
     # leaving methods referencing now-unwrapped types.
     # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
-    from classify.skippable import NON_SCANNED_ENUMS, mark_skippable_methods
+    from classify.skippable import mark_skippable_methods
     updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
     updated_copyable_names = {cls.name for cls in all_classes if cls.has_copy_assignment}
     # Reset skip flags and re-run marking with complete type info
