@@ -15,7 +15,7 @@ from model import ModuleDecl, ClassDecl, EnumDecl, ClassKind, occt_name_to_wrapp
 from occast.classes import extract_classes
 from occast.enums import extract_tu_enums
 from classify.kind import classify_all
-from classify.skippable import mark_skippable_methods
+from classify.skippable import NON_SCANNED_ENUMS, mark_skippable_methods
 from classify.overloads import group_overloads
 
 
@@ -309,40 +309,7 @@ def scan_all_modules(
             if e.is_nested and e.parent_class:
                 all_enum_names.add(f"{e.parent_class}::{e.name}")
         # Also include enum names from modules we don't scan (non-scanned enums match)
-        all_enum_names |= {
-            "IFSelect_ReturnStatus", "IFSelect_PrintFail", "IFSelect_PrintCount",
-            "Font_FontAspect",
-            "gp_Dir::D", "gp_Dir2d::D",
-            # Note: AIS_Manipulator::BehaviorOnTransform is a STRUCT, not an enum,
-            # so it's NOT added here despite being in extra_enum_names historically.
-            "Draft_ErrorStatus",
-            "ChFi3d_FilletShape",
-            "ChFiDS_ErrorStatus", "ChFiDS_ChamfMode",
-            "ChFi2d_ConstructionError",
-            "GeomFill_Trihedron",
-            "BRepFill_TypeOfContact", "BRepFill_ThruSectionErrorStatus",
-            "BRepOffset_Mode",
-            "BRepMesh_GeomTool::IntFlag",
-            "LocOpe_Operation",
-            "Extrema_ExtAlgo", "Extrema_ExtFlag",
-            # Additional enum names that libclang fails to auto-detect
-            "Select3D_TypeOfSensitivity",
-            "AIS_SelectionScheme",
-            "Approx_ParametrizationType",
-            "DsgPrs_ArrowSide",
-            "Interface_CheckStatus",
-            "Interface_ParamType",
-            "IMeshTools_MeshAlgoType",
-            "AIS_Manipulator::ManipulatorSkin",
-            "Aspect_XRSession::TrackingUniverseOrigin",
-            "Bnd_Range::IntersectStatus",
-            "Graphic3d_Camera::Projection",
-            "Graphic3d_Camera::IODType",
-            "Graphic3d_Camera::FocusType",
-            "Graphic3d_RenderingParams::PerfCounters",
-            "XCAFDoc_AssemblyGraph::NodeType",
-
-        }
+        all_enum_names |= NON_SCANNED_ENUMS
 
         # Mark skippable methods
         for cls in mod.classes:

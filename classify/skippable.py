@@ -236,6 +236,81 @@ SKIP_METHODS = {
 
 STREAM_TYPES = {"Standard_OStream", "Standard_IStream", "Standard_SStream"}
 
+# Enum types from OCCT modules we don't scan (plain C enums or scoped enums that
+# can be passed as int32_t). libclang fails to auto-detect some of them, so we
+# list them explicitly. Used by both scanner and generator so skip analysis and
+# codegen agree on what counts as an enum.
+NON_SCANNED_ENUMS: set[str] = {
+    # Extrema
+    "Extrema_ExtAlgo", "Extrema_ExtFlag",
+    # IFSelect
+    "IFSelect_ReturnStatus", "IFSelect_PrintFail", "IFSelect_PrintCount",
+    # Font
+    "Font_FontAspect",
+    # Aspect (non-scanned nested enums)
+    "Aspect_VKey", "Aspect_HatchStyle",
+    "Aspect_GraphicsLibrary",
+    # PCDM
+    "PCDM_StoreStatus", "PCDM_ReaderStatus",
+    # DsgPrs
+    "DsgPrs_ArrowSide",
+    # Select3D
+    "Select3D_TypeOfSensitivity",
+    # Approx
+    "Approx_ParametrizationType",
+    # Poly
+    "Poly_MeshPurpose",
+    # ChFi3d
+    "ChFi3d_FilletShape",
+    # ChFiDS
+    "ChFiDS_ErrorStatus", "ChFiDS_ChamfMode",
+    # ChFi2d
+    "ChFi2d_ConstructionError",
+    # GeomFill
+    "GeomFill_Trihedron",
+    # Draft
+    "Draft_ErrorStatus",
+    # BRepFill
+    "BRepFill_TypeOfContact", "BRepFill_ThruSectionErrorStatus",
+    # BRepOffset
+    "BRepOffset_Mode",
+    # BRepMesh
+    "BRepMesh_GeomTool::IntFlag",
+    # ShapeProcess
+    # "ShapeProcess::OperationsFlags",  # Not an enum (std::bitset)
+    # XSAlgo
+    # "XSAlgo_ShapeProcessor::ProcessingFlags",  # Not an enum (std::pair)
+    # LocOpe
+    "LocOpe_Operation",
+    # XCAFPrs
+    "XCAFPrs_DocumentExplorerFlags",
+    # XCAFDoc
+    "XCAFDoc_AssemblyGraph::NodeType",
+    # FS
+    "FS_VARStatuses",
+    # StdSelect
+    "StdSelect_TypeOfSelectionImage",
+    # AIS
+    "AIS_SelectionScheme",
+    "AIS_Manipulator::ManipulatorSkin",
+    # gp_Dir/Dir2d nested enums — scoped enum classes not scanned properly
+    "gp_Dir::D", "gp_Dir2d::D",
+    # Interface module (not scanned)
+    "Interface_CheckStatus",
+    "Interface_ParamType",
+    # IMeshTools
+    "IMeshTools_MeshAlgoType",
+    # Aspect
+    "Aspect_XRSession::TrackingUniverseOrigin",
+    # Bnd
+    "Bnd_Range::IntersectStatus",
+    # Graphic3d
+    "Graphic3d_Camera::Projection",
+    "Graphic3d_Camera::IODType",
+    "Graphic3d_Camera::FocusType",
+    "Graphic3d_RenderingParams::PerfCounters",
+}
+
 
 def check_type_wrappable(param_type: OCCTType, context: str,
                          wrapped_names: set[str] | None = None,

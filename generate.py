@@ -146,84 +146,6 @@ def main():
         all_enum_names.add(e.name)
         if e.is_nested and e.parent_class:
             all_enum_names.add(f"{e.parent_class}::{e.name}")
-    # Non-scanned enum types from OCCT modules not in our MODULES list.
-    # These are plain C enums or scoped enums that can be passed as int32_t.
-    NON_SCANNED_ENUMS: set[str] = {
-        # Extrema
-        "Extrema_ExtAlgo", "Extrema_ExtFlag",
-        # IFSelect
-        "IFSelect_ReturnStatus", "IFSelect_PrintFail", "IFSelect_PrintCount",
-        # Font
-        "Font_FontAspect",
-        # Aspect (non-scanned nested enums)
-        "Aspect_VKey", "Aspect_HatchStyle",
-        "Aspect_GraphicsLibrary",
-        # PCDM
-        "PCDM_StoreStatus", "PCDM_ReaderStatus",
-        # DsgPrs
-        "DsgPrs_ArrowSide",
-        # Select3D
-        "Select3D_TypeOfSensitivity",
-        # Approx
-        "Approx_ParametrizationType",
-        # Poly
-        "Poly_MeshPurpose",
-        # ChFi3d
-        "ChFi3d_FilletShape",
-        # ChFiDS
-        "ChFiDS_ErrorStatus", "ChFiDS_ChamfMode",
-        # ChFi2d
-        "ChFi2d_ConstructionError",
-        # GeomFill
-        "GeomFill_Trihedron",
-        # Draft
-        "Draft_ErrorStatus",
-        # BRepFill
-        "BRepFill_TypeOfContact", "BRepFill_ThruSectionErrorStatus",
-        # BRepOffset
-        "BRepOffset_Mode",
-        # BRepMesh
-        "BRepMesh_GeomTool::IntFlag",
-        # XSAlgo
-        # "XSAlgo_ShapeProcessor::ProcessingFlags",  # Not an enum (std::pair)
-        # ShapeProcess
-        # "ShapeProcess::OperationsFlags",  # Not an enum (std::bitset)
-        # LocOpe
-        "LocOpe_Operation",
-        # XCAFPrs
-        "XCAFPrs_DocumentExplorerFlags",
-        # XCAFDoc
-        "XCAFDoc_AssemblyGraph::NodeType",
-        # FS
-        "FS_VARStatuses",
-
-
-        # StdSelect
-        "StdSelect_TypeOfSelectionImage",
-        "AIS_SelectionScheme",
-        # Graphic3d
-        # gp_Dir/Dir2d nested enums — scoped enum classes not scanned properly
-        "gp_Dir::D",
-        "gp_Dir2d::D",
-        # Interface module (not scanned)
-        "Interface_CheckStatus",
-        "Interface_ParamType",
-        # IMeshTools
-        "IMeshTools_MeshAlgoType",
-        # AIS
-        "AIS_Manipulator::ManipulatorSkin",
-        "AIS_SelectionScheme",
-        # Aspect
-        "Aspect_XRSession::TrackingUniverseOrigin",
-        # Bnd
-        "Bnd_Range::IntersectStatus",
-        # Graphic3d
-        "Graphic3d_Camera::Projection",
-        "Graphic3d_Camera::IODType",
-        "Graphic3d_Camera::FocusType",
-        "Graphic3d_RenderingParams::PerfCounters",
-
-    }
     all_enum_names |= NON_SCANNED_ENUMS
 
     type_map = TypeMap(all_classes, all_enums, extra_enum_names=all_enum_names)
@@ -231,7 +153,7 @@ def main():
     # Re-run skippable marking after vcpkg filtering — some types may have been removed,
     # leaving methods referencing now-unwrapped types.
     # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
-    from classify.skippable import mark_skippable_methods
+    from classify.skippable import NON_SCANNED_ENUMS, mark_skippable_methods
     updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys())
     updated_copyable_names = {cls.name for cls in all_classes if cls.has_copy_assignment}
     # Reset skip flags and re-run marking with complete type info
