@@ -240,6 +240,7 @@ SKIP_METHODS = {
     "PerformCommonBlocks",  # BOPAlgo_Tools: libclang can't resolve overloaded template types → wrong param count
     "EntitySetBuilder",  # SelectMgr_ViewerSelector: returns handle<BVH_Builder<...>> — libclang mis-resolves to int32_t
     "SetAllContext",  # XSControl_WorkSession: param XSControl_WorkSessionMap (templated) mis-resolved to int32_t
+    "MemoryInfo",  # Graphic3d_GraphicDriver: param size_t& mis-resolved to int32_t by libclang — passing a 4-byte ref where OCCT writes 8 bytes corrupts memory
 }
 
 

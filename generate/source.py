@@ -66,18 +66,58 @@ def generate_primitive_wrappers_header() -> str:
     # get_value/set_value signatures instead.
     _UNBINDABLE = {"char": "int32_t"}
 
+    # String output wrappers: _native holds a TCollection string, exposed as String.
+    _STRING_WRAPPERS = {
+        "OcgTCollectionAsciiString": "TCollection_AsciiString",
+        "OcgTCollectionExtendedString": "TCollection_ExtendedString",
+    }
+
     lines = []
     lines.append("// Auto-generated primitive wrapper classes for non-const ref output params -- DO NOT EDIT")
     lines.append("#pragma once")
     lines.append("")
     lines.append("#include <godot_cpp/classes/ref_counted.hpp>")
     lines.append("#include <godot_cpp/core/class_db.hpp>")
+    if _STRING_WRAPPERS:
+        lines.append("#include <godot_cpp/variant/string.hpp>")
+        lines.append("#include <TCollection_AsciiString.hxx>")
+        lines.append("#include <TCollection_ExtendedString.hxx>")
     lines.append("")
     lines.append("using namespace godot;")
     lines.append("")
 
     # Generate a wrapper class for each primitive wrapper type
     for wrapper_name, cpp_type in sorted(PRIMITIVE_WRAPPER_CPP_TYPE.items()):
+        if wrapper_name in _STRING_WRAPPERS:
+            get_body = "return ::godot::String(_native.ToCString());"
+            if wrapper_name == "OcgTCollectionExtendedString":
+                get_body = (
+                    "Standard_Integer ocg_len = _native.LengthOfCString();"
+                    "char* ocg_buf = new char[ocg_len + 1];"
+                    "_native.ToUTF8CString(ocg_buf);"
+                    "ocg_buf[ocg_len] = '\\0';"
+                    "::godot::String ocg_ret(ocg_buf);"
+                    "delete[] ocg_buf;"
+                    "return ocg_ret;")
+            lines.append("class {} : public RefCounted {{".format(wrapper_name))
+            lines.append("    GDCLASS({}, RefCounted)".format(wrapper_name))
+            lines.append("public:")
+            lines.append("    {} _native;".format(cpp_type))
+            lines.append("")
+            lines.append("    {}() : RefCounted(), _native() {{}}".format(wrapper_name))
+            lines.append("")
+            lines.append("    ::godot::String get_value() const {{ {} }}".format(get_body))
+            lines.append("    void set_value(const ::godot::String& v) {{ _native = {}(v.utf8().get_data()); }}".format(cpp_type))
+            lines.append("")
+            lines.append("protected:")
+            lines.append("    static void _bind_methods() {")
+            lines.append('        ClassDB::bind_method(D_METHOD("get_value"), &{}::get_value);'.format(wrapper_name))
+            lines.append('        ClassDB::bind_method(D_METHOD("set_value", "value"), &{}::set_value);'.format(wrapper_name))
+            lines.append("    }")
+            lines.append("};")
+            lines.append("")
+            continue
+
         bind_type = _UNBINDABLE.get(cpp_type, cpp_type)
         cast_to_bind = "(int32_t)" if bind_type != cpp_type else ""
         cast_from_bind = "static_cast<{}>({})".format(cpp_type, "v") if bind_type != cpp_type else "v"

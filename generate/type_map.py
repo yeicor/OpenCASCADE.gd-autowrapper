@@ -109,6 +109,8 @@ _PRIMITIVE_WRAPPER_MAP = {
     "char": "OcgStandardCharacter",
     "int64_t": "OcgStandardLongInteger",
     "uint64_t": "OcgStandardULongInteger",
+    "TCollection_AsciiString": "OcgTCollectionAsciiString",
+    "TCollection_ExtendedString": "OcgTCollectionExtendedString",
 }
 
 # C++ types for primitive wrapper classes
@@ -121,6 +123,8 @@ PRIMITIVE_WRAPPER_CPP_TYPE = {
     "OcgStandardCharacter": "char",
     "OcgStandardLongInteger": "int64_t",
     "OcgStandardULongInteger": "uint64_t",
+    "OcgTCollectionAsciiString": "TCollection_AsciiString",
+    "OcgTCollectionExtendedString": "TCollection_ExtendedString",
 }
 
 # Collection wrapper types: auto-discovered from method signatures.
