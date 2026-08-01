@@ -503,10 +503,8 @@ def check_type_wrappable(param_type: OCCTType, context: str,
     # through to the generic checks below.
     if for_param and param_type.is_ref and not param_type.is_const and not param_type.is_handle:
         if is_enum:
-            # Non-const ref of enum: needs enum output wrapper (not yet implemented)
-            print(f"  WARNING: skipping '{context}' — non-const ref enum output param '{param_type.spelling}' needs wrapper",
-                  file=sys.stderr)
-            return False
+            # Non-const ref of enum → Ref<OcgEnumValue> mutable out-param holder
+            pass
         elif base in PRIMITIVE_MAP:
             # Check that a primitive wrapper class exists for this type
             from generate.type_map import _PRIMITIVE_WRAPPER_MAP

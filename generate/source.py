@@ -144,6 +144,27 @@ def generate_primitive_wrappers_header() -> str:
         lines.append("};")
         lines.append("")
 
+    # Generic mutable enum holder for non-const ref/pointer enum output params.
+    # Stores the enum value as int64_t; call sites reinterpret_cast _native to
+    # the concrete OCCT enum type.
+    lines.append("class OcgEnumValue : public RefCounted {")
+    lines.append("    GDCLASS(OcgEnumValue, RefCounted)")
+    lines.append("public:")
+    lines.append("    int64_t _native;")
+    lines.append("")
+    lines.append("    OcgEnumValue() : RefCounted(), _native(0) {}")
+    lines.append("")
+    lines.append("    int64_t get_value() const { return _native; }")
+    lines.append("    void set_value(int64_t v) { _native = v; }")
+    lines.append("")
+    lines.append("protected:")
+    lines.append("    static void _bind_methods() {")
+    lines.append('        ClassDB::bind_method(D_METHOD("get_value"), &OcgEnumValue::get_value);')
+    lines.append('        ClassDB::bind_method(D_METHOD("set_value", "value"), &OcgEnumValue::set_value);')
+    lines.append("    }")
+    lines.append("};")
+    lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
@@ -1040,7 +1061,10 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
                 parts.append(p.name)
         elif p.type.is_ref and not p.type.is_const and not p.type.is_handle:
             # Non-const ref output params: pass mutable reference to wrapper's internal storage
-            if type_map.is_wrapped(base):
+            if type_map._is_enum(base):
+                enum_qualified = type_map.qualified_enum_name(base, cls_name)
+                parts.append("*reinterpret_cast<{}*>(&{}->_native)".format(enum_qualified, p.name))
+            elif type_map.is_wrapped(base):
                 if type_map.class_kind(base) == ClassKind.BUILDER:
                     parts.append("*{}->_builder.get()".format(p.name))
                 elif type_map.is_refcounted(base) or base in HANDLE_COLLECTION_TYPES:

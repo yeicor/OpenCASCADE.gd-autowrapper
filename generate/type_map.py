@@ -459,9 +459,9 @@ class TypeMap:
             wname = self._wrapper_names.get(base)
             if wname:
                 return f"Ref<{wname}>"
-            # Non-const ref of enum → int32_t (mutable ref param)
+            # Non-const ref of enum → Ref<OcgEnumValue> (mutable enum out-param)
             if self._is_enum(base):
-                return "int32_t"
+                return "Ref<OcgEnumValue>"
 
         # const char* / char* params → String (godot string → OCCT)
         if base in ("char", "Standard_CString") and otype.is_pointer:
