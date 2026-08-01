@@ -76,7 +76,6 @@ UNWRAPPABLE_TYPES = {
     "BehaviorOnTransform",
     "PeriodicityParams",
     "HalfSizes",
-    "Limits",
     "CullingContext",
     "Aspect_XRSession::InfoString",
     # Template/internal NCollection types
@@ -133,7 +132,6 @@ UNWRAPPABLE_TYPES = {
     "Poly_CoherentTriangle *[2]",
     # TDF/TColStd internal collection types (in SKIP_CLASSES but also needed here for param use)
     "TDF_IDMap",
-    "TColStd_PackedMapOfInteger",
     # OSD module types (module not scanned)
     "OSD_Path",
     # BOPAlgo nested structs
@@ -176,7 +174,6 @@ SKIP_CLASSES = {
     "TCollection_AsciiString",
     "TCollection_ExtendedString",
     "TCollection_HExtendedString",
-    "TColStd_PackedMapOfInteger",
     "TDataStd_HLabelArray1",
     "TDF_HAttributeArray1",
     # BRepPrim internal implementation classes (accessed via Make* wrappers)
@@ -342,6 +339,9 @@ NON_SCANNED_ENUMS: set[str] = {
     "IMeshTools_MeshAlgoType",
     # Aspect
     "Aspect_XRSession::TrackingUniverseOrigin",
+    "Aspect_XRSession::InfoString",
+    # XCAFDoc
+    "UnitsMethods_LengthUnit",
     # Bnd
     "Bnd_Range::IntersectStatus",
     # Graphic3d
@@ -408,6 +408,12 @@ def check_type_wrappable(param_type: OCCTType, context: str,
     if not for_param:
         from generate.type_map import resd_members_for_type
         if resd_members_for_type(param_type):
+            return True
+
+    # Bnd_*::Limits nested double-struct returns are packed into PackedFloat64Array
+    if not for_param:
+        from generate.type_map import bnd_limits_members_for_type
+        if bnd_limits_members_for_type(param_type):
             return True
 
     # Enum types are always wrappable (mapped to int32_t with static_cast)
@@ -477,8 +483,11 @@ def check_type_wrappable(param_type: OCCTType, context: str,
             return False
 
     # Non-const reference output parameters: wrappable if the base type is a
-    # wrapped class, or a primitive that has a wrapper class
-    if param_type.is_ref and not param_type.is_const and not param_type.is_handle:
+    # wrapped class, or a primitive that has a wrapper class. Only applies to
+    # PARAMETERS — a non-const ref RETURN is just a copyable value (the wrapper
+    # returns it by value), so enum/primitive/wrapped-class ref returns fall
+    # through to the generic checks below.
+    if for_param and param_type.is_ref and not param_type.is_const and not param_type.is_handle:
         if is_enum:
             # Non-const ref of enum: needs enum output wrapper (not yet implemented)
             print(f"  WARNING: skipping '{context}' — non-const ref enum output param '{param_type.spelling}' needs wrapper",

@@ -8,7 +8,7 @@ from classify.skippable import _resolve_handle_inner
 from generate.type_map import (TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP,
                                PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES,
                                HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES,
-                               resd_members_for_type)
+                               resd_members_for_type, bnd_limits_members_for_type)
 
 
 def _resolve_via_canonical(otype: OCCTType, type_map: TypeMap) -> str | None:
@@ -713,6 +713,15 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
                 lines.append("        ocg_m{}->_native = ocg_result.{};".format(i, member_name))
                 lines.append("        ocg_ret.append(ocg_m{});".format(i))
                 lines.append("    }")
+            lines.append("    return ocg_ret;")
+        elif bnd_limits_members_for_type(method.return_type):
+            # Bnd_*::Limits nested double-struct return → PackedFloat64Array
+            members = bnd_limits_members_for_type(method.return_type)
+            lines.append("    auto ocg_result = {};".format(call))
+            lines.append("    PackedFloat64Array ocg_ret;")
+            lines.append("    ocg_ret.resize({});".format(len(members)))
+            for i, member in enumerate(members):
+                lines.append("    ocg_ret.set({}, ocg_result.{});".format(i, member))
             lines.append("    return ocg_ret;")
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
