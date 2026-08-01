@@ -182,6 +182,18 @@ def main():
                 m.skip_reason = ""
             mark_skippable_methods(cls, updated_wrapped_names, all_enum_names, updated_copyable_names)
 
+    # Overload suffixing and deduplication must be re-run with the FINAL skip
+    # info.  The scanner's earlier pass ran with partial type info (before
+    # collection/handle discovery), so a method that was skipped then but is
+    # wrappable now could keep a stale hashed name and evade the identical-GD-
+    # signature collapse (e.g. Graphic3d_Text::SetText emitted as both
+    # SetText_m and SetText).
+    from classify.overloads import dedupe_methods, group_overloads
+    for mod in modules:
+        for cls in mod.classes:
+            group_overloads(cls)
+            dedupe_methods(cls)
+
     # Report final coverage after complete type info is available
     total_all_methods = sum(len(c.all_methods) for m in modules for c in m.classes)
     total_skipped = sum(1 for m in modules for c in m.classes for meth in c.all_methods if meth.skip)

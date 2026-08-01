@@ -395,18 +395,25 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     # TDataStd_GenericExtString), so we never allocate them via `new`.
     has_declared_default_ctor = any(len(c.parameters) == 0 for c in cls.constructors)
 
+    # The default constructor is the GDExtension entry point (GDScript `new()`)
+    # and MUST never let an OCCT exception escape — it would call std::terminate
+    # and abort Godot (e.g. BRepBuilderAPI_MakeShape::Shape() throws
+    # StdFail_NotDone). Body statements that call into OCCT are wrapped in a
+    # try/catch that records the error (via OcgErrors) and leaves the object in
+    # a safe null-native state.
+    ctor_body: list[str] = []
     if cls.kind == ClassKind.BUILDER:
         if has_declared_default_ctor:
-            lines.append("    _builder = std::make_unique<{}>();".format(cname))
-            lines.append("    _builder->Build();")
-            lines.append("    _result = _builder->Shape();")
+            ctor_body.append("    _builder = std::make_unique<{}>();".format(cname))
+            ctor_body.append("    _builder->Build();")
+            ctor_body.append("    _result = _builder->Shape();")
         else:
-            lines.append("    // No default constructor — _builder is null; use factory methods")
+            ctor_body.append("    // No default constructor — _builder is null; use factory methods")
     elif cls.kind == ClassKind.REF_COUNTED:
         if has_declared_default_ctor and not cls.has_pure_virtual:
-            lines.append("    _handle = new ::{}();".format(cname))
+            ctor_body.append("    _handle = new ::{}();".format(cname))
         else:
-            lines.append("    // No default constructor — _handle is null; use factory methods")
+            ctor_body.append("    // No default constructor — _handle is null; use factory methods")
     elif cls.kind in (ClassKind.VALUE, ClassKind.TOPODS_SHAPE):
         if cls.has_public_default_ctor:
             # VALUE/TOPODS_SHAPE with default ctor (declared or implicit): _native
@@ -416,12 +423,24 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             # and GCC may generate spurious -Wchanges-meaning warnings with it.
             pass
         else:
-            lines.append("    // No default constructor — use factory methods")
+            ctor_body.append("    // No default constructor — use factory methods")
     else:
         if cls.has_public_default_ctor:
             pass  # implicit default construction
         else:
-            lines.append("    // No default constructor — use factory methods")
+            ctor_body.append("    // No default constructor — use factory methods")
+
+    # Only OCCT-calling bodies need the guard; comment-only bodies are emitted as-is.
+    guard_ctor = cls.kind == ClassKind.BUILDER or (
+        cls.kind == ClassKind.REF_COUNTED and has_declared_default_ctor and not cls.has_pure_virtual)
+    if guard_ctor:
+        lines.append("    try {")
+        lines.append("        OCC_CATCH_SIGNALS")
+        for b in ctor_body:
+            lines.append(("    " + b) if b else b)
+        lines.append("    } OCCT_GUARD_CATCH_CTOR()")
+    else:
+        lines.extend(ctor_body)
 
     lines.append("}")
     lines.append("")
@@ -440,6 +459,11 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
         ctor_start = len(lines)
         lines.append("Ref<{}> {}::{}({}) {{".format(wname, wname, unique, params))
         lines.append("    Ref<{}> ref; ref.instantiate();".format(wname))
+        # instantiate() runs the (guarded) default constructor, which may record
+        # a spurious error for builders whose default-constructed state is not
+        # done. The factory's own construction below is authoritative, so clear
+        # any error it left behind.
+        lines.append("    occt_gd::clear_last_error();")
         _emit_stream_locals(lines, ctor)
         _emit_array_locals(lines, ctor, type_map)
 

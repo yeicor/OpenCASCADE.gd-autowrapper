@@ -158,6 +158,7 @@ class MethodDecl:
     is_pure_virtual: bool = False  # = 0
     is_overload: bool = False      # has same-name sibling
     overload_index: int = 0        # 0-based index among overloads
+    overload_suffix: str = ""      # collision-aware hash disambiguator (set by group_overloads)
     operator_type: OperatorType | None = None
     doc: DocBlock = field(default_factory=DocBlock)
     skip: bool = False             # True if unwrappable
@@ -231,10 +232,12 @@ def occt_name_to_wrapper(occt_name: str, module_name: str) -> str:
         TopoDS_Shape, TopoDS    -> OcgTopoDSShape
         BRepPrimAPI_MakeBox, ... -> OcgBRepPrimAPIMakeBox
         NCollection_Array2<gp_Pnt> -> OcgNCollectionArray2_gp_Pnt
+        Aspect_DisplayConnection -> OcgAspectDisplayConnection
+        Geom_BSplineSurface     -> OcgGeomBSplineSurface
     """
     clean = _sanitize_identifier(occt_name)
     parts = clean.replace("::", "_").split("_")
-    camel = "".join(p.capitalize() if not p.isupper() else p for p in parts)
+    camel = "".join(p[:1].upper() + p[1:] if p else "" for p in parts)
     return f"Ocg{camel}"
 
 
