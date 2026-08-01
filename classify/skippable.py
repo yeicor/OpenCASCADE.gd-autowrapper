@@ -18,8 +18,6 @@ UNWRAPPABLE_TYPES = {
     "Graphic3d_Vec2i", "Graphic3d_Vec2", "Graphic3d_Vec3", "Graphic3d_Vec4",
     # SelectBasics types
     # SelectBasics_PickResult — simple struct, wrappable via VALUE_TYPE_OVERRIDES
-    # Platform-specific GLX frame buffer config (pointer type)
-    "Aspect_FBConfig",
     # BOPAlgo pointer/collection types
     "BOPAlgo_PPaveFiller",
     "BOPAlgo_PBuilder",
@@ -29,7 +27,6 @@ UNWRAPPABLE_TYPES = {
     # Graphic3d template types
     "Graphic3d_BndBox4f",
     # Pointer types that can't be wrapped
-    "V3d_ViewerPointer",
     # BVH tree template types (BVH_Tree<double, 3> etc.) — scanner misidentifies return type
     "BVH_Tree",
     # NCollection_DefaultHasher — template class; libclang resolves it incorrectly
@@ -65,11 +62,9 @@ UNWRAPPABLE_TYPES = {
     # Graphic3d template types
     "Graphic3d_BndBox4f",
     # Pointer types that can't be wrapped
-    "V3d_ViewerPointer",
     "Standard_PCharacter",
     "Standard_PExtCharacter",
     "TDF_LabelNodePtr",
-    "TDocStd_XLinkPtr",
     "BRepMesh_DiscretRoot",
     # Nested structs inside classes (not wrapped individually)
     "AxisAspect",
@@ -77,7 +72,6 @@ UNWRAPPABLE_TYPES = {
     "PeriodicityParams",
     "HalfSizes",
     "CullingContext",
-    "Aspect_XRSession::InfoString",
     # Template/internal NCollection types
     "NCollection_ForwardRangeSentinel",
     # Function pointer / callback types
@@ -155,6 +149,18 @@ HANDLE_ALIASES: dict[str, str] = {
     "PrsMgr_PresentationManager3d": "PrsMgr_PresentationManager",
     "V3d_Light": "Graphic3d_CLight",
     "PrsMgr_PresentableObject": "PrsMgr_PresentableObject",
+}
+
+# Opaque platform native-handle types (X11/GLX etc.) — pointers to opaque or
+# incomplete structs that OCCT passes around as raw addresses.  Wrapped as
+# uint64_t (Godot int), like void*.
+OPAQUE_POINTER_TYPES: set[str] = {
+    "Aspect_FBConfig",
+    "Aspect_RenderingContext",
+    "Aspect_XDisplay",
+    "Aspect_XVisualInfo",
+    "V3d_ViewerPointer",
+    "TDocStd_XLinkPtr",
 }
 
 def _resolve_handle_inner(name: str) -> str:
@@ -372,6 +378,11 @@ def check_type_wrappable(param_type: OCCTType, context: str,
             print(f"  WARNING: skipping '{context}' — non-const array output param '{param_type.spelling}' needs wrapper",
                   file=sys.stderr)
             return False
+        return True
+
+    # Opaque platform native-handle types (X11/GLX ...): wrapped as uint64_t
+    # raw addresses, like void*.  Both params and returns are safe.
+    if param_type.base_name in OPAQUE_POINTER_TYPES:
         return True
 
     # Check unwrappable base types

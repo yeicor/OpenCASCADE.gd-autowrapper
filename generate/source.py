@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl, OCCTType
 from classify.overloads import get_method_unique_name
-from classify.skippable import _resolve_handle_inner
+from classify.skippable import _resolve_handle_inner, OPAQUE_POINTER_TYPES
 from generate.type_map import (TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP,
                                PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES,
                                HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES,
@@ -789,6 +789,9 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             else:
                 lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
+        elif ret_base in OPAQUE_POINTER_TYPES:
+            # Opaque platform native-handle return → raw uint64_t address
+            lines.append("    return reinterpret_cast<uint64_t>({});".format(call))
         elif has_ostream:
             lines.append("    return {};".format(call))
         else:
@@ -875,6 +878,9 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
             else:
                 lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
+        elif ret_base in OPAQUE_POINTER_TYPES:
+            # Opaque platform native-handle return → raw uint64_t address
+            lines.append("    return reinterpret_cast<uint64_t>({});".format(call))
         elif has_ostream:
             lines.append("    return {};".format(call))
         else:
@@ -972,6 +978,9 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             else:
                 lines.append("    wrapper->_native = result;")
             lines.append("    return wrapper;")
+        elif ret_base in OPAQUE_POINTER_TYPES:
+            # Opaque platform native-handle return → raw uint64_t address
+            lines.append("    return reinterpret_cast<uint64_t>({});".format(static_call))
         elif has_ostream:
             lines.append("    return {};".format(static_call))
         else:
@@ -1020,6 +1029,16 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
         # to distinguish, since a plain void* is required for the latter.
         if base == "void" and p.type.is_pointer:
             parts.append("reinterpret_cast<{}void*>({})".format("const " if p.type.pointee_is_const else "", p.name))
+            continue
+        # Opaque platform native-handle types → reinterpret the uint64_t address
+        if base in OPAQUE_POINTER_TYPES:
+            # Strip a top-level "const " so pointer typedefs cast cleanly
+            # (e.g. `const Aspect_RenderingContext` → `Aspect_RenderingContext`,
+            # avoiding `type qualifiers ignored on cast result type` warnings).
+            spelling = p.type.spelling.strip()
+            if spelling.startswith("const "):
+                spelling = spelling[len("const "):].strip()
+            parts.append("reinterpret_cast<{}>({})".format(spelling, p.name))
             continue
         # uint8_t* / const uint8_t* → PackedByteArray data
         if base == "uint8_t" and p.type.is_pointer:

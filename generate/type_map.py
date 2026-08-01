@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from model import ClassDecl, ClassKind, EnumDecl, OCCTType, occt_name_to_wrapper
-from classify.skippable import _resolve_handle_inner
+from classify.skippable import _resolve_handle_inner, OPAQUE_POINTER_TYPES
 
 
 # Primitive type mappings (OCCT -> godot-cpp)
@@ -281,7 +281,6 @@ def discover_type_aliases(classes: list[ClassDecl]) -> tuple[dict[str, tuple[str
         # aliased types pointing to real scanned classes are not added to
         # HANDLE_COLLECTION_TYPES. Otherwise the forward-declaration logic
         # in header.py would skip them (seeing them as collection types).
-        from classify.skippable import _resolve_handle_inner
         resolved = _resolve_handle_inner(inner)
         if resolved in scanned_names or resolved in handle or resolved in collection:
             return
@@ -471,6 +470,10 @@ class TypeMap:
         if base == "void" and otype.is_pointer:
             return "uint64_t"
 
+        # Opaque platform native-handle types (X11/GLX ...) → raw address as uint64_t
+        if base in OPAQUE_POINTER_TYPES:
+            return "uint64_t"
+
         # uint8_t* / const uint8_t* params → PackedByteArray (raw byte buffer)
         if base == "uint8_t" and otype.is_pointer:
             return "PackedByteArray"
@@ -596,6 +599,10 @@ class TypeMap:
         if base in ("char", "Standard_Character") and not otype.is_pointer:
             return "int32_t"
 
+        # Opaque platform native-handle types → raw address as uint64_t
+        if base in OPAQUE_POINTER_TYPES:
+            return "uint64_t"
+
         if base in PRIMITIVE_MAP:
             return PRIMITIVE_MAP[base]
 
@@ -675,6 +682,10 @@ class TypeMap:
     def gd_type_for_param(self, otype: OCCTType) -> str:
         """Get the GDScript-facing parameter type (for D_METHOD)."""
         base = otype.base_name
+
+        # Opaque platform native-handle types → raw int address
+        if base in OPAQUE_POINTER_TYPES:
+            return "int"
 
         # NCollection_String params → String
         if base == "NCollection_String":
