@@ -7,10 +7,15 @@ from pathlib import Path
 from model import ModuleDecl
 
 
-def generate_module_header(modules: list[ModuleDecl], output_dir: Path) -> str:
+def generate_module_header(modules: list[ModuleDecl], output_dir: Path,
+                           enums_host: bool = False) -> str:
     """Generate module.h content with all includes and registration calls."""
     includes = []
     registrations = []
+
+    if enums_host:
+        includes.append('#include "OcgEnums.hpp"')
+        registrations.append('    godot::ClassDB::register_class<godot::OcgEnums>();')
 
     for mod in modules:
         for cls in mod.classes:

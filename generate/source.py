@@ -334,12 +334,18 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
         lines.append('    ClassDB::bind_static_method("{}", D_METHOD({}), &{}::{});'.format(
             wname, bind_params, wname, unique))
 
-    # Bind nested enums as integer constants
+    # Bind nested enums as real GDScript enums (OcgClass.EnumName.VALUE).
+    # C++ enumerator names are prefixed with the enum name, deduplicated the
+    # same way as in header.py so the names match exactly.
+    used_enum_names: set[str] = set()
     for enum in cls.nested_enums:
         for val in enum.values:
-            const_name = "{}_{}".format(enum.name, val.name)
-            lines.append('    ClassDB::bind_integer_constant(get_class_static(), "", "{}", static_cast<int64_t>({}::{}));'.format(
-                const_name, wname, const_name))
+            cpp_name = "{}_{}".format(enum.name, val.name)
+            while cpp_name in used_enum_names:
+                cpp_name += "_"
+            used_enum_names.add(cpp_name)
+            lines.append('    ClassDB::bind_integer_constant(get_class_static(), "{}", "{}", static_cast<int64_t>({}::{}));'.format(
+                enum.name, val.name, wname, cpp_name))
 
     lines.append("}")
     lines.append("")
@@ -401,6 +407,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
         params = _gen_param_list(ctor, type_map, cls=cls)
         args = _occt_args_for_call(ctor, type_map, cname)
 
+        ctor_start = len(lines)
         lines.append("Ref<{}> {}::{}({}) {{".format(wname, wname, unique, params))
         lines.append("    Ref<{}> ref; ref.instantiate();".format(wname))
         _emit_stream_locals(lines, ctor)
@@ -421,6 +428,8 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
 
         lines.append("    return ref;")
         lines.append("}")
+        lines.append("")
+        _guard_wrap_impl(lines, ctor_start, "Ref<{}>".format(wname))
         lines.append("")
 
     # --- Regular methods ---
@@ -529,6 +538,34 @@ def _try_gen_pointer_return(lines: list[str], method: MethodDecl, type_map: Type
     return True
 
 
+def _guard_wrap_impl(lines: list[str], start: int, ret: str) -> None:
+    """Wrap a generated function body (lines[start:] in the shared list) in a
+    try/catch guard so OCCT C++ exceptions never escape the GDExtension
+    boundary (they would otherwise call std::terminate and kill Godot).
+
+    Expects lines[start] to be the function signature line ending in '{' and,
+    optionally, the last two entries of `lines` to be the function's closing
+    '}' and a blank line (which are then consumed). Re-indents the body into
+    the try block and appends the OCCT_GUARD_CATCH epilogue (defined in the
+    force-included occt_guard.hxx).
+    """
+    if len(lines) >= 2 and lines[-1] == "" and lines[-2] == "}":
+        body_end = len(lines) - 2
+    else:
+        body_end = len(lines)
+    sig = lines[start]
+    body = lines[start + 1:body_end]
+    del lines[start:]
+    out = [sig, "    try {", "        OCC_CATCH_SIGNALS"]
+    for l in body:
+        out.append("    " + l if l else "")
+    macro = "OCCT_GUARD_CATCH_VOID();" if ret == "void" else "OCCT_GUARD_CATCH({});"
+    out.append("    } " + macro)
+    out.append("}")
+    out.append("")
+    lines.extend(out)
+
+
 def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
     """Generate implementation for a regular method."""
     from classify.skippable import _resolve_handle_inner
@@ -545,6 +582,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     const = " const" if method.is_const else ""
     args = _occt_args_for_call(method, type_map, cls.name)
 
+    func_start = len(lines)
     lines.append("{} {}::{}({}){} {{".format(ret, wname, unique, params, const))
 
     if cls.kind == ClassKind.REF_COUNTED:
@@ -576,8 +614,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             if alt:
                 ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
         if _try_gen_pointer_return(lines, method, type_map, call):
-            lines.append("}")
-            lines.append("")
+            _guard_wrap_impl(lines, func_start, ret)
             return
         # const char* / Standard_CString return → wrap in String()
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
@@ -648,8 +685,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         if has_ostream:
             lines.append("    return ::godot::String(ocg_os.str().c_str());")
 
-    lines.append("}")
-    lines.append("")
+    _guard_wrap_impl(lines, func_start, ret)
 
 
 def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
@@ -668,6 +704,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
     const = " const" if method.is_const else ""
     args = _occt_args_for_call(method, type_map, cls.name)
 
+    func_start = len(lines)
     lines.append("{} {}::{}({}){} {{".format(ret, wname, unique, params, const))
 
     if cls.kind == ClassKind.REF_COUNTED:
@@ -695,8 +732,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
             if alt:
                 ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
         if _try_gen_pointer_return(lines, method, type_map, call):
-            lines.append("}")
-            lines.append("")
+            _guard_wrap_impl(lines, func_start, ret)
             return
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(call))
@@ -734,8 +770,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
         if has_ostream:
             lines.append("    return ::godot::String(ocg_os.str().c_str());")
 
-    lines.append("}")
-    lines.append("")
+    _guard_wrap_impl(lines, func_start, ret)
 
 
 def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_map: TypeMap):
@@ -753,6 +788,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     params = _gen_param_list(method, type_map, cls=cls)
     args = _occt_args_for_call(method, type_map, cls.name)
 
+    func_start = len(lines)
     lines.append("{} {}::{}({}) {{".format(ret, wname, unique, params))
 
     _emit_stream_locals(lines, method)
@@ -771,8 +807,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             if alt:
                 ret_base = method.return_type.spelling.replace("const ", "").replace("&", "").replace("*", "").strip()
         if _try_gen_pointer_return(lines, method, type_map, static_call):
-            lines.append("}")
-            lines.append("")
+            _guard_wrap_impl(lines, func_start, ret)
             return
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
             lines.append("    return ::godot::String({});".format(static_call))
@@ -822,8 +857,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         else:
             lines.append("    {}::{}({});".format(cls.name, method.name, args))
 
-    lines.append("}")
-    lines.append("")
+    _guard_wrap_impl(lines, func_start, ret)
 
 
 def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "") -> str:
@@ -965,6 +999,10 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
                         parts.append("*{}->_native".format(p.name))
                     else:
                         parts.append("{}->_native".format(p.name))
+            elif canon_base and type_map._is_enum(canon_base):
+                # Canonical alias of an enum (e.g. typedef → GeomAbs_Shape)
+                enum_qualified = type_map.qualified_enum_name(canon_base, cls_name)
+                parts.append("static_cast<{}>({})".format(enum_qualified, p.name))
             else:
                 parts.append(p.name)
     return ", ".join(parts)

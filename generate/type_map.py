@@ -286,6 +286,8 @@ class TypeMap:
         self._wrapper_names: dict[str, str] = {}  # OCCT name -> wrapper name
         self._classes: dict[str, ClassDecl] = {}  # OCCT name -> ClassDecl
         self._enum_names: set[str] = set()        # known enum type names
+        self._wrapper_enum_types: dict[str, str] = {}  # OCCT enum name -> wrapper enum C++ type
+        self._enum_host_wrapper: dict[str, str] = {}  # OCCT enum name -> host wrapper class name
         self._build(classes, enums or [], extra_enum_names or set())
 
     def _build(self, classes: list[ClassDecl], enums: list[EnumDecl],
@@ -297,9 +299,19 @@ class TypeMap:
             for ne in cls.nested_enums:
                 self._enum_names.add(f"{cls.name}::{ne.name}")
                 self._enum_names.add(ne.name)
+                # Wrapper enum type: nested in the class's wrapper, e.g. OcgGpDir::D
+                self._wrapper_enum_types[f"{cls.name}::{ne.name}"] = f"{cls.wrapper_name}::{ne.name}"
+                self._enum_host_wrapper[f"{cls.name}::{ne.name}"] = cls.wrapper_name
+                # Bare name fallback (first wins) — standalone enums set later
+                self._wrapper_enum_types.setdefault(ne.name, f"{cls.wrapper_name}::{ne.name}")
+                self._enum_host_wrapper.setdefault(ne.name, cls.wrapper_name)
         # Collect standalone enum names
         for e in enums:
             self._enum_names.add(e.name)
+            if e.name and not e.name.startswith("(unnamed"):
+                # Hosted on the shared OcgEnums class, e.g. OcgEnums::GeomAbs_Shape
+                self._wrapper_enum_types.setdefault(e.name, f"OcgEnums::{e.name}")
+                self._enum_host_wrapper.setdefault(e.name, "OcgEnums")
         # Add non-scanned enum names (from modules not in our MODULES list, or nested
         # enums from scanned modules that libclang couldn't resolve)
         self._enum_names |= extra_enum_names
@@ -419,9 +431,9 @@ class TypeMap:
         if base in PRIMITIVE_MAP:
             return PRIMITIVE_MAP[base]
 
-        # Enum types (nested or standalone) → int32_t
+        # Enum types (nested or standalone) → wrapper enum type (int with hints)
         if self._is_enum(base):
-            return "int32_t"
+            return self.wrapper_enum_type(base) or "int32_t"
 
         # Handle types -> Ref<T>
         if otype.is_handle:
@@ -443,7 +455,7 @@ class TypeMap:
                 if wname:
                     return f"Ref<{wname}>"
                 if self._is_enum(canon_base):
-                    return "int32_t"
+                    return self.wrapper_enum_type(canon_base) or "int32_t"
                 if canon_base in PRIMITIVE_MAP:
                     return PRIMITIVE_MAP[canon_base]
 
@@ -455,7 +467,7 @@ class TypeMap:
             if wname:
                 return f"Ref<{wname}>"
             if self._is_enum(orig_base):
-                return "int32_t"
+                return self.wrapper_enum_type(orig_base) or "int32_t"
             if orig_base in PRIMITIVE_MAP:
                 return PRIMITIVE_MAP[orig_base]
 
@@ -505,9 +517,9 @@ class TypeMap:
         if base in PRIMITIVE_MAP:
             return PRIMITIVE_MAP[base]
 
-        # Enum types (nested or standalone) → int32_t
+        # Enum types (nested or standalone) → wrapper enum type (int with hints)
         if self._is_enum(base):
-            return "int32_t"
+            return self.wrapper_enum_type(base) or "int32_t"
 
         if otype.is_handle:
             inner = _resolve_handle_inner(otype.handle_inner)
@@ -546,7 +558,7 @@ class TypeMap:
                         return "{}&".format(wname)
                     return wname
                 if self._is_enum(canon_base):
-                    return "int32_t"
+                    return self.wrapper_enum_type(canon_base) or "int32_t"
                 if canon_base in PRIMITIVE_MAP:
                     return PRIMITIVE_MAP[canon_base]
 
@@ -566,6 +578,10 @@ class TypeMap:
                 if otype.is_ref:
                     return "{}&".format(wname)
                 return wname
+            if self._is_enum(orig_base):
+                return self.wrapper_enum_type(orig_base) or "int32_t"
+            if orig_base in PRIMITIVE_MAP:
+                return PRIMITIVE_MAP[orig_base]
 
         # Unwrapped types: pass through
         if otype.is_ref and otype.is_const:
@@ -668,6 +684,51 @@ class TypeMap:
             bare = base_name.split("::")[-1]
             return bare in self._enum_names
         return False
+
+    def wrapper_enum_type(self, base_name: str) -> str | None:
+        """Return the wrapper C++ enum type for an OCCT enum (e.g. 'OcgGpDir::D'
+        for nested enums, 'OcgEnums::GeomAbs_Shape' for standalone enums), or
+        None if the enum has no generated wrapper enum."""
+        if base_name in self._wrapper_enum_types:
+            return self._wrapper_enum_types[base_name]
+        if "::" in base_name:
+            return None
+        # Bare name: fall back to the OCCT-qualified lookup by searching the map
+        for occt_name, wrapper_type in self._wrapper_enum_types.items():
+            if occt_name.endswith(f"::{base_name}"):
+                return wrapper_type
+        return None
+
+    def enum_host_wrapper(self, base_name: str) -> str | None:
+        """Return the wrapper class that hosts a given OCCT enum type (the class
+        whose header defines the wrapper enum and its VARIANT_ENUM_CAST)."""
+        if base_name in self._enum_host_wrapper:
+            return self._enum_host_wrapper[base_name]
+        if "::" in base_name:
+            return None
+        for occt_name, host in self._enum_host_wrapper.items():
+            if occt_name.endswith(f"::{base_name}"):
+                return host
+        return None
+
+    def enum_host_includes_for(self, otype: OCCTType, exclude_host: str | None = None) -> set[str]:
+        """Return the set of enum-host wrapper headers that must be included so a
+        method signature can reference the enum types in this OCCTType.
+
+        The type's own class host (`exclude_host`) is skipped since its header
+        already defines the enum.
+        """
+        includes = set()
+        candidates = [otype.base_name]
+        if otype.canonical_spelling:
+            candidates.append(otype.canonical_spelling.replace("const ", "").rstrip("&").rstrip("*").strip())
+        candidates.append(otype.spelling.replace("const ", "").replace("&", "").replace("*", "").strip())
+        for cand in candidates:
+            host = self.enum_host_wrapper(cand)
+            if host and host != exclude_host:
+                includes.add(f'#include "{host}.hpp"')
+        return includes
+
 
     def qualified_enum_name(self, base_name: str, cls_name: str | None = None) -> str:
         """Return the fully-qualified enum name for use in static_cast.

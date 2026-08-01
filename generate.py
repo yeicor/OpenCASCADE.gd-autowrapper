@@ -239,8 +239,24 @@ def main():
 
     # Step 3: Generate module.h
     print("Step 3: Generating module registration header ...")
+
+    # Generate the OcgEnums host class for standalone OCCT enums (global-scope
+    # enums like GeomAbs_Shape have no OCCT class to attach to).  It is
+    # registered from module.h alongside the wrapper classes.
+    from generate.enums_host import generate_enums_host_header, generate_enums_host_source
+    standalone_enums = [e for m in modules for e in m.enums
+                        if not e.is_nested and e.name and not e.name.startswith("(unnamed")]
+    if standalone_enums:
+        enum_host_hpp = output_dir / "OcgEnums.hpp"
+        write_if_changed(enum_host_hpp, generate_enums_host_header(standalone_enums))
+        generated_files.add(enum_host_hpp)
+        enum_host_cpp = output_dir / "OcgEnums.cpp"
+        write_if_changed(enum_host_cpp, generate_enums_host_source(standalone_enums))
+        generated_files.add(enum_host_cpp)
+        print(f"  Generated OcgEnums (host for {len(standalone_enums)} standalone enums)")
+
     module_path = output_dir / "module.h"
-    write_if_changed(module_path, generate_module_header(modules, output_dir))
+    write_if_changed(module_path, generate_module_header(modules, output_dir, enums_host=bool(standalone_enums)))
     generated_files.add(module_path)
     print(f"  Generated module.h")
 

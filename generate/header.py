@@ -111,6 +111,22 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             if ref_wname and ref_wname != type_map.wrapper_name(cname):
                 referenced_wnames.add(ref_wname)
 
+    # Enum host headers: methods may reference enums hosted on OTHER wrapper
+    # classes (nested enums) or on the shared OcgEnums class (standalone enums).
+    # The enum TYPE must be complete in this header (method signatures use it),
+    # so these must be #includes, not forward declarations. They are emitted at
+    # global scope (NOT inside `namespace godot`): the host headers end with
+    # VARIANT_ENUM_CAST specializations at global scope, which require the
+    # `godot::` qualification to resolve correctly.
+    enum_host_includes: set[str] = set()
+    for method in cls.all_wrappable_methods:
+        for otype in ([method.return_type] if method.return_type and not method.return_type.is_void else []) + [p.type for p in method.parameters]:
+            enum_host_includes |= type_map.enum_host_includes_for(otype, exclude_host=cls.wrapper_name)
+    if enum_host_includes:
+        for inc in sorted(enum_host_includes):
+            lines.append(inc)
+        lines.append("")
+
     lines.append("")
     lines.append("namespace godot {")
     lines.append("")
@@ -126,6 +142,26 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     lines.append("    GDCLASS({}, RefCounted)".format(wname))
     lines.append("")
     lines.append("public:")
+
+    # Nested enums as real C++ enums. These are bound as GDScript enums
+    # (OcgClass.EnumName.VALUE) and used as typed method argument/return types.
+    # Unscoped enums because godot-cpp's VARIANT_ENUM_CAST macro does implicit
+    # int64_t <-> enum conversions that fail for scoped enums. Enumerators are
+    # prefixed with the enum name ({E}_{V}) so bare value names (e.g. X) are NOT
+    # injected into the wrapper class scope where they could collide with
+    # members (OcgGpDir has both gp_Dir::D::X and a method X()).
+    used_enum_names: set[str] = set()
+    for enum in cls.nested_enums:
+        lines.append("    enum {} : int64_t {{".format(enum.name))
+        for val in enum.values:
+            cpp_name = "{}_{}".format(enum.name, val.name)
+            while cpp_name in used_enum_names:
+                cpp_name += "_"
+            used_enum_names.add(cpp_name)
+            lines.append("        {} = static_cast<int64_t>(::{}::{}::{}),".format(
+                cpp_name, cname, enum.name, val.name))
+        lines.append("    };")
+        lines.append("")
 
     # Native storage
     if cls.kind == ClassKind.BUILDER:
@@ -224,16 +260,20 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     if has_static:
         lines.append("")
 
-    # Nested enums as static constants
-    for enum in cls.nested_enums:
-        for val in enum.values:
-            const_name = "{}_{}".format(enum.name, val.name)
-            lines.append("    static constexpr int64_t {} = static_cast<int64_t>({}::{}::{});".format(
-                const_name, cname, enum.name, val.name))
+    # Nested enums as real C++ enums, declared BEFORE the methods that use them
+    # as argument/return types (C++ requires the type to be declared before use
+    # in member-function signatures). They are declared at the TOP of the class.
+    # See the block emitted right after `public:` below.
 
     lines.append("};")
     lines.append("")
     lines.append("} // namespace godot")
+    lines.append("")
+
+    # Register GetTypeInfo / VariantCaster / PtrToArg for each nested enum so the
+    # constants bind under the enum name and method args/returns carry enum hints.
+    for enum in cls.nested_enums:
+        lines.append("VARIANT_ENUM_CAST({}::{});".format(wname, enum.name))
 
     return "\n".join(lines) + "\n"
 
