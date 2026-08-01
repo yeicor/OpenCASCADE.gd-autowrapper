@@ -123,6 +123,17 @@ BND_LIMITS_MEMBERS = {
     "Bnd_Box2d::Limits": ("Xmin", "Xmax", "Ymin", "Ymax"),
 }
 
+# Fixed-size C array INPUT params (const ref or by-value const arrays) mapped to
+# Godot packed arrays. Keyed by libclang base_name; value is
+# (godot_param_type, occt_elem_type, size, gd_elem_expr).
+# Output arrays (non-const) are not supported and stay skipped.
+FIXED_ARRAY_PARAMS: dict[str, tuple[str, str, int, str]] = {
+    "int[3]": ("PackedInt32Array", "int", 3, "static_cast<int>({name}[{i}])"),
+    "bool[3]": ("PackedByteArray", "bool", 3, "({name}[{i}] != 0)"),
+    "gp_XYZ[3]": ("Array", "gp_XYZ", 3, "Object::cast_to<{wrapper}>({name}[{i}].operator Object*())->_native"),
+    "gp_XYZ[4]": ("Array", "gp_XYZ", 4, "Object::cast_to<{wrapper}>({name}[{i}].operator Object*())->_native"),
+}
+
 
 def bnd_limits_members_for_type(otype: OCCTType):
     """Resolve a Bnd_*::Limits nested struct return to its double member names,
@@ -417,6 +428,10 @@ class TypeMap:
     def cpp_type_for_param(self, otype: OCCTType) -> str:
         """Get the C++ parameter type for the wrapper method signature."""
         base = otype.base_name
+
+        # Fixed-size C array input params → Godot packed array
+        if base in FIXED_ARRAY_PARAMS and otype.is_const:
+            return FIXED_ARRAY_PARAMS[base][0]
 
         # Standard_OStream → absorbed (no param in wrapper)
         if base == "Standard_OStream":

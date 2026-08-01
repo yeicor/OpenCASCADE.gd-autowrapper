@@ -359,6 +359,20 @@ def check_type_wrappable(param_type: OCCTType, context: str,
                          copyable_names: set[str] | None = None) -> bool:
     """Check if a parameter type can be wrapped. Prints WARNING if not."""
     from generate.type_map import PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP, HANDLE_COLLECTION_TYPES, COLLECTION_TYPES
+    from generate.type_map import FIXED_ARRAY_PARAMS
+
+    # Fixed-size C array params: const (input) arrays are wrappable as Godot
+    # packed arrays; non-const (output) arrays need out-marshalling → skipped.
+    if param_type.base_name in FIXED_ARRAY_PARAMS:
+        if not for_param:
+            print(f"  WARNING: skipping '{context}' — array type '{param_type.base_name}' is not wrappable as a return",
+                  file=sys.stderr)
+            return False
+        if not param_type.is_const:
+            print(f"  WARNING: skipping '{context}' — non-const array output param '{param_type.spelling}' needs wrapper",
+                  file=sys.stderr)
+            return False
+        return True
 
     # Check unwrappable base types
     # For ref-to-pointer types (e.g. BRepMesh_DiscretRoot*&), base_name retains

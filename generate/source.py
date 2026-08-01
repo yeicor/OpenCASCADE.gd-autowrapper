@@ -8,7 +8,8 @@ from classify.skippable import _resolve_handle_inner
 from generate.type_map import (TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP,
                                PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES,
                                HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES,
-                               resd_members_for_type, bnd_limits_members_for_type)
+                               resd_members_for_type, bnd_limits_members_for_type,
+                               FIXED_ARRAY_PARAMS)
 
 
 def _resolve_via_canonical(otype: OCCTType, type_map: TypeMap) -> str | None:
@@ -259,6 +260,8 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
         if otype.base_name.startswith("std::optional") or otype.base_name.startswith("std::pair"):
             from generate.type_map import _std_template_args
             return [a for a in _std_template_args(otype.base_name)]
+        if "[" in otype.base_name and otype.base_name.endswith("]"):
+            return [otype.base_name.split("[")[0]]
         return [otype.base_name]
 
     def _maybe_add_referenced(name: str) -> None:
@@ -417,6 +420,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
         lines.append("Ref<{}> {}::{}({}) {{".format(wname, wname, unique, params))
         lines.append("    Ref<{}> ref; ref.instantiate();".format(wname))
         _emit_stream_locals(lines, ctor)
+        _emit_array_locals(lines, ctor, type_map)
 
         if cls.kind == ClassKind.BUILDER:
             lines.append("    ref->_builder = std::make_unique<::{}>({});".format(cname, args))
@@ -513,6 +517,18 @@ def _emit_stream_locals(lines: list[str], method: MethodDecl) -> None:
     if _has_sstream_param(method):
         lines.append("    std::stringstream ocg_ss({}.utf8().get_data());".format(
             next(p.name for p in method.parameters if p.type.base_name == "Standard_SStream")))
+
+
+def _emit_array_locals(lines: list[str], method: MethodDecl, type_map: TypeMap) -> None:
+    """Emit local C arrays for fixed-size C array input params (int[3], bool[3], gp_XYZ[3])."""
+    from generate.type_map import FIXED_ARRAY_PARAMS
+    for p in method.parameters:
+        base = p.type.base_name
+        if base in FIXED_ARRAY_PARAMS and p.type.is_const:
+            _, occt_elem, size, expr = FIXED_ARRAY_PARAMS[base]
+            wwrapper = type_map.wrapper_name(occt_elem) or occt_elem
+            elems = ", ".join(expr.format(name=p.name, i=i, wrapper=wwrapper) for i in range(size))
+            lines.append("    {} ocg_{}[{}] = {{ {} }};".format(occt_elem, p.name, size, elems))
 
 
 def _try_gen_pointer_return(lines: list[str], method: MethodDecl, type_map: TypeMap, call: str) -> bool:
@@ -648,6 +664,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         _null_check_for_native_ptr(lines, ret)
 
     _emit_stream_locals(lines, method)
+    _emit_array_locals(lines, method, type_map)
 
     target = _value_type_target(cls)
     arrow = "->" if _needs_pointer_call(cls) else "."
@@ -790,6 +807,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
         _null_check_for_native_ptr(lines, ret)
 
     _emit_stream_locals(lines, method)
+    _emit_array_locals(lines, method, type_map)
 
     target = _value_type_target(cls)
     arrow = "->" if _needs_pointer_call(cls) else "."
@@ -867,6 +885,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     lines.append("{} {}::{}({}) {{".format(ret, wname, unique, params))
 
     _emit_stream_locals(lines, method)
+    _emit_array_locals(lines, method, type_map)
 
     static_call = "::{}::{}({})".format(cls.name, method.name, args)
 
@@ -969,6 +988,10 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
         # NCollection_String → temporary UTF-8 string (lives for the call)
         if base == "NCollection_String":
             parts.append("NCollection_String({}.utf8().get_data())".format(p.name))
+            continue
+        # Fixed-size C array input params → local C array emitted by _emit_array_locals
+        if base in FIXED_ARRAY_PARAMS and p.type.is_const:
+            parts.append("ocg_{}".format(p.name))
             continue
         # void* / const void* → raw address as uint64_t.
         # NB: is_const is True for BOTH "const void*" (const pointee) and
