@@ -81,7 +81,6 @@ UNWRAPPABLE_TYPES = {
     "Aspect_XRSession::InfoString",
     # Template/internal NCollection types
     "NCollection_ForwardRangeSentinel",
-    "NCollection_String",
     # Function pointer / callback types
     "CallbackOnUpdate_t",
     "Graphic3d_MediaTextureSet::CallbackOnUpdate_t",
@@ -266,6 +265,12 @@ SKIP_METHODS_BY_CLASS: dict[str, set[str]] = {
     "Law_Interpolate": {
         "ClearTangents",
     },
+    # libclang misreports this as public though the header declares it under
+    # `protected:` (inline virtual member after DEFINE_STANDARD_RTTIEXT).
+    "BRepMesh_ConstrainedBaseMeshAlgo": {
+        "getCellsCount",
+        "postProcessMesh",
+    },
 }
 
 
@@ -372,6 +377,29 @@ def check_type_wrappable(param_type: OCCTType, context: str,
 
     base = param_type.base_name
 
+    # std::optional<T> / std::pair<T, U> returns are converted to Variant / packed
+    # arrays in the wrapper. Parameters are not yet supported (needs marshalling
+    # in the other direction), so those stay skipped.
+    if base.startswith("std::optional"):
+        if not for_param:
+            from generate.type_map import _std_template_args
+            args = _std_template_args(base)
+            inner = args[0] if args else ""
+            if inner in PRIMITIVE_MAP or (wrapped_names is not None and inner in wrapped_names):
+                return True
+            print(f"  WARNING: skipping '{context}' — std::optional inner type '{inner}' is not wrappable",
+                  file=sys.stderr)
+            return False
+        print(f"  WARNING: skipping '{context}' — std::optional parameter '{param_type.spelling}' is not wrappable",
+              file=sys.stderr)
+        return False
+    if base.startswith("std::pair"):
+        if not for_param:
+            return True
+        print(f"  WARNING: skipping '{context}' — std::pair parameter '{param_type.spelling}' is not wrappable",
+              file=sys.stderr)
+        return False
+
     # Stream types are wrappable with special handling (absorbed or mapped to String)
     if base in STREAM_TYPES:
         return True
@@ -405,6 +433,9 @@ def check_type_wrappable(param_type: OCCTType, context: str,
             pass
         elif for_param and base == "char16_t" and param_type.pointee_is_const:
             # const char16_t* param (UTF-16 string) → String
+            pass
+        elif not for_param and base == "char16_t" and param_type.pointee_is_const:
+            # const char16_t* return (UTF-16 string) → String
             pass
         elif (not for_param
               and wrapped_names is not None

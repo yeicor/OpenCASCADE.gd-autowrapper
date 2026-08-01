@@ -39,6 +39,8 @@ def main():
                         help="Scan headers but don't generate code")
     parser.add_argument("--dump-model", action="store_true",
                         help="Dump parsed model as JSON for debugging")
+    parser.add_argument("--dump-skips", action="store_true",
+                        help="Dump every skipped method's class, signature, and reason")
     args = parser.parse_args()
 
     script_dir = Path(__file__).parent
@@ -198,8 +200,18 @@ def main():
                     else:
                         reason_counts["(no reason)"] += 1
     print("  Top skip reasons:", file=sys.stderr)
-    for reason, count in reason_counts.most_common(15):
+    for reason, count in reason_counts.most_common(250):
         print(f"    {count:4d}  {reason}", file=sys.stderr)
+
+    if args.dump_skips:
+        from classify.overloads import _type_to_string
+        for mod in modules:
+            for c in mod.classes:
+                for meth in c.all_methods:
+                    if meth.skip:
+                        sig = ",".join(_type_to_string(p.type) for p in meth.parameters)
+                        print(f"  SKIP {c.name}::{meth.name}({sig}) = {meth.skip_reason}",
+                              file=sys.stderr)
 
     files_generated = 0
     for mod in modules:

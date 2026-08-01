@@ -55,6 +55,28 @@ RESD_2D_PARENTS = {"Geom2d_Curve", "Geom2d_Surface"}
 RESD_PARENTS = RESD_3D_PARENTS | RESD_2D_PARENTS
 
 
+def _std_template_args(spelling: str) -> list[str]:
+    """Return the template args of a std:: template type, e.g.
+    'std::pair<double, double>' → ['double', 'double'],
+    'std::optional<gp_Pnt>' → ['gp_Pnt']."""
+    if "<" not in spelling or not spelling.endswith(">"):
+        return []
+    inner = spelling[spelling.index("<") + 1:-1]
+    return [a.strip() for a in inner.split(",")]
+
+
+def pair_return_gd_type(spelling: str) -> str:
+    """Choose the Godot return type for a std::pair<T, U> return: packed arrays
+    for numeric pairs, generic Array otherwise."""
+    args = _std_template_args(spelling)
+    floaty = {"double", "Standard_Real", "float", "Standard_ShortReal"}
+    inty = {"int", "Standard_Integer", "int32_t", "int16_t", "short"}
+    if len(args) == 2 and args[0] in floaty and args[1] in floaty:
+        return "PackedFloat64Array"
+    if len(args) == 2 and args[0] in inty and args[1] in inty:
+        return "PackedInt32Array"
+    return "Array"
+
 def resd_members(base_name: str):
     """If base_name is a Geom_*::ResD{0,1,2,3} nested struct, return the list of
     (occt_member_type, member_name) pairs it contains, else None.
@@ -111,6 +133,8 @@ _PRIMITIVE_WRAPPER_MAP = {
     "char": "OcgStandardCharacter",
     "int64_t": "OcgStandardLongInteger",
     "uint64_t": "OcgStandardULongInteger",
+    "unsigned char": "OcgStandardByte",
+    "Graphic3d_ZLayerId": "OcgStandardInteger",
     "TCollection_AsciiString": "OcgTCollectionAsciiString",
     "TCollection_ExtendedString": "OcgTCollectionExtendedString",
 }
@@ -387,6 +411,10 @@ class TypeMap:
         if base == "Standard_SStream" and otype.is_ref:
             return "String"
 
+        # NCollection_String → String (UTF-8; converted in the call-site marshaler)
+        if base == "NCollection_String":
+            return "String"
+
         # Non-const ref output params of primitives → Ref<OcgPrimitiveWrapper>
         if otype.is_ref and not otype.is_const and not otype.is_handle:
             if base in PRIMITIVE_MAP and base != "void":
@@ -510,6 +538,22 @@ class TypeMap:
         if base in ("char", "Standard_CString") and otype.is_pointer:
             return "String"
 
+        # const char16_t* returns → String (UTF-16)
+        if base == "char16_t" and otype.is_pointer:
+            return "String"
+
+        # NCollection_String returns → String (converted via ToCString())
+        if base == "NCollection_String":
+            return "String"
+
+        # std::optional<T> returns → Variant (null when unset)
+        if base.startswith("std::optional"):
+            return "Variant"
+
+        # std::pair<T, U> returns → packed array (numeric pairs) / Array
+        if base.startswith("std::pair"):
+            return pair_return_gd_type(base)
+
         # char (non-pointer) return → int32_t (godot-cpp doesn't support char)
         if base in ("char", "Standard_Character") and not otype.is_pointer:
             return "int32_t"
@@ -594,6 +638,10 @@ class TypeMap:
         """Get the GDScript-facing parameter type (for D_METHOD)."""
         base = otype.base_name
 
+        # NCollection_String params → String
+        if base == "NCollection_String":
+            return "String"
+
         # Primitive wrapper types as params → the wrapper class name
         if base in _PRIMITIVE_WRAPPER_MAP and not otype.is_const and not otype.is_handle:
             if otype.is_ref or otype.is_pointer:
@@ -634,6 +682,18 @@ class TypeMap:
         """Get the GDScript-facing return type."""
         if otype is None or otype.is_void:
             return "void"
+        # char16_t* returns → String (UTF-16)
+        if otype.base_name == "char16_t" and otype.is_pointer:
+            return "String"
+        # NCollection_String returns → String
+        if otype.base_name == "NCollection_String":
+            return "String"
+        # std::optional<T> returns → Variant
+        if otype.base_name.startswith("std::optional"):
+            return "Variant"
+        # std::pair<T, U> returns → packed array / Array
+        if otype.base_name.startswith("std::pair"):
+            return pair_return_gd_type(otype.base_name)
         # char returns → int (godot-cpp doesn't support char)
         if otype.base_name in ("char", "Standard_Character") and not otype.is_pointer:
             return "int"

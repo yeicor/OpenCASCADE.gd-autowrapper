@@ -92,14 +92,14 @@ def generate_primitive_wrappers_header() -> str:
     # Generate a wrapper class for each primitive wrapper type
     for wrapper_name, cpp_type in sorted(PRIMITIVE_WRAPPER_CPP_TYPE.items()):
         if wrapper_name in _STRING_WRAPPERS:
-            get_body = "return ::godot::String(_native.ToCString());"
+            get_body = "return ::godot::String::utf8(_native.ToCString());"
             if wrapper_name == "OcgTCollectionExtendedString":
                 get_body = (
                     "Standard_Integer ocg_len = _native.LengthOfCString();"
                     "char* ocg_buf = new char[ocg_len + 1];"
                     "_native.ToUTF8CString(ocg_buf);"
                     "ocg_buf[ocg_len] = '\\0';"
-                    "::godot::String ocg_ret(ocg_buf);"
+                    "::godot::String ocg_ret = ::godot::String::utf8(ocg_buf);"
                     "delete[] ocg_buf;"
                     "return ocg_ret;")
             lines.append("class {} : public RefCounted {{".format(wrapper_name))
@@ -250,12 +250,16 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     needs_sstream = False
     needs_array = False
 
-    def _resolve_ref_name(otype: OCCTType) -> str:
-        """Resolve a method return/param type to the real wrapper class name,
-        following handle aliases (e.g. Prs3d_Presentation → Graphic3d_Structure)."""
+    def _resolve_ref_name(otype: OCCTType) -> list[str]:
+        """Resolve a method return/param type to the real wrapper class names,
+        following handle aliases (e.g. Prs3d_Presentation → Graphic3d_Structure)
+        and extracting std::optional / std::pair template arguments."""
         if otype.is_handle and otype.handle_inner:
-            return _resolve_handle_inner(otype.handle_inner)
-        return otype.base_name
+            return [_resolve_handle_inner(otype.handle_inner)]
+        if otype.base_name.startswith("std::optional") or otype.base_name.startswith("std::pair"):
+            from generate.type_map import _std_template_args
+            return [a for a in _std_template_args(otype.base_name)]
+        return [otype.base_name]
 
     def _maybe_add_referenced(name: str) -> None:
         # Collection/handle-collection types are defined in OcgCollectionWrappers.hpp
@@ -268,12 +272,14 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
 
     for method in cls.all_wrappable_methods:
         if method.return_type:
-            _maybe_add_referenced(_resolve_ref_name(method.return_type))
+            for name in _resolve_ref_name(method.return_type):
+                _maybe_add_referenced(name)
             for member_type, _ in (resd_members_for_type(method.return_type) or []):
                 _maybe_add_referenced(member_type)
                 needs_array = True
         for p in method.parameters:
-            _maybe_add_referenced(_resolve_ref_name(p.type))
+            for name in _resolve_ref_name(p.type):
+                _maybe_add_referenced(name)
             if p.type.base_name in ("Standard_OStream", "Standard_IStream", "Standard_SStream"):
                 needs_sstream = True
     for ref in sorted(referenced):
@@ -538,6 +544,55 @@ def _try_gen_pointer_return(lines: list[str], method: MethodDecl, type_map: Type
     return True
 
 
+def _gen_optional_return(lines: list[str], method: MethodDecl, type_map: TypeMap, call: str) -> None:
+    """Generate a return for a std::optional<T> return type: a Variant that is
+    null when the optional is unset, otherwise the value (primitive → scalar,
+    wrapped value class → Ref<Wrapper>)."""
+    from generate.type_map import _std_template_args
+    args = _std_template_args(method.return_type.base_name)
+    inner = args[0] if args else ""
+    lines.append("    auto ocg_opt = {};".format(call))
+    lines.append("    if (!ocg_opt.has_value())")
+    lines.append("        return ::godot::Variant();")
+    wname = type_map.wrapper_name(inner)
+    if wname and type_map.is_value_type(inner):
+        lines.append("    Ref<{}> ocg_wrap; ocg_wrap.instantiate();".format(wname))
+        lines.append("    ocg_wrap->_native = ocg_opt.value();")
+        lines.append("    return ::godot::Variant(ocg_wrap);")
+    else:
+        lines.append("    return ::godot::Variant(ocg_opt.value());")
+
+
+def _gen_pair_return(lines: list[str], method: MethodDecl, type_map: TypeMap, call: str) -> None:
+    """Generate a return for a std::pair<T, U> return type: a packed numeric
+    array for numeric pairs, otherwise a generic Array."""
+    from generate.type_map import pair_return_gd_type
+    gtype = pair_return_gd_type(method.return_type.base_name)
+    lines.append("    auto ocg_pair = {};".format(call))
+    if gtype == "PackedFloat64Array":
+        lines.append("    ::godot::PackedFloat64Array ocg_arr;")
+        lines.append("    ocg_arr.append(static_cast<double>(ocg_pair.first));")
+        lines.append("    ocg_arr.append(static_cast<double>(ocg_pair.second));")
+    elif gtype == "PackedInt32Array":
+        lines.append("    ::godot::PackedInt32Array ocg_arr;")
+        lines.append("    ocg_arr.append(static_cast<int32_t>(ocg_pair.first));")
+        lines.append("    ocg_arr.append(static_cast<int32_t>(ocg_pair.second));")
+    else:
+        lines.append("    ::godot::Array ocg_arr;")
+        lines.append("    ocg_arr.append(ocg_pair.first);")
+        lines.append("    ocg_arr.append(ocg_pair.second);")
+    lines.append("    return ocg_arr;")
+
+
+def _gen_char16_return(lines: list[str], method: MethodDecl, type_map: TypeMap, call: str) -> bool:
+    """Handle const char16_t* returns (UTF-16 strings) → String."""
+    rt = method.return_type
+    if rt and rt.is_pointer and rt.base_name in ("char16_t", "Standard_ExtCharacter"):
+        lines.append("    return ::godot::String({});".format(call))
+        return True
+    return False
+
+
 def _guard_wrap_impl(lines: list[str], start: int, ret: str) -> None:
     """Wrap a generated function body (lines[start:] in the shared list) in a
     try/catch guard so OCCT C++ exceptions never escape the GDExtension
@@ -616,25 +671,36 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         if _try_gen_pointer_return(lines, method, type_map, call):
             _guard_wrap_impl(lines, func_start, ret)
             return
-        # const char* / Standard_CString return → wrap in String()
+        if method.return_type.base_name.startswith("std::optional"):
+            _gen_optional_return(lines, method, type_map, call)
+            _guard_wrap_impl(lines, func_start, ret)
+            return
+        if method.return_type.base_name.startswith("std::pair"):
+            _gen_pair_return(lines, method, type_map, call)
+            _guard_wrap_impl(lines, func_start, ret)
+            return
+        if _gen_char16_return(lines, method, type_map, call):
+            _guard_wrap_impl(lines, func_start, ret)
+            return
+        # const char* / Standard_CString return → wrap in String (treat as UTF-8)
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
-            lines.append("    return ::godot::String({});".format(call))
-        elif ret_base_orig in ("TCollection_AsciiString",):
-            lines.append("    return ::godot::String({}.ToCString());".format(call))
+            lines.append("    return ::godot::String::utf8({});".format(call))
+        elif ret_base_orig in ("TCollection_AsciiString", "NCollection_String"):
+            lines.append("    return ::godot::String::utf8({}.ToCString());".format(call))
         elif ret_base_orig in ("TCollection_ExtendedString",):
             lines.append("    auto ocg_result = {};".format(call))
             lines.append("    Standard_Integer ocg_len = ocg_result.LengthOfCString();")
             lines.append("    char* ocg_buf = new char[ocg_len + 1];")
             lines.append("    ocg_result.ToUTF8CString(ocg_buf);")
             lines.append("    ocg_buf[ocg_len] = '\\0';")
-            lines.append("    ::godot::String ocg_ret(ocg_buf);")
+            lines.append("    ::godot::String ocg_ret = ::godot::String::utf8(ocg_buf);")
             lines.append("    delete[] ocg_buf;")
             lines.append("    return ocg_ret;")
         elif ret_base_orig == "Standard_OStream":
             # Dump-style method: emit the call into the absorbed ostream, then
             # return its contents as a String.
             lines.append("    {};".format(call))
-            lines.append("    return ::godot::String(ocg_os.str().c_str());")
+            lines.append("    return ::godot::String::utf8(ocg_os.str().c_str());")
         elif resd_members_for_type(method.return_type):
             # Geom_*::ResD{0,1,2,3} nested struct return → Array of wrapped gp values.
             resd = resd_members_for_type(method.return_type)
@@ -683,7 +749,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     else:
         lines.append("    {};".format(call))
         if has_ostream:
-            lines.append("    return ::godot::String(ocg_os.str().c_str());")
+            lines.append("    return ::godot::String::utf8(ocg_os.str().c_str());")
 
     _guard_wrap_impl(lines, func_start, ret)
 
@@ -735,9 +801,9 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
             _guard_wrap_impl(lines, func_start, ret)
             return
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
-            lines.append("    return ::godot::String({});".format(call))
-        elif ret_base_orig in ("TCollection_AsciiString",):
-            lines.append("    return ::godot::String({}.ToCString());".format(call))
+            lines.append("    return ::godot::String::utf8({});".format(call))
+        elif ret_base_orig in ("TCollection_AsciiString", "NCollection_String"):
+            lines.append("    return ::godot::String::utf8({}.ToCString());".format(call))
         elif type_map._is_enum(ret_base):
             lines.append("    return static_cast<{}>({});".format(ret, call))
         elif method.return_type.is_handle and type_map.wrapper_name(ret_base):
@@ -768,7 +834,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
     else:
         lines.append("    {};".format(call))
         if has_ostream:
-            lines.append("    return ::godot::String(ocg_os.str().c_str());")
+            lines.append("    return ::godot::String::utf8(ocg_os.str().c_str());")
 
     _guard_wrap_impl(lines, func_start, ret)
 
@@ -809,17 +875,28 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
         if _try_gen_pointer_return(lines, method, type_map, static_call):
             _guard_wrap_impl(lines, func_start, ret)
             return
+        if method.return_type.base_name.startswith("std::optional"):
+            _gen_optional_return(lines, method, type_map, static_call)
+            _guard_wrap_impl(lines, func_start, ret)
+            return
+        if method.return_type.base_name.startswith("std::pair"):
+            _gen_pair_return(lines, method, type_map, static_call)
+            _guard_wrap_impl(lines, func_start, ret)
+            return
+        if _gen_char16_return(lines, method, type_map, static_call):
+            _guard_wrap_impl(lines, func_start, ret)
+            return
         if method.return_type.is_pointer and ret_base_orig in ("char", "Standard_CString"):
-            lines.append("    return ::godot::String({});".format(static_call))
-        elif ret_base_orig in ("TCollection_AsciiString",):
-            lines.append("    return ::godot::String({}.ToCString());".format(static_call))
+            lines.append("    return ::godot::String::utf8({});".format(static_call))
+        elif ret_base_orig in ("TCollection_AsciiString", "NCollection_String"):
+            lines.append("    return ::godot::String::utf8({}.ToCString());".format(static_call))
         elif ret_base_orig in ("TCollection_ExtendedString",):
             lines.append("    auto ocg_result = {};".format(static_call))
             lines.append("    Standard_Integer ocg_len = ocg_result.LengthOfCString();")
             lines.append("    char* ocg_buf = new char[ocg_len + 1];")
             lines.append("    ocg_result.ToUTF8CString(ocg_buf);")
             lines.append("    ocg_buf[ocg_len] = '\\0';")
-            lines.append("    ::godot::String ocg_ret(ocg_buf);")
+            lines.append("    ::godot::String ocg_ret = ::godot::String::utf8(ocg_buf);")
             lines.append("    delete[] ocg_buf;")
             lines.append("    return ocg_ret;")
         elif type_map._is_enum(ret_base):
@@ -853,7 +930,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
     else:
         if has_ostream:
             lines.append("    {};".format(static_call))
-            lines.append("    return ::godot::String(ocg_os.str().c_str());")
+            lines.append("    return ::godot::String::utf8(ocg_os.str().c_str());")
         else:
             lines.append("    {}::{}({});".format(cls.name, method.name, args))
 
@@ -879,6 +956,10 @@ def _occt_args_for_call(method: MethodDecl, type_map: TypeMap, cls_name: str = "
         # Standard_SStream → local stringstream
         if base == "Standard_SStream":
             parts.append("ocg_ss")
+            continue
+        # NCollection_String → temporary UTF-8 string (lives for the call)
+        if base == "NCollection_String":
+            parts.append("NCollection_String({}.utf8().get_data())".format(p.name))
             continue
         # void* / const void* → raw address as uint64_t.
         # NB: is_const is True for BOTH "const void*" (const pointee) and
