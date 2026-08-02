@@ -8,9 +8,11 @@ from pathlib import Path
 
 from model import ClassDecl, MethodDecl, MethodKind, ModuleDecl
 from classify.overloads import get_method_unique_name
+from generate.inherit import wrapper_base
+from generate.type_map import TypeMap
 
 
-def generate_doc_xml(cls: ClassDecl, output_dir: Path) -> str | None:
+def generate_doc_xml(cls: ClassDecl, output_dir: Path, type_map: TypeMap | None = None) -> str | None:
     """Generate a Godot XML doc file for a class.
 
     Returns the XML content if docs were generated, None if no docs.
@@ -23,8 +25,15 @@ def generate_doc_xml(cls: ClassDecl, output_dir: Path) -> str | None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # A wrapper inherits from its wrapper base class (if any) or RefCounted.
+    inherits = "RefCounted"
+    if type_map is not None:
+        wb = wrapper_base(cls, type_map)
+        if wb:
+            inherits = wb[0]
+
     # Build XML
-    root = ET.Element("class", name=cls.wrapper_name, inherits="RefCounted")
+    root = ET.Element("class", name=cls.wrapper_name, inherits=inherits)
 
     # Brief description
     brief = ET.SubElement(root, "brief_description")

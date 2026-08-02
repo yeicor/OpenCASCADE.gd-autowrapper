@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, OCCTType
 from classify.overloads import get_method_unique_name
+from generate.inherit import wrapper_base, sync_eligible
 from generate.type_map import (TypeMap, _PRIMITIVE_WRAPPER_MAP, COLLECTION_TYPES,
                                HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES)
 
@@ -29,6 +30,7 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     lines = []
     wname = cls.wrapper_name
     cname = cls.name
+    wbase = wrapper_base(cls, type_map)
 
     lines.append("// Auto-generated wrapper for {} — DO NOT EDIT".format(cname))
     lines.append("#pragma once")
@@ -80,6 +82,10 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     header_basename = cls.header_file.rsplit("/", 1)[-1] if "/" in cls.header_file else cls.header_file
     if header_basename:
         lines.append("#include <{}>".format(header_basename))
+
+    # Include the wrapper base class header — required for inheritance.
+    if wbase:
+        lines.append('#include "{}.hpp"'.format(wbase[0]))
 
     # Include primitive wrappers if needed
     if needs_primitive_wrappers:
@@ -142,8 +148,12 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     if referenced_wnames:
         lines.append("")
     lines.append("")
-    lines.append("class {} : public RefCounted {{".format(wname))
-    lines.append("    GDCLASS({}, RefCounted)".format(wname))
+    if wbase:
+        lines.append("class {} : public {} {{".format(wname, wbase[0]))
+        lines.append("    GDCLASS({}, {})".format(wname, wbase[0]))
+    else:
+        lines.append("class {} : public RefCounted {{".format(wname))
+        lines.append("    GDCLASS({}, RefCounted)".format(wname))
     lines.append("")
     lines.append("public:")
 
@@ -194,6 +204,13 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     # Default constructor (mandatory for GDCLASS)
     lines.append("    {}();".format(wname))
     lines.append("")
+
+    # Storage propagation into the wrapper base chain (see generate/inherit.py).
+    # Public so other wrapper .cpp files can sync a returned handle into its
+    # base-typed storage member. Not bound, so invisible to GDScript.
+    if sync_eligible(cls, type_map):
+        lines.append("    void _sync_base_storage();")
+        lines.append("")
 
     # Collect method names to detect shadowing of godot types (e.g. String)
     shadowed_names: set[str] = set()

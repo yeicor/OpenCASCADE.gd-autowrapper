@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl, OCCTType
+from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl, OCCTType, OperatorType
 from classify.overloads import get_method_unique_name
 from classify.skippable import _resolve_handle_inner, OPAQUE_POINTER_TYPES
+from generate.inherit import wrapper_base, sync_eligible
 from generate.type_map import (TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP,
                                PRIMITIVE_WRAPPER_CPP_TYPE, COLLECTION_TYPES,
                                HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES,
@@ -248,6 +249,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     lines = []
     wname = cls.wrapper_name
     cname = cls.name
+    wbase = wrapper_base(cls, type_map)
 
     lines.append("// Auto-generated wrapper for {} -- DO NOT EDIT".format(cname))
     lines.append('#include "{}.hpp"'.format(wname))
@@ -386,8 +388,11 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     # visibly called — leaving it implicit is identical in effect, but the
     # explicit form makes the generated code self-documenting.
     uses_value_member = cls.kind not in (ClassKind.BUILDER, ClassKind.REF_COUNTED) and cls.has_public_default_ctor
-    init_list = ", _native()" if uses_value_member else ""
-    lines.append("{}::{}() : RefCounted(){} {{".format(wname, wname, init_list))
+    ctor_base = wbase[0] if wbase else "RefCounted"
+    if uses_value_member:
+        lines.append("{}::{}() : {}() , _native() {{".format(wname, wname, ctor_base))
+    else:
+        lines.append("{}::{}() : {}() {{".format(wname, wname, ctor_base))
 
     # Declared default ctor: a public, non-deleted zero-arg constructor. Only
     # this enables BUILDER/REF_COUNTED allocation — implicitly default-constructible
@@ -412,6 +417,8 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     elif cls.kind == ClassKind.REF_COUNTED:
         if has_declared_default_ctor and not cls.has_pure_virtual:
             ctor_body.append("    _handle = new ::{}();".format(cname))
+            if sync_eligible(cls, type_map):
+                ctor_body.append("    _sync_base_storage();")
         else:
             ctor_body.append("    // No default constructor — _handle is null; use factory methods")
     elif cls.kind in (ClassKind.VALUE, ClassKind.TOPODS_SHAPE):
@@ -444,6 +451,14 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
 
     lines.append("}")
     lines.append("")
+
+    # --- Storage propagation into wrapper base chain ---
+    sync_body = _gen_sync_storage_impl(cls, type_map)
+    if sync_body:
+        lines.append("void {}::_sync_base_storage() {{".format(wname))
+        lines.extend(sync_body)
+        lines.append("}")
+        lines.append("")
 
     # --- Constructor factory methods ---
     for ctor in cls.constructors:
@@ -481,6 +496,8 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             # No default constructor: use smart pointer
             lines.append("    ref->_native = std::make_unique<::{}>({});".format(cname, args))
 
+        lines.extend(_gen_sync_call(cls, type_map, "ref"))
+
         lines.append("    return ref;")
         lines.append("}")
         lines.append("")
@@ -497,7 +514,10 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
     for op in cls.operators:
         if op.skip:
             continue
-        _gen_operator_impl(lines, op, cls, type_map)
+        if op.operator_type == OperatorType.CALL:
+            _gen_method_impl(lines, op, cls, type_map)
+        else:
+            _gen_operator_impl(lines, op, cls, type_map)
 
     # --- Static methods ---
     for sm in cls.static_methods:
@@ -537,6 +557,53 @@ def _native_call_expr(target: str, arrow: str, method: MethodDecl, args: str) ->
         # Always use operatorNAME() syntax — works for both value and pointer targets
         return "{}{}operator{}({})".format(target, arrow, name, args)
     return "{}{}{}({})".format(target, arrow, name, args)
+
+
+def _gen_sync_call(cls: ClassDecl, type_map: TypeMap, target_var: str) -> list[str]:
+    """Lines that propagate a wrapper's storage into its wrapper base chain.
+
+    Emitted after every assignment to a wrapper's storage member (default
+    constructor, factory methods, and return wrapping) for classes that inherit
+    from another wrapper.  Base-typed OCCT parameters then read a valid storage
+    member even when GDScript passed a derived wrapper.
+    """
+    if not sync_eligible(cls, type_map):
+        return []
+    return ["    {}->_sync_base_storage();".format(target_var)]
+
+
+def _emit_sync_after_assign(lines: list[str], ret_base: str, type_map: TypeMap,
+                            target_var: str = "wrapper") -> None:
+    """Emit _sync_base_storage() for a return-wrapped wrapper, if applicable."""
+    ret_cls = type_map.class_decl(ret_base)
+    if ret_cls and sync_eligible(ret_cls, type_map):
+        lines.append("    {}->_sync_base_storage();".format(target_var))
+
+
+def _gen_sync_storage_impl(cls: ClassDecl, type_map: TypeMap) -> list[str]:
+    """Generate the _sync_base_storage() implementation body (header lines)."""
+    wb = wrapper_base(cls, type_map)
+    if not wb or not sync_eligible(cls, type_map):
+        return []
+    wbase_wname, occt_base = wb
+    base_cls = type_map.class_decl(occt_base)
+    lines = []
+    if cls.kind == ClassKind.REF_COUNTED:
+        lines.append("    {}::_handle = opencascade::handle<::{}>(static_cast<::{}*>(_handle.get()));".format(
+            wbase_wname, occt_base, occt_base))
+    else:
+        base_plain = base_cls is not None and base_cls.has_public_default_ctor
+        if cls.has_public_default_ctor and base_plain:
+            lines.append("    {}::_native = _native;".format(wbase_wname))
+        elif cls.has_public_default_ctor and not base_plain:
+            lines.append("    {}::_native = std::make_unique<::{}>(_native);".format(wbase_wname, occt_base))
+        elif not cls.has_public_default_ctor and base_plain:
+            lines.append("    {}::_native = *_native;".format(wbase_wname))
+        else:
+            lines.append("    {}::_native = std::make_unique<::{}>(*_native);".format(wbase_wname, occt_base))
+    if base_cls is not None and wrapper_base(base_cls, type_map) is not None:
+        lines.append("    {}::_sync_base_storage();".format(wbase_wname))
+    return lines
 
 
 def _has_ostream_param(method: MethodDecl) -> bool:
@@ -601,6 +668,7 @@ def _try_gen_pointer_return(lines: list[str], method: MethodDecl, type_map: Type
         lines.append("    if (result) wrapper->_handle = opencascade::handle<::{}>(result);".format(ret_base))
     else:
         lines.append("    if (result) wrapper->_native = *result;")
+    _emit_sync_after_assign(lines, ret_base, type_map)
     lines.append("    return wrapper;")
     return True
 
@@ -798,6 +866,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             else:
                 # VALUE/TOPODS_SHAPE: dereference handle into native storage
                 lines.append("    wrapper->_native = *result.get();")
+            _emit_sync_after_assign(lines, ret_base, type_map)
             lines.append("    return wrapper;")
         elif type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
@@ -812,6 +881,7 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
                 lines.append("    wrapper->_native = std::make_unique<::{}>(result);".format(ret_base))
             else:
                 lines.append("    wrapper->_native = result;")
+            _emit_sync_after_assign(lines, ret_base, type_map)
             lines.append("    return wrapper;")
         elif ret_base in OPAQUE_POINTER_TYPES:
             # Opaque platform native-handle return → raw uint64_t address
@@ -890,6 +960,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
                 lines.append("    wrapper->_handle = result;")
             else:
                 lines.append("    wrapper->_handle = result;")
+            _emit_sync_after_assign(lines, ret_base, type_map)
             lines.append("    return wrapper;")
         elif type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
@@ -901,6 +972,7 @@ def _gen_operator_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, typ
                 lines.append("    wrapper->_native = std::make_unique<::{}>(result);".format(ret_base))
             else:
                 lines.append("    wrapper->_native = result;")
+            _emit_sync_after_assign(lines, ret_base, type_map)
             lines.append("    return wrapper;")
         elif ret_base in OPAQUE_POINTER_TYPES:
             # Opaque platform native-handle return → raw uint64_t address
@@ -988,6 +1060,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
                 lines.append("    wrapper->_handle = result;")
             else:
                 lines.append("    wrapper->_handle = result;")
+            _emit_sync_after_assign(lines, ret_base, type_map)
             lines.append("    return wrapper;")
         elif type_map.wrapper_name(ret_base):
             wret = type_map.wrapper_name(ret_base)
@@ -1001,6 +1074,7 @@ def _gen_static_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
                 lines.append("    wrapper->_native = std::make_unique<::{}>(result);".format(ret_base))
             else:
                 lines.append("    wrapper->_native = result;")
+            _emit_sync_after_assign(lines, ret_base, type_map)
             lines.append("    return wrapper;")
         elif ret_base in OPAQUE_POINTER_TYPES:
             # Opaque platform native-handle return → raw uint64_t address

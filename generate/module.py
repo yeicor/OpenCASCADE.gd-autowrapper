@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from model import ModuleDecl
+from generate.inherit import build_occt_to_wrapper, topo_sort_classes
 
 # Primitive out-param wrapper classes (OcgStandardReal, ...) plus the generic
 # enum out-param holder, all defined in OcgPrimitiveWrappers.hpp.  These must be
@@ -34,10 +35,16 @@ def generate_module_header(modules: list[ModuleDecl], output_dir: Path,
         includes.append('#include "OcgEnums.hpp"')
         registrations.append('    godot::ClassDB::register_class<godot::OcgEnums>();')
 
-    for mod in modules:
-        for cls in mod.classes:
-            includes.append(f'#include "{cls.wrapper_name}.hpp"')
-            registrations.append(f'    godot::ClassDB::register_class<{cls.wrapper_name}>();')
+    # ClassDB requires a class's parent to be registered before the class, so
+    # classes are ordered base-first GLOBALLY (across all modules).  The
+    # scanner's module order follows the include graph, which does NOT imply
+    # registration order: e.g. BRepMesh classes inherit IMeshTools/IMeshData
+    # classes, but BRepMesh is scanned before them.
+    occt_to_wrapper = build_occt_to_wrapper(modules)
+    all_classes = [cls for m in modules for cls in m.classes]
+    for cls in topo_sort_classes(all_classes, occt_to_wrapper):
+        includes.append(f'#include "{cls.wrapper_name}.hpp"')
+        registrations.append(f'    godot::ClassDB::register_class<{cls.wrapper_name}>();')
 
     if _PRIMITIVE_WRAPPER_CLASSES:
         includes.append('#include "OcgPrimitiveWrappers.hpp"')

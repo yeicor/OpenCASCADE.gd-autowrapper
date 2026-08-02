@@ -289,7 +289,7 @@ def main():
     doc_count = 0
     for mod in modules:
         for cls in mod.classes:
-            content = generate_doc_xml(cls, doc_dir)
+            content = generate_doc_xml(cls, doc_dir, type_map)
             if content:
                 doc_path = doc_dir / f"{cls.wrapper_name}.xml"
                 write_if_changed(doc_path, content)

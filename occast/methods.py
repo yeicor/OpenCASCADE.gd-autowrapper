@@ -185,6 +185,7 @@ def _extract_constructor(cursor: Cursor, known_transient: set[str]) -> MethodDec
         1 for r in all_resolved
         if '<' in r and '::handle<' not in r
     )
+    func_pos = -1  # position of the method name in src_text (set below when needed)
     if handle_fixed or any("<" not in r and r in {"int", "const int", "const int &", "int &", "int &&",
                                                   "bool", "const bool &", "double", "const double &",
                                                   "int32_t", "int64_t", "uint32_t", "uint64_t"}
@@ -261,6 +262,31 @@ def _extract_method(cursor: Cursor, known_transient: set[str]) -> MethodDecl | N
                           "const int", "const int &", "int &", "int &&",
                           "bool", "const bool &", "double", "const double &",
                           "int32_t", "int64_t", "uint32_t", "uint64_t"}
+
+    # Identifiers that may legitimately appear in a method's SOURCE return-type
+    # area and still resolve to a primitive. Any other identifier means the
+    # source declares a non-primitive type that libclang misresolved (e.g.
+    # XSControl_WorkSessionMap → 'const int &'), which is unwrappable.
+    _RETURN_PRIMITIVE_IDENTS = {
+        # C++ keywords and qualifiers
+        "const", "volatile", "static", "virtual", "inline", "explicit",
+        "noexcept", "override", "final", "mutable", "register", "thread_local",
+        "constexpr", "friend", "extern", "signed", "unsigned", "short", "long",
+        "struct", "class", "union", "enum", "typename", "auto",
+        # builtin types
+        "char", "wchar_t", "char16_t", "char32_t", "int", "bool", "float",
+        "double", "void", "size_t", "ptrdiff_t", "ssize_t",
+        "int8_t", "int16_t", "int32_t", "int64_t",
+        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        # OCCT typedefs that map to primitives (mirrors PRIMITIVE_MAP)
+        "Standard_Boolean", "Standard_Character", "Standard_Byte",
+        "Standard_ShortReal", "Standard_Real", "Standard_Integer",
+        "Standard_Size", "Standard_ExtCharacter", "Standard_ExtString",
+        "Standard_CString", "Standard_Address", "Standard_Count",
+        "Standard_Offset", "Graphic3d_ZLayerId", "Graphic3d_ArrayFlags",
+        "TCollection_AsciiString", "TCollection_ExtendedString",
+    }
+
     try:
         src_file = cursor.location.file.name
         if not src_file:
@@ -295,6 +321,7 @@ def _extract_method(cursor: Cursor, known_transient: set[str]) -> MethodDecl | N
         if '<' in p.type.spelling and '::handle<' not in p.type.spelling
     )
     should_skip = False
+    func_pos = -1  # position of the method name in src_text (set below when needed)
     if handle_fixed or any("<" not in r and r in primitive_resolved for r in all_resolved):
         still_bad = [p for p in params if p.type.base_name in primitive_resolved]
         # Also check return type
@@ -394,14 +421,48 @@ def _extract_method(cursor: Cursor, known_transient: set[str]) -> MethodDecl | N
             if canon_resolved or spell_resolved:
                 if '<' in src_text or '::' in src_text:
                     return None
-                # Macro-defined methods (e.g. DEFINE_DERIVED_ATTRIBUTE):
-                # libclang can't resolve their return types from macro expansions.
-                # Normal declarations may start with modern C++ specifiers that the
-                # macro heuristic must not mistake for a macro (constexpr accessors
-                # like gp_Pnt::X(), [[nodiscard]] attributes, etc.).
+                # Typedef misresolution: a typedef of a template (e.g.
+                # Graphic3d_ArrayOfIndexedMapOfStructure = std::array<...>) is
+                # reported with the typedef name as spelling but a primitive as
+                # canonical (libclang can't resolve the underlying template).
+                # Genuine primitives have a primitive spelling too (typedefs of
+                # builtins like Standard_Real resolve to the primitive spelling
+                # directly), so a non-primitive spelling with a primitive
+                # canonical signals a bogus resolution.
+                if (return_type.canonical_spelling in primitive_resolved
+                        and return_type.spelling not in primitive_resolved):
+                    return None
+                # libclang sometimes collapses a typedef of a class template
+                # straight to a primitive, losing even the typedef spelling
+                # (e.g. XSControl_WorkSessionMap → 'const int &'). Only when the
+                # RETURN resolved to a primitive is the source return-type area
+                # checked: if it names a type that is neither a builtin nor a
+                # primitive typedef, the return is a non-wrappable type
+                # misresolved to a primitive and the method must be skipped.
+                if canon_resolved and func_pos >= 0:
+                    ret_area = re.sub(r'\[\[.*?\]\]', '', src_text[:func_pos])
+                    for tok in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', ret_area):
+                        if tok.isupper():
+                            continue  # macros (DEFINE_*, IMPLEMENT_*, ...)
+                        if tok.startswith("Standard_") and tok[len("Standard_"):].isupper():
+                            continue  # Standard_EXPORT/DEPRECATED/NOINLINE macros
+                        if tok in _RETURN_PRIMITIVE_IDENTS:
+                            continue
+                        return None
+                # Macro-defined methods (e.g. DEFINE_DERIVED_ATTRIBUTE) expand
+                # to a declaration whose return type libclang can't resolve
+                # from the macro expansion, and the declaration text begins
+                # with the macro identifier (an all-caps name). Normal
+                # declarations begin with a type or C++ specifier (e.g. `int`,
+                # `gp_Pnt`, `Standard_Real`, `virtual`, `constexpr`,
+                # `[[nodiscard]]`) and are NOT macros — ordinary inline
+                # accessors must not be dropped (e.g. Poly_Triangulation::
+                # NbNodes/Node/Triangle, which the old startswith heuristic
+                # wrongly discarded).
                 decl_head = re.sub(r'^(\[\s*\[.*?\]\s*\])+', '', src_text.strip(), flags=re.DOTALL)
-                if not decl_head.startswith(('virtual', 'Standard_EXPORT', 'static', 'inline',
-                                             'constexpr', 'template', 'friend')):
+                ident = re.match(r'[A-Za-z_][A-Za-z0-9_]*', decl_head.lstrip())
+                first_word = ident.group(0) if ident else ''
+                if first_word.isupper():
                     return None
 
     # Skip deleted methods (`= delete`)
