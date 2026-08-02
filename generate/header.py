@@ -7,6 +7,7 @@ from classify.overloads import get_method_unique_name
 from generate.inherit import wrapper_base, sync_eligible
 from generate.type_map import (TypeMap, _PRIMITIVE_WRAPPER_MAP, COLLECTION_TYPES,
                                HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES)
+from generate.props import plan_properties
 
 
 def _qualify_godot_type(tname: str, shadowed_names: set[str]) -> str:
@@ -118,6 +119,14 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
             if _type_in_set(otype, collection_or_handle - SYNTHESIZED_COLLECTION_TYPES):
                 continue
             ref_wname = type_map.wrapper_name(base)
+            if ref_wname and ref_wname != type_map.wrapper_name(cname):
+                referenced_wnames.add(ref_wname)
+
+    # Public-field property accessors may return Ref<NestedWrapper> (OBJECT
+    # properties) — those need a forward declaration in this header too.
+    for p in plan_properties(cls, type_map):
+        if p.prop_type == "Variant::OBJECT":
+            ref_wname = type_map.wrapper_name(p.field_base)
             if ref_wname and ref_wname != type_map.wrapper_name(cname):
                 referenced_wnames.add(ref_wname)
 
@@ -279,6 +288,18 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
         lines.append("    static {} {}({});".format(ret, unique, params))
 
     if has_static:
+        lines.append("")
+
+    # Public-field property accessors (declared here so the implementation and
+    # the property binding both resolve).  Only emitted for data-struct VALUE
+    # classes (see generate/props.py).
+    props = plan_properties(cls, type_map)
+    if props:
+        for p in props:
+            lines.append("    {} {}() const;".format(
+                _qualify_godot_type(p.getter_ret, shadowed_names or set()), p.getter))
+            lines.append("    void {}({} value);".format(
+                p.setter, _qualify_godot_type(p.setter_param, shadowed_names or set())))
         lines.append("")
 
     # Nested enums as real C++ enums, declared BEFORE the methods that use them

@@ -170,6 +170,7 @@ class FieldDecl:
     name: str
     type: OCCTType
     doc: DocBlock = field(default_factory=DocBlock)
+    is_public: bool = True
 
 
 @dataclass

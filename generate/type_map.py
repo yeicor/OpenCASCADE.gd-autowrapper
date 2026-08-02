@@ -341,6 +341,7 @@ class TypeMap:
         self._enum_names: set[str] = set()        # known enum type names
         self._wrapper_enum_types: dict[str, str] = {}  # OCCT enum name -> wrapper enum C++ type
         self._enum_host_wrapper: dict[str, str] = {}  # OCCT enum name -> host wrapper class name
+        self._enum_decls: dict[str, EnumDecl] = {}    # enum type name -> EnumDecl (for hints)
         self._build(classes, enums or [], extra_enum_names or set())
 
     def _build(self, classes: list[ClassDecl], enums: list[EnumDecl],
@@ -352,6 +353,8 @@ class TypeMap:
             for ne in cls.nested_enums:
                 self._enum_names.add(f"{cls.name}::{ne.name}")
                 self._enum_names.add(ne.name)
+                self._enum_decls[f"{cls.name}::{ne.name}"] = ne
+                self._enum_decls.setdefault(ne.name, ne)
                 # Wrapper enum type: nested in the class's wrapper, e.g. OcgGpDir::D
                 self._wrapper_enum_types[f"{cls.name}::{ne.name}"] = f"{cls.wrapper_name}::{ne.name}"
                 self._enum_host_wrapper[f"{cls.name}::{ne.name}"] = cls.wrapper_name
@@ -361,6 +364,7 @@ class TypeMap:
         # Collect standalone enum names
         for e in enums:
             self._enum_names.add(e.name)
+            self._enum_decls.setdefault(e.name, e)
             if e.name and not e.name.startswith("(unnamed"):
                 # Hosted on the shared OcgEnums class, e.g. OcgEnums::GeomAbs_Shape
                 self._wrapper_enum_types.setdefault(e.name, f"OcgEnums::{e.name}")
@@ -797,6 +801,20 @@ class TypeMap:
             bare = base_name.split("::")[-1]
             return bare in self._enum_names
         return False
+
+    def enum_hint_string(self, base_name: str) -> str | None:
+        """Return a PROPERTY_HINT_ENUM hint string ('V1,V2,...') for an enum,
+        or None if the enum's values are unknown."""
+        if base_name in self._enum_decls:
+            decl = self._enum_decls[base_name]
+            names = [v.name for v in decl.values if v.name]
+            return ",".join(names) if names else None
+        if "::" in base_name:
+            bare = base_name.split("::")[-1]
+            if bare in self._enum_decls:
+                names = [v.name for v in self._enum_decls[bare].values if v.name]
+                return ",".join(names) if names else None
+        return None
 
     def wrapper_enum_type(self, base_name: str) -> str | None:
         """Return the wrapper C++ enum type for an OCCT enum (e.g. 'OcgGpDir::D'

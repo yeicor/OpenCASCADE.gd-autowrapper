@@ -501,8 +501,63 @@ def _extract_params(cursor: Cursor, known_transient: set[str]) -> list[Parameter
             params.append(Parameter(
                 type=ptype,
                 name=child.spelling or "arg{}".format(len(params)),
+                default_value=_extract_param_default(child),
             ))
     return params
+
+
+def _extract_param_default(cursor: Cursor) -> str | None:
+    """Extract the raw C++ default-value source text of a parameter.
+
+    libclang does not expose default arguments directly; they are recovered
+    from the token stream of the parameter's source extent (tokens after the
+    '=' up to the end of the parameter).  Returns None when there is no default
+    or the extent is not a clean source range (e.g. macro-generated decls).
+    """
+    try:
+        tokens = list(cursor.get_tokens())
+    except Exception:
+        return None
+    eq_idx = -1
+    for i, t in enumerate(tokens):
+        if t.spelling == "=":
+            eq_idx = i
+            break
+    if eq_idx < 0:
+        return None
+    start = tokens[eq_idx].extent.end
+    end = cursor.extent.end
+    if start.file is None or end.file is None or start.file.name != end.file.name:
+        return None
+    if start.offset is None or end.offset is None:
+        return None
+    try:
+        src = end.file.name
+        with open(src) as f:
+            text = f.read()[start.offset:end.offset]
+    except (OSError, IndexError):
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    # The parameter extent may swallow trailing punctuation (`)` / `,`) of the
+    # enclosing declaration.  Strip a trailing `)` or `,` only when they are not
+    # part of a call expression (e.g. `Message_ProgressRange()`).
+    stripped = _strip_param_default_punct(text)
+    return stripped or None
+
+
+def _strip_param_default_punct(text: str) -> str:
+    """Remove trailing `,`/`)` that belong to the enclosing decl, not the default."""
+    while text.endswith((",", ")")):
+        # A `)` is part of the default if it closes an open `(` inside the text.
+        if text.endswith(")"):
+            if text.count("(") >= text.count(")"):
+                return text
+            text = text[:-1].rstrip()
+        else:
+            text = text[:-1].rstrip()
+    return text
 
 
 def _make_handle_occt_type(
@@ -689,6 +744,7 @@ def _fix_handle_types_from_source(
             new_params[i] = Parameter(
                 type=ht,
                 name=p.name,
+                default_value=p.default_value,
             )
             found = True
             break
@@ -782,6 +838,6 @@ def _fix_typedef_handle_types(
     for i, p in enumerate(params):
         fixed = _maybe(p.type)
         if fixed is not None:
-            new_params[i] = Parameter(type=fixed, name=p.name)
+            new_params[i] = Parameter(type=fixed, name=p.name, default_value=p.default_value)
 
     return (new_return_type, new_params)

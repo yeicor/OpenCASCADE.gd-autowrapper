@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from model import ClassDecl, ClassKind, MethodDecl, MethodKind, FieldDecl, OCCTType, OperatorType
 from classify.overloads import get_method_unique_name
 from classify.skippable import _resolve_handle_inner, OPAQUE_POINTER_TYPES
@@ -11,6 +13,20 @@ from generate.type_map import (TypeMap, PRIMITIVE_MAP, _PRIMITIVE_WRAPPER_MAP,
                                HANDLE_COLLECTION_TYPES, SYNTHESIZED_COLLECTION_TYPES,
                                resd_members_for_type, bnd_limits_members_for_type,
                                FIXED_ARRAY_PARAMS)
+
+# Extra statements appended to the default constructor body of specific
+# REF_COUNTED wrapper classes, emitted inside the same try/guard block that
+# allocates `_handle`. Keyed by the OCCT class name.
+#
+# Message_Messenger: OCCT's default constructor attaches a Message_PrinterOStream
+# that writes to std::cout, which crashes inside Godot (Godot statically links
+# its own libstdc++ while OCCT links the system libstdc++.so.6 — see
+# occt_console_printer.hpp). Replace it with the safe C-stdio printer so
+# GDScript-created messengers emit messages without terminating the process.
+_REF_COUNTED_CTOR_EXTRA: dict[str, list[str]] = {
+    "Message_Messenger": ["    occt_gd::install_safe_console_printer(_handle);"],
+}
+
 
 
 def _resolve_via_canonical(otype: OCCTType, type_map: TypeMap) -> str | None:
@@ -308,6 +324,15 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
                 _maybe_add_referenced(name)
             if p.type.base_name in ("Standard_OStream", "Standard_IStream", "Standard_SStream"):
                 needs_sstream = True
+
+    # Public-field property accessors may wrap nested value structs (OBJECT
+    # properties), which require the field type's wrapper header for Ref<T>.
+    from generate.props import plan_properties
+    props = plan_properties(cls, type_map)
+    for p in props:
+        if p.prop_type == "Variant::OBJECT":
+            for name in _resolve_ref_name(OCCTType(base_name=p.field_base, spelling=p.field_base)):
+                _maybe_add_referenced(name)
     for ref in sorted(referenced):
         wname_ref = type_map.wrapper_name(ref)
         if wname_ref:
@@ -336,8 +361,9 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             continue  # Abstract class: skip factory methods (can't instantiate)
         unique = get_method_unique_name(ctor)
         bind_params = _gen_bind_params(ctor, unique)
-        lines.append('    ClassDB::bind_static_method("{}", D_METHOD({}), &{}::{});'.format(
-            wname, bind_params, wname, unique))
+        defvals = _gen_defval_suffix(ctor, type_map, cls.name)
+        lines.append('    ClassDB::bind_static_method("{}", D_METHOD({}), &{}::{}{});'.format(
+            wname, bind_params, wname, unique, defvals))
 
     # Bind regular methods
     for method in cls.methods:
@@ -345,8 +371,9 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         unique = get_method_unique_name(method)
         bind_params = _gen_bind_params(method, unique)
-        lines.append('    ClassDB::bind_method(D_METHOD({}), &{}::{});'.format(
-            bind_params, wname, unique))
+        defvals = _gen_defval_suffix(method, type_map, cls.name)
+        lines.append('    ClassDB::bind_method(D_METHOD({}), &{}::{}{});'.format(
+            bind_params, wname, unique, defvals))
 
     # Bind operators
     for op in cls.operators:
@@ -354,8 +381,9 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         unique = get_method_unique_name(op)
         bind_params = _gen_bind_params(op, unique)
-        lines.append('    ClassDB::bind_method(D_METHOD({}), &{}::{});'.format(
-            bind_params, wname, unique))
+        defvals = _gen_defval_suffix(op, type_map, cls.name)
+        lines.append('    ClassDB::bind_method(D_METHOD({}), &{}::{}{});'.format(
+            bind_params, wname, unique, defvals))
 
     # Bind static methods
     for sm in cls.static_methods:
@@ -363,8 +391,9 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             continue
         unique = get_method_unique_name(sm)
         bind_params = _gen_bind_params(sm, unique)
-        lines.append('    ClassDB::bind_static_method("{}", D_METHOD({}), &{}::{});'.format(
-            wname, bind_params, wname, unique))
+        defvals = _gen_defval_suffix(sm, type_map, cls.name)
+        lines.append('    ClassDB::bind_static_method("{}", D_METHOD({}), &{}::{}{});'.format(
+            wname, bind_params, wname, unique, defvals))
 
     # Bind nested enums as real GDScript enums (OcgClass.EnumName.VALUE).
     # C++ enumerator names are prefixed with the enum name, deduplicated the
@@ -378,6 +407,13 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             used_enum_names.add(cpp_name)
             lines.append('    ClassDB::bind_integer_constant(get_class_static(), "{}", "{}", static_cast<int64_t>({}::{}));'.format(
                 enum.name, val.name, wname, cpp_name))
+
+    # Bind public-field property accessors + register the property itself.
+    for p in props:
+        lines.append('    ClassDB::bind_method(D_METHOD("{}"), &{}::{});'.format(p.getter, wname, p.getter))
+        lines.append('    ClassDB::bind_method(D_METHOD("{}", "value"), &{}::{});'.format(p.setter, wname, p.setter))
+        lines.append('    ClassDB::add_property(get_class_static(), PropertyInfo({}, "{}", {}, {}, PROPERTY_USAGE_DEFAULT, "{}"), "{}", "{}");'.format(
+            p.prop_type, p.name, p.hint, p.hint_string, wname, p.setter, p.getter))
 
     lines.append("}")
     lines.append("")
@@ -419,6 +455,7 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
             ctor_body.append("    _handle = new ::{}();".format(cname))
             if sync_eligible(cls, type_map):
                 ctor_body.append("    _sync_base_storage();")
+            ctor_body.extend(_REF_COUNTED_CTOR_EXTRA.get(cname, []))
         else:
             ctor_body.append("    // No default constructor — _handle is null; use factory methods")
     elif cls.kind in (ClassKind.VALUE, ClassKind.TOPODS_SHAPE):
@@ -524,6 +561,19 @@ def generate_source(cls: ClassDecl, type_map: TypeMap) -> str:
         if sm.skip:
             continue
         _gen_static_impl(lines, sm, cls, type_map)
+
+    # --- Public-field property accessors ---
+    for p in props:
+        lines.append("{} {}::{}() const {{".format(_qstr(cls, p.getter_ret), wname, p.getter))
+        for b in p.getter_body:
+            lines.append("    {}".format(b))
+        lines.append("}")
+        lines.append("")
+        lines.append("void {}::{}({} value) {{".format(wname, p.setter, _qstr(cls, p.setter_param)))
+        for b in p.setter_body:
+            lines.append("    {}".format(b))
+        lines.append("}")
+        lines.append("")
 
     lines.append("} // namespace godot")
     return "\n".join(lines) + "\n"
@@ -1285,3 +1335,106 @@ def _gen_bind_params(method: MethodDecl, unique_name: str) -> str:
             continue  # OStream is not exposed to GDScript
         parts.append('"{}"'.format(p.name))
     return ", ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# DEFVAL (default arguments) for GDScript
+#
+# OCCT C++ default values are surfaced to GDScript via godot-cpp's DEFVAL()
+# mechanism: the trailing defaulted parameters of a bound method receive
+# default Variant arguments, so GDScript callers may omit them.  Only a
+# conservative, closed set of default literal forms is translated; anything
+# else (function calls like Precision::Confusion(), macros, expressions) is
+# skipped — the method simply keeps all its arguments mandatory.
+# ---------------------------------------------------------------------------
+
+_NUMERIC_DEFAULT = re.compile(
+    r"^[+-]?(?:0[xX][0-9a-fA-F]+|0[bB][01]+|"
+    r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)[fFlLuU]*$")
+_STR_DEFAULT = re.compile(r'^"(?:[^"\\]|\\.)*"$')
+_CHAR_DEFAULT = re.compile(r"^'(?:[^'\\]|\\.)'$")
+_IDENT_DEFAULT = re.compile(r"^(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*$")
+
+# Wrapper-visible primitive param types that a numeric literal can fill.
+_NUMERIC_PARAM_TYPES = {
+    "double", "Standard_Real", "Standard_ShortReal", "float", "long double",
+    "Standard_Integer", "Standard_Size", "Standard_Count", "Standard_Offset",
+    "int", "int8_t", "int16_t", "int32_t", "int64_t",
+    "unsigned int", "unsigned short", "unsigned long", "unsigned long long",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t", "short", "long",
+    "long long", "size_t", "Standard_Byte", "char16_t",
+}
+_STRING_PARAM_TYPES = {
+    "Standard_CString", "TCollection_AsciiString", "TCollection_ExtendedString",
+    "NCollection_String", "std::string",
+}
+
+
+def _defval_cpp_expr(param: Parameter, type_map: TypeMap, cls_name: str = "") -> str | None:
+    """Translate an OCCT parameter default into a DEFVAL C++ expression.
+
+    Returns the expression to place inside DEFVAL(...), or None when the
+    default cannot be expressed as a godot Variant safely.
+    """
+    dv = (param.default_value or "").strip()
+    if not dv:
+        return None
+    base = param.type.base_name
+
+    if base in ("bool", "Standard_Boolean"):
+        if dv in ("Standard_False", "false"):
+            return "false"
+        if dv in ("Standard_True", "true"):
+            return "true"
+        return None
+
+    if base in _NUMERIC_PARAM_TYPES:
+        if _NUMERIC_DEFAULT.match(dv):
+            return dv
+        return None
+
+    if base in _STRING_PARAM_TYPES:
+        if _STR_DEFAULT.match(dv):
+            return "::godot::String({})".format(dv)
+        return None
+
+    if base in ("char", "Standard_Character"):
+        if _CHAR_DEFAULT.match(dv):
+            return "static_cast<int32_t>({})".format(dv)
+        return None
+
+    if type_map._is_enum(base):
+        if _IDENT_DEFAULT.match(dv) and dv not in ("Standard_True", "Standard_False"):
+            # OCCT enumerators live in the global namespace; the enum's own
+            # header is included by the wrapper, so ::Name resolves.
+            return "static_cast<int64_t>(::{})".format(dv)
+        return None
+
+    return None
+
+
+def _gen_defval_suffix(method: MethodDecl, type_map: TypeMap, cls_name: str = "") -> str:
+    """Return ", DEFVAL(...), ..." for the trailing defaulted params, or ''.
+
+    Only a contiguous suffix of the GDScript-exposed parameters may carry
+    defaults (C++ trailing-default rule).  If any trailing default is not
+    expressible, the whole method loses its defaults.
+    """
+    exposed = [p for p in method.parameters if p.type.base_name != "Standard_OStream"]
+    if not exposed:
+        return ""
+    exprs: list[str] = []
+    for p in reversed(exposed):
+        if not p.default_value:
+            break
+        e = _defval_cpp_expr(p, type_map, cls_name)
+        if e is None:
+            break
+        exprs.append(e)
+    if not exprs:
+        return ""
+    exprs.reverse()
+    first_idx = len(exposed) - len(exprs)
+    if any(not p.default_value for p in exposed[first_idx:]):
+        return ""
+    return ", " + ", ".join("DEFVAL({})".format(e) for e in exprs)
