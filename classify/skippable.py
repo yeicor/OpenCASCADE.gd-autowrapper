@@ -622,7 +622,8 @@ def check_type_wrappable(param_type: OCCTType, context: str,
 
 def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None,
                            enum_names: set[str] | None = None,
-                           copyable_names: set[str] | None = None) -> None:
+                           copyable_names: set[str] | None = None,
+                           refcounted_names: set[str] | None = None) -> None:
     """Mark methods that cannot be wrapped and print warnings.
 
     Sets method.skip = True for each un-wrappable method.
@@ -687,6 +688,23 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
                     method.skip_reason = f"unresolvable handle return type '{inner}'"
                     print(f"  WARNING: skipping {context} — {method.skip_reason}", file=sys.stderr)
                     continue
+
+            # Reference returns of NON-COPYABLE REF_COUNTED wrapped classes
+            # (deleted copy ctor/assignment, e.g. Image_PixMap) cannot be
+            # marshalled safely: the wrapper would have to copy the borrowed
+            # object (`new T(result)`) or take ownership of it, both invalid
+            # for `= delete` copy semantics. Ref-returns of value classes are
+            # copied into _native storage and stay unaffected.
+            if (method.return_type.is_ref
+                    and not method.return_type.is_handle
+                    and copyable_names is not None
+                    and refcounted_names is not None
+                    and method.return_type.base_name in refcounted_names
+                    and method.return_type.base_name not in copyable_names):
+                method.skip = True
+                method.skip_reason = f"reference return of non-copyable refcounted class '{method.return_type.base_name}'"
+                print(f"  WARNING: skipping {context} — {method.skip_reason}", file=sys.stderr)
+                continue
 
         # Check parameter types
         skip = False

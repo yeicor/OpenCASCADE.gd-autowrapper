@@ -81,7 +81,9 @@ def _collect_exposed_names(cls: ClassDecl, type_map, acc: set[str] | None = None
 
 
 def _plan_field(cls: ClassDecl, field: FieldDecl, type_map, reserved: set[str]) -> PropertyPlan | None:
-    name = field.name
+    from classify.overloads import to_snake_case
+    native = field.name
+    name = to_snake_case(field.name)
     base = field.type.base_name
     if not field.is_public or not name or name.startswith("_") or name.lower() in reserved or name.lower() in _RESERVED_NAMES:
         return None
@@ -108,25 +110,25 @@ def _plan_field(cls: ClassDecl, field: FieldDecl, type_map, reserved: set[str]) 
 
     if base in ("bool", "Standard_Boolean"):
         return _mk("Variant::BOOL", "bool", "bool",
-                   ["return _native.{};".format(name)],
-                   ["_native.{} = value;".format(name)])
+                   ["return _native.{};".format(native)],
+                   ["_native.{} = value;".format(native)])
 
     if base in ("double", "Standard_Real", "long double"):
         return _mk("Variant::FLOAT", "double", "double",
-                   ["return _native.{};".format(name)],
-                   ["_native.{} = value;".format(name)])
+                   ["return _native.{};".format(native)],
+                   ["_native.{} = value;".format(native)])
     if base in ("float", "Standard_ShortReal"):
         return _mk("Variant::FLOAT", "float", "float",
-                   ["return _native.{};".format(name)],
-                   ["_native.{} = value;".format(name)])
+                   ["return _native.{};".format(native)],
+                   ["_native.{} = value;".format(native)])
 
     if base == "TCollection_AsciiString":
         return _mk("Variant::STRING", "String", "const ::godot::String&",
-                   ["return ::godot::String::utf8(_native.{}.ToCString());".format(name)],
-                   ["_native.{} = TCollection_AsciiString(value.utf8().get_data());".format(name)])
+                   ["return ::godot::String::utf8(_native.{}.ToCString());".format(native)],
+                   ["_native.{} = TCollection_AsciiString(value.utf8().get_data());".format(native)])
     if base == "TCollection_ExtendedString":
         return _mk("Variant::STRING", "String", "const ::godot::String&",
-                   ["auto ocg_s = _native.{};".format(name),
+                   ["auto ocg_s = _native.{};".format(native),
                     "Standard_Integer ocg_len = ocg_s.LengthOfCString();",
                     "char* ocg_buf = new char[ocg_len + 1];",
                     "ocg_s.ToUTF8CString(ocg_buf);",
@@ -134,7 +136,7 @@ def _plan_field(cls: ClassDecl, field: FieldDecl, type_map, reserved: set[str]) 
                     "::godot::String ocg_ret = ::godot::String::utf8(ocg_buf);",
                     "delete[] ocg_buf;",
                     "return ocg_ret;"],
-                   ["_native.{} = TCollection_ExtendedString(value.utf8().get_data());".format(name)])
+                   ["_native.{} = TCollection_ExtendedString(value.utf8().get_data());".format(native)])
 
     if base in PRIMITIVE_MAP:
         wrapper_type = PRIMITIVE_MAP[base]
@@ -146,19 +148,19 @@ def _plan_field(cls: ClassDecl, field: FieldDecl, type_map, reserved: set[str]) 
                 occt_cast = {"char": "char", "Standard_Character": "Standard_Character",
                              "char16_t": "char16_t", "Standard_ExtCharacter": "Standard_ExtCharacter"}[base]
                 return _mk("Variant::INT", "int32_t", "int32_t",
-                           ["return static_cast<int32_t>(_native.{});".format(name)],
-                           ["_native.{} = static_cast<{}>(value);".format(name, occt_cast)])
+                           ["return static_cast<int32_t>(_native.{});".format(native)],
+                           ["_native.{} = static_cast<{}>(value);".format(native, occt_cast)])
             return _mk("Variant::INT", wrapper_type, wrapper_type,
-                       ["return _native.{};".format(name)],
-                       ["_native.{} = value;".format(name)])
+                       ["return _native.{};".format(native)],
+                       ["_native.{} = value;".format(native)])
 
     if type_map._is_enum(base):
         hint_string = type_map.enum_hint_string(base)
         qname = type_map.qualified_enum_name(base, cls.name)
         hint = "PROPERTY_HINT_ENUM" if hint_string else "PROPERTY_HINT_NONE"
         return _mk("Variant::INT", "int64_t", "int64_t",
-                   ["return static_cast<int64_t>(_native.{});".format(name)],
-                   ["_native.{} = static_cast<{}>(value);".format(name, qname)],
+                   ["return static_cast<int64_t>(_native.{});".format(native)],
+                   ["_native.{} = static_cast<{}>(value);".format(native, qname)],
                    hint=hint,
                    hint_string='"{}"'.format(hint_string) if hint_string else '""')
 
@@ -167,10 +169,10 @@ def _plan_field(cls: ClassDecl, field: FieldDecl, type_map, reserved: set[str]) 
             and type_map.has_public_default_ctor(base) and type_map.is_copyable(base)):
         return _mk("Variant::OBJECT", "Ref<{}>".format(wname), "Ref<{}>".format(wname),
                    ["Ref<{}> w; w.instantiate();".format(wname),
-                    "w->_native = _native.{};".format(name),
+                    "w->_native = _native.{};".format(native),
                     "return w;"],
                    ["ERR_FAIL_NULL(value);",
-                    "_native.{} = value->_native;".format(name)],
+                    "_native.{} = value->_native;".format(native)],
                    hint="PROPERTY_HINT_RESOURCE_TYPE",
                    hint_string='"{}"'.format(wname))
 

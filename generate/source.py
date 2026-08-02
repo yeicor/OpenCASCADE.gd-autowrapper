@@ -134,6 +134,7 @@ def generate_primitive_wrappers_header() -> str:
             lines.append("    static void _bind_methods() {")
             lines.append('        ClassDB::bind_method(D_METHOD("get_value"), &{}::get_value);'.format(wrapper_name))
             lines.append('        ClassDB::bind_method(D_METHOD("set_value", "value"), &{}::set_value);'.format(wrapper_name))
+            lines.append('        ClassDB::add_property(get_class_static(), PropertyInfo(Variant::STRING, "value"), "set_value", "get_value");')
             lines.append("    }")
             lines.append("};")
             lines.append("")
@@ -157,6 +158,8 @@ def generate_primitive_wrappers_header() -> str:
         lines.append("    static void _bind_methods() {")
         lines.append('        ClassDB::bind_method(D_METHOD("get_value"), &{}::get_value);'.format(wrapper_name))
         lines.append('        ClassDB::bind_method(D_METHOD("set_value", "value"), &{}::set_value);'.format(wrapper_name))
+        variant_type = {"double": "Variant::FLOAT", "float": "Variant::FLOAT", "bool": "Variant::BOOL"}.get(bind_type, "Variant::INT")
+        lines.append('        ClassDB::add_property(get_class_static(), PropertyInfo({}, "value"), "set_value", "get_value");'.format(variant_type))
         lines.append("    }")
         lines.append("};")
         lines.append("")
@@ -178,6 +181,7 @@ def generate_primitive_wrappers_header() -> str:
     lines.append("    static void _bind_methods() {")
     lines.append('        ClassDB::bind_method(D_METHOD("get_value"), &OcgEnumValue::get_value);')
     lines.append('        ClassDB::bind_method(D_METHOD("set_value", "value"), &OcgEnumValue::set_value);')
+    lines.append('        ClassDB::add_property(get_class_static(), PropertyInfo(Variant::INT, "value"), "set_value", "get_value");')
     lines.append("    }")
     lines.append("};")
     lines.append("")
@@ -926,7 +930,13 @@ def _gen_method_impl(lines: list[str], method: MethodDecl, cls: ClassDecl, type_
             if ret_base_orig in HANDLE_COLLECTION_TYPES:
                 lines.append("    wrapper->_handle = result;")
             elif type_map.is_refcounted(ret_base):
-                lines.append("    wrapper->_handle = opencascade::handle<::{}>(&result);".format(ret_base))
+                # Borrowed reference (or value) of a refcounted object, e.g.
+                # Image_VideoRecorder::ChangeFrame() returns Image_PixMap& to an
+                # internal member. The caller must NOT take ownership of the
+                # reference, so deep-copy into a fresh transient instead of
+                # wrapping &result in a handle (that would double-free the
+                # borrower's storage).
+                lines.append("    wrapper->_handle = opencascade::handle<::{}>(new ::{}(result));".format(ret_base, ret_base))
             elif not type_map.has_public_default_ctor(ret_base):
                 lines.append("    wrapper->_native = std::make_unique<::{}>(result);".format(ret_base))
             else:

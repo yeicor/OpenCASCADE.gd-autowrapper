@@ -160,19 +160,39 @@ def _extract_constructor(cursor: Cursor, known_transient: set[str]) -> MethodDec
     except (OSError, IndexError):
         src_text = ""
 
-    # Detect template resolution failures in parameters
-    all_resolved = [p.type.spelling for p in params]
-    if not any("<" in r for r in all_resolved):
-        if '<' in src_text:
-            return None
-
-    # Fix handle types misresolved by libclang
+    # Fix handle types misresolved by libclang FIRST — libclang commonly
+    # resolves occ::handle<T> to int when parsing is degraded, and running the
+    # template-resolution check before fixing would wrongly drop such
+    # constructors (the source still contains '<' from the handle declaration).
     void_type = OCCTType(base_name='void', spelling='void', is_ref=False, is_handle=False, is_const=False, is_pointer=False)
     handle_fixed = _fix_handle_types_from_source(
         src_text, void_type, params, cursor.spelling, UNWRAPPABLE_TYPES)
     if handle_fixed:
         _, params = handle_fixed
     void_type, params = _fix_typedef_handle_types(void_type, params, UNWRAPPABLE_TYPES)
+
+    # Skip copy constructors: X(const X&) and transient copy ctors
+    # X(const occ::handle<X>&) / X(const opencascade::handle<X>&).
+    # Wrapping these yields a factory for the (implicit) copy constructor,
+    # which OCCT often declares but does not export from the shared library
+    # (link failure at extension load). A single param that is a const-ref of
+    # the same class (or a handle of the same class) can only be a copy ctor.
+    class_name = cursor.spelling
+    if len(params) == 1:
+        _pt = params[0].type
+        _is_copy_param = (
+            _pt.is_handle and _pt.handle_inner == class_name
+        ) or (
+            _pt.base_name == class_name and _pt.is_ref and _pt.is_const
+        )
+        if _is_copy_param:
+            return None
+
+    # Detect template resolution failures in parameters (after handle fixing)
+    all_resolved = [p.type.spelling for p in params]
+    if not any("<" in r for r in all_resolved):
+        if '<' in src_text:
+            return None
 
     # After fixing, check for remaining misresolved int params that are
     # actually collection types (NCollection_, etc.) — skip the constructor.

@@ -238,6 +238,8 @@ def generate_header(cls: ClassDecl, type_map: TypeMap) -> str:
     for ctor in cls.constructors:
         if ctor.skip or len(ctor.parameters) == 0:
             continue
+        if cls.has_pure_virtual:
+            continue  # abstract: factory is declared-but-not-bound; see generate/source.py
         has_ctors = True
         unique = get_method_unique_name(ctor)
         params = _gen_param_list(ctor, type_map, shadowed_names)

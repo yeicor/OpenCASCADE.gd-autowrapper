@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 from model import ClassDecl, MethodDecl, MethodKind, OCCTType
@@ -17,6 +18,78 @@ OPERATOR_NAME_MAP = {
     "unary_minus": "negate", "unary_plus": "plus",
     "*deref": "dereference", "()": "call",
 }
+
+
+def to_snake_case(name: str) -> str:
+    """Convert a CamelCase/PascalCase identifier to snake_case.
+
+    Idempotent for already-snake_case input, so it is safe to apply to any
+    method name (including OPERATOR_NAME_MAP values and OCCT names that are
+    already lowercase).  Examples: NbNodes -> nb_nodes, GetRange -> get_range,
+    TShape -> t_shape, Shape -> shape.
+    """
+    s = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s).lower()
+
+
+# Static member functions injected into every wrapper class by the GDCLASS
+# macro (e.g. static void free(void*, GDExtensionClassInstancePtr)) and by
+# godot::Object (static Ref<Dictionary> from_dict(...), get_instance()).  A
+# snake_cased OCCT method with the same name (e.g. NCollection_BaseAllocator::
+# Free) would make `&Wrapper::name` an overloaded-name lookup between the
+# injected static and the generated instance method, which template deduction
+# in ClassDB::bind_method cannot resolve.  Such names get a trailing underscore
+# (free -> free_), like C++ keywords.
+_GDCLASS_RESERVED = {
+    "free",
+    "initialize_class",
+    "get_class_static",
+    "get_parent_class_static",
+    "register_virtuals",
+    "has_get_property_list",
+    "free_property_list_bind",
+    "get_property_list_bind",
+    "notification_bind",
+    "property_can_revert_bind",
+    "property_get_revert_bind",
+    "set_bind",
+    "get_bind",
+    "validate_property_bind",
+    "to_string_bind",
+    "from_dict",
+    "get_instance",
+}
+
+
+# C++ keywords that a snake_cased OCCT name may collide with (e.g. Delete ->
+# delete).  Such names get a trailing underscore so the generated C++ wrapper
+# method stays a valid identifier.
+_CPP_KEYWORDS = {
+    "alignas", "alignof", "and", "and_eq", "asm", "atomic_cancel",
+    "atomic_commit", "atomic_noexcept", "auto", "bitand", "bitor", "bool",
+    "break", "case", "catch", "char", "char16_t", "char32_t", "class",
+    "compl", "concept", "const", "consteval", "constexpr", "constinit",
+    "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype",
+    "default", "delete", "do", "double", "dynamic_cast", "else", "enum",
+    "explicit", "export", "extern", "false", "float", "for", "friend", "goto",
+    "if", "inline", "int", "long", "mutable", "namespace", "new", "noexcept",
+    "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private",
+    "protected", "public", "reflexpr", "register", "reinterpret_cast",
+    "requires", "return", "short", "signed", "sizeof", "static",
+    "static_assert", "static_cast", "struct", "switch", "synchronized",
+    "template", "this", "thread_local", "throw", "true", "try", "typedef",
+    "typeid", "typename", "union", "unsigned", "using", "virtual", "void",
+    "volatile", "wchar_t", "while", "xor", "xor_eq",
+}
+
+
+def safe_gd_name(name: str) -> str:
+    """snake_case a name, guarding against C++ keywords (delete -> delete_) and
+    GDCLASS-injected statics (free -> free_)."""
+    s = to_snake_case(name)
+    if s in _CPP_KEYWORDS or s in _GDCLASS_RESERVED:
+        s += "_"
+    return s
 
 
 def group_overloads(cls: ClassDecl) -> None:
@@ -47,7 +120,7 @@ def group_overloads(cls: ClassDecl) -> None:
     claimed: set[str] = set()
     for name, group in groups.items():
         if len(group) <= 1:
-            claimed.add(OPERATOR_NAME_MAP.get(name, name))
+            claimed.add(safe_gd_name(OPERATOR_NAME_MAP.get(name, name)))
 
     # Assign hashed suffixes to overloaded groups (sorted for determinism).
     for name in sorted(groups.keys()):
@@ -55,7 +128,7 @@ def group_overloads(cls: ClassDecl) -> None:
         if len(group) <= 1:
             continue
         group.sort(key=lambda m: len(m.parameters))
-        safe = OPERATOR_NAME_MAP.get(name, name)
+        safe = safe_gd_name(OPERATOR_NAME_MAP.get(name, name))
         for i, method in enumerate(group):
             method.is_overload = True
             method.overload_index = i
@@ -219,7 +292,7 @@ def _unique_base(method: MethodDecl) -> str:
     """Base name used to group methods for GDScript-signature dedupe."""
     if method.kind == MethodKind.CONSTRUCTOR:
         return "from"
-    return OPERATOR_NAME_MAP.get(method.name, method.name)
+    return safe_gd_name(OPERATOR_NAME_MAP.get(method.name, method.name))
 
 
 def _canon_base(t: OCCTType) -> str:
@@ -292,10 +365,11 @@ def _gd_signature(method: MethodDecl) -> tuple[str, ...]:
 def get_method_unique_name(method: MethodDecl, prefix: str = "") -> str:
     """Get a unique method name for binding.
 
-    Non-overloaded methods keep their plain name.  Overloaded methods get a
-    short stable hash of their parameter signature (e.g. Init_a), grown only on
-    collision.  Parameterized constructors become factory methods named
-    from_<hash>.
+    All GDScript-facing names are snake_case (the project's standard), converted
+    automatically from the OCCT CamelCase name.  Non-overloaded methods keep
+    their plain snake_case name.  Overloaded methods get a short stable hash of
+    their parameter signature (e.g. init_a), grown only on collision.
+    Parameterized constructors become factory methods named from_<hash>.
     """
     # Constructors: default ctor -> "default", parameterized -> from_<hash>
     if method.kind == MethodKind.CONSTRUCTOR:
@@ -303,7 +377,7 @@ def get_method_unique_name(method: MethodDecl, prefix: str = "") -> str:
             return "default"
         return "from_" + (method.overload_suffix or _hash_suffix(_param_signature(method)))
 
-    safe = OPERATOR_NAME_MAP.get(method.name, method.name)
+    safe = safe_gd_name(OPERATOR_NAME_MAP.get(method.name, method.name))
     if not method.is_overload:
         return safe
 
