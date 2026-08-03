@@ -1,0 +1,433 @@
+"""AST extraction: classes, enums, typedefs, methods, fields from a TU.
+
+Clean extraction driven by the libclang Type API; no source-text
+mis-resolution heuristics.  The only source-text readers are (a) field access
+recovery (libclang's access_specifier is unreliable for OCCT class bodies) and
+(b) token-extent default-argument recovery (libclang does not expose defaults).
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from clang.cindex import (AccessSpecifier, Cursor, CursorKind, Diagnostic,
+                          TranslationUnit, Type)
+
+from .model import (ClassDecl, DocBlock, EnumDecl, EnumValue, FieldDecl,
+                    MethodDecl, MethodKind, OperatorType, Parameter)
+from .types import make_type
+
+# ---------------------------------------------------------------------------
+# Small, data-driven skip tables (nothing type-resolution related)
+# ---------------------------------------------------------------------------
+
+# Operators that cannot be represented as a named GDScript method.
+UNWRAPPABLE_OPERATORS = {"[]", ",", "->", "->*", "new", "delete", "new[]",
+                         "delete[]", "<<", ">>", "~"}
+
+# Methods that are meaningless from GDScript.
+SKIP_METHOD_NAMES = {
+    "operator new", "operator delete", "operator new[]", "operator delete[]",
+    "operator=", "operator[]", "operator<<", "operator>>",
+    "ShallowCopy", "ShallowDump",  # stream/IO helpers
+    "ObjectIterator",              # returns a typedef libclang cannot follow
+}
+
+# Operators we wrap, mapped to stable names.
+BINARY_OPERATOR_TYPES = {
+    "+": OperatorType.PLUS, "-": OperatorType.MINUS,
+    "*": OperatorType.MULTIPLY, "/": OperatorType.DIVIDE,
+    "%": OperatorType.MODULO, "^": OperatorType.CROSS,
+    "==": OperatorType.EQUALS, "!=": OperatorType.NOT_EQUALS,
+    "<": OperatorType.LESS, ">": OperatorType.GREATER,
+}
+COMPOUND_OPERATOR_TYPES = {
+    "+=": OperatorType.PLUS_ASSIGN, "-=": OperatorType.MINUS_ASSIGN,
+    "*=": OperatorType.MULTIPLY_ASSIGN, "/=": OperatorType.DIVIDE_ASSIGN,
+    "^=": OperatorType.CROSS_ASSIGN,
+}
+UNARY_OPERATOR_TYPES = {
+    "-": OperatorType.UNARY_MINUS, "+": OperatorType.UNARY_PLUS,
+    "*": OperatorType.DEREFERENCE,
+}
+
+
+def classify_operator(name: str) -> tuple[OperatorType | None, str]:
+    """Map an operator spelling to (OperatorType, wrapper name) or (None, "")."""
+    if not name.startswith("operator"):
+        return None, ""
+    op = name[len("operator"):].strip()
+    if not op or op in UNWRAPPABLE_OPERATORS:
+        return None, ""
+    if op in BINARY_OPERATOR_TYPES:
+        return BINARY_OPERATOR_TYPES[op], op
+    if op in COMPOUND_OPERATOR_TYPES:
+        return COMPOUND_OPERATOR_TYPES[op], op
+    if op in UNARY_OPERATOR_TYPES:
+        return UNARY_OPERATOR_TYPES[op], f"unary_{op}"
+    if op == "()":
+        return OperatorType.CALL, "()"
+    return None, ""
+
+
+# ---------------------------------------------------------------------------
+# Default arguments (token-extent recovery)
+# ---------------------------------------------------------------------------
+
+def _param_default(cursor: Cursor) -> str | None:
+    """Recover the source text of a parameter default from its token extent."""
+    try:
+        tokens = list(cursor.get_tokens())
+    except Exception:
+        return None
+    eq_idx = -1
+    for i, t in enumerate(tokens):
+        if t.spelling == "=":
+            eq_idx = i
+            break
+    if eq_idx < 0:
+        return None
+    start = tokens[eq_idx].extent.end
+    end = cursor.extent.end
+    try:
+        if start.file is None or end.file is None or start.file.name != end.file.name:
+            return None
+        if start.offset is None or end.offset is None:
+            return None
+        with open(start.file.name) as f:
+            text = f.read()[start.offset:end.offset]
+    except (OSError, IndexError, AttributeError):
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    while text.endswith((",", ")")):
+        if text.endswith(")"):
+            if text.count("(") >= text.count(")"):
+                break
+            text = text[:-1].rstrip()
+        else:
+            text = text[:-1].rstrip()
+    return text or None
+
+
+def _is_deleted(cursor: Cursor) -> bool:
+    """True when the declaration is `= delete` (libclang does not expose it)."""
+    try:
+        toks = [t.spelling for t in cursor.get_tokens()]
+    except Exception:
+        return False
+    for i, t in enumerate(toks[:-1]):
+        if t == "=" and i + 1 < len(toks) and toks[i + 1] == "delete":
+            return True
+    return False
+
+
+def _is_copy_ctor(cursor: Cursor, class_name: str) -> bool:
+    """Structurally detect copy constructors (single const-ref / handle<Self>)."""
+    params = [c for c in cursor.get_children() if c.kind == CursorKind.PARM_DECL]
+    if len(params) != 1:
+        return False
+    t = make_type(params[0].type)
+    return (t.is_handle and t.handle_inner == class_name) or (
+        t.base_name == class_name and t.is_ref and t.is_const)
+
+
+def _params(cursor: Cursor) -> list[Parameter]:
+    out: list[Parameter] = []
+    for child in cursor.get_children():
+        if child.kind == CursorKind.PARM_DECL:
+            name = child.spelling or f"arg{len(out)}"
+            out.append(Parameter(type=make_type(child.type), name=name,
+                                 default_value=_param_default(child)))
+    return out
+
+
+def _doc(cursor: Cursor) -> DocBlock:
+    try:
+        brief = cursor.brief_comment or ""
+    except Exception:
+        brief = ""
+    try:
+        raw = cursor.raw_comment or ""
+    except Exception:
+        raw = ""
+    return DocBlock(brief=brief, raw=raw)
+
+
+def _extract_method(cursor: Cursor, class_name: str) -> MethodDecl | None:
+    name = cursor.spelling
+    if name in SKIP_METHOD_NAMES:
+        return None
+    if _is_deleted(cursor):
+        return None
+
+    return_type = make_type(cursor.result_type)
+    params = _params(cursor)
+    op_type, op_name = classify_operator(name)
+
+    is_static = bool(cursor.is_static_method())
+    return MethodDecl(
+        name=op_name if op_type else name,
+        return_type=return_type,
+        parameters=params,
+        kind=(MethodKind.STATIC_METHOD if is_static and not op_type
+              else MethodKind.OPERATOR if op_type else MethodKind.METHOD),
+        is_const=bool(cursor.is_const_method()),
+        is_virtual=bool(cursor.is_virtual_method()),
+        is_static=is_static,
+        is_default=bool(cursor.is_default_method()),
+        is_pure_virtual=bool(cursor.is_pure_virtual_method()),
+        operator_type=op_type,
+        doc=_doc(cursor),
+    )
+
+
+def _extract_constructor(cursor: Cursor, class_name: str) -> MethodDecl | None:
+    if cursor.access_specifier in (AccessSpecifier.PRIVATE, AccessSpecifier.PROTECTED):
+        return None
+    if _is_deleted(cursor):
+        return None
+    if _is_copy_ctor(cursor, class_name):
+        return None
+    return MethodDecl(
+        name=class_name,
+        parameters=_params(cursor),
+        kind=MethodKind.CONSTRUCTOR,
+        is_default=bool(cursor.is_default_method()),
+        doc=_doc(cursor),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Field access recovery (libclang's access_specifier is unreliable for OCCT)
+# ---------------------------------------------------------------------------
+
+_ACCESS_LABELS = ("public", "protected", "private")
+
+
+def _read_header(file_name: str) -> str:
+    try:
+        with open(file_name, "r", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _class_body_access(source: str, start: int, end: int) -> dict[int, str] | None:
+    open_brace = source.find("{", start, end)
+    if open_brace < 0:
+        return None
+    access: str | None = None
+    changes: dict[int, str] = {}
+    depth = 0
+    i = open_brace
+    n = len(source)
+    line = source.count("\n", 0, open_brace) + 1
+    while i < n and i <= end:
+        ch = source[i]
+        if ch == "\n":
+            line += 1
+            i += 1
+            continue
+        if source.startswith("//", i):
+            nl = source.find("\n", i, end)
+            if nl < 0:
+                break
+            line += 1
+            i = nl + 1
+            continue
+        if source.startswith("/*", i):
+            close = source.find("*/", i + 2, end)
+            if close < 0:
+                break
+            line += source.count("\n", i, close + 2)
+            i = close + 2
+            continue
+        if source.startswith('"', i) or source.startswith("'", i):
+            quote = source[i]
+            j = i + 1
+            while j < n and j <= end:
+                if source[j] == "\\":
+                    j += 2
+                    continue
+                if source[j] == quote:
+                    break
+                if source[j] == "\n":
+                    line += 1
+                j += 1
+            line += source.count("\n", i, j + 1)
+            i = j + 1
+            continue
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 1:
+            for label in _ACCESS_LABELS:
+                if source.startswith(label + ":", i) and (
+                        i == 0 or not (source[i - 1].isalnum() or source[i - 1] == "_")):
+                    access = label
+                    changes[line] = label
+                    i += len(label) + 1
+                    break
+            else:
+                i += 1
+            continue
+        i += 1
+    return changes
+
+
+def _field_is_public(field: Cursor, changes: dict[int, str] | None) -> bool | None:
+    if changes is None:
+        return None
+    try:
+        fline = field.location.line
+    except Exception:
+        return None
+    best = None
+    best_line = -1
+    for line, label in changes.items():
+        if line <= fline and line > best_line:
+            best = label
+            best_line = line
+    if best is None:
+        return None
+    return best == "public"
+
+
+# ---------------------------------------------------------------------------
+# Extraction
+# ---------------------------------------------------------------------------
+
+def _is_transient(cursor: Cursor) -> bool:
+    """True when the class (or any base) derives from Standard_Transient."""
+    if cursor.spelling == "Standard_Transient":
+        return True
+    for child in cursor.get_children():
+        if child.kind == CursorKind.CXX_BASE_SPECIFIER:
+            base = child.get_definition()
+            if base and base.is_definition():
+                if _is_transient(base):
+                    return True
+    return False
+
+
+def _base_names(cursor: Cursor) -> list[str]:
+    return [c.type.spelling for c in cursor.get_children()
+            if c.kind == CursorKind.CXX_BASE_SPECIFIER]
+
+
+def _extract_enum(cursor: Cursor, header: str, parent: str = "") -> EnumDecl:
+    values: list[EnumValue] = []
+    for c in cursor.get_children():
+        if c.kind == CursorKind.ENUM_CONSTANT_DECL:
+            try:
+                val = c.enum_value
+            except Exception:
+                val = None
+            values.append(EnumValue(name=c.spelling, value=val))
+    return EnumDecl(
+        name=cursor.spelling, values=values,
+        is_scoped=cursor.kind == CursorKind.ENUM_DECL and "scoped" in str(cursor.type.spelling),
+        is_nested=bool(parent), parent_class=parent,
+        header_file=header, doc=_doc(cursor),
+    )
+
+
+def _extract_class(cursor: Cursor, header: str) -> ClassDecl:
+    name = cursor.spelling
+    cls = ClassDecl(
+        name=name, base_classes=_base_names(cursor),
+        is_transient_descendant=_is_transient(cursor),
+        header_file=header, doc=_doc(cursor),
+    )
+    source = ""
+    changes: dict[int, str] | None = None
+    try:
+        fname = cursor.location.file.name
+        source = _read_header(fname)
+        if source:
+            changes = _class_body_access(source, cursor.extent.start.offset,
+                                         cursor.extent.end.offset)
+    except Exception:
+        changes = None
+
+    for child in cursor.get_children():
+        kind = child.kind
+        if kind == CursorKind.CONSTRUCTOR:
+            ctor = _extract_constructor(child, name)
+            if ctor:
+                cls.constructors.append(ctor)
+                if ctor.is_default or len(ctor.parameters) == 0:
+                    cls.has_public_default_ctor = True
+        elif kind == CursorKind.CXX_METHOD:
+            method = _extract_method(child, name)
+            if method:
+                if method.kind == MethodKind.STATIC_METHOD:
+                    cls.static_methods.append(method)
+                elif method.kind == MethodKind.OPERATOR:
+                    cls.operators.append(method)
+                else:
+                    cls.methods.append(method)
+        elif kind == CursorKind.FIELD_DECL:
+            is_public = _field_is_public(child, changes)
+            if is_public is None:
+                is_public = child.access_specifier == AccessSpecifier.PUBLIC
+            cls.fields.append(FieldDecl(name=child.spelling,
+                                        type=make_type(child.type),
+                                        doc=_doc(child), is_public=is_public))
+        elif kind == CursorKind.ENUM_DECL and child.is_definition():
+            cls.nested_enums.append(_extract_enum(child, header, parent=name))
+    cls.has_pure_virtual = any(m.is_pure_virtual for m in cls.methods)
+    return cls
+
+
+@dataclass
+class HeaderResult:
+    header: str
+    classes: list[ClassDecl] = field(default_factory=list)
+    enums: list[EnumDecl] = field(default_factory=list)
+    typedefs: list[tuple[str, str]] = field(default_factory=list)
+
+
+def extract_header(header: Path, tu: TranslationUnit) -> HeaderResult:
+    """Extract declarations DEFINED in the given header file."""
+    header = str(header)
+    result = HeaderResult(header=header)
+
+    def is_occt_name(name: str) -> bool:
+        # OCCT classes begin with a module prefix (`gp_`, `math_`) or a capital.
+        # Lowercase names (e.g. `hash`, `tuple`) are C++ std/library helpers.
+        return not (name.islower() or name.isdigit() or not name)
+
+    def walk(cursor: Cursor, namespace: tuple[str, ...] = ()):
+        for child in cursor.get_children():
+            if child.kind == CursorKind.NAMESPACE:
+                walk(child, namespace + (child.spelling,))
+                continue
+            try:
+                if child.location.file is None or child.location.file.name != header:
+                    continue
+            except Exception:
+                continue
+            if child.kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
+                if child.is_definition() and namespace != ("std",) \
+                        and is_occt_name(child.spelling):
+                    result.classes.append(_extract_class(child, header))
+            elif child.kind == CursorKind.ENUM_DECL and child.is_definition():
+                result.enums.append(_extract_enum(child, header))
+            elif child.kind == CursorKind.TYPEDEF_DECL:
+                t = make_type(child.underlying_typedef_type)
+                if t.is_enum or t.is_handle or t.is_collection or (
+                        t.base_name and t.base_name[0].isupper()):
+                    result.typedefs.append((child.spelling, t.base_name))
+
+    walk(tu.cursor)
+    return result

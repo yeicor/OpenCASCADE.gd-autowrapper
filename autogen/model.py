@@ -79,11 +79,13 @@ class OCCTType:
     is_const: bool = False
     is_ref: bool = False            # &
     is_pointer: bool = False        # *
-    is_handle: bool = False         # opencascade::handle<T>
+    is_handle: bool = False         # occ::handle<T> / opencascade::handle<T>
     handle_inner: str = ""          # T if is_handle
     is_transient_descendant: bool = False  # Inherits from Standard_Transient
     pointee_is_const: bool = False  # For pointers: is the pointee const-qualified?
                                     # ("const void*" → True; "void* const" → False)
+    is_enum: bool = False           # resolves to an enum type
+    template_args: list[str] = field(default_factory=list)  # top-level template args (spellings)
 
     @property
     def is_void(self) -> bool:
@@ -106,6 +108,12 @@ class OCCTType:
     def is_string(self) -> bool:
         return self.base_name in ("Standard_CString", "TCollection_AsciiString",
                                    "TCollection_ExtendedString", "std::string")
+
+    @property
+    def is_collection(self) -> bool:
+        """Type is an NCollection_* / TColStd_* / TColgp_* sequence template."""
+        return any(self.base_name.startswith(p) for p in
+                   ("NCollection_", "TColStd_", "TColgp_"))
 
     @property
     def unwrappable(self) -> bool:
@@ -189,10 +197,10 @@ class ClassDecl:
     nested_enums: list[EnumDecl] = field(default_factory=list)
     header_file: str = ""
     doc: DocBlock = field(default_factory=DocBlock)
+    extra_occt_includes: list[str] = field(default_factory=list)  # OCCT headers this class's own header needs but doesn't include
     has_public_default_ctor: bool = False
     has_pure_virtual: bool = False
     has_copy_assignment: bool = True   # False if copy assignment operator is deleted
-    transitive_occt_includes: list[str] = field(default_factory=list)  # OCCT headers transitively included by this header
 
     @property
     def all_methods(self) -> list[MethodDecl]:
