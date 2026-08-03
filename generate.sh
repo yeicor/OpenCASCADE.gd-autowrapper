@@ -39,18 +39,10 @@ echo ""
 # Pass any extra arguments to generate.py (e.g. --modules gp TopoDS)
 EXTRA_ARGS="${GENERATE_ARGS:-}"
 
-# Generate GDScript sweep test suites too, when the project has a demo/ dir
-# (they are regenerated on every run and gitignored in the parent repo).
-SWEEP_ARGS=""
-if [ -d "$PROJECT_ROOT/demo" ]; then
-    SWEEP_ARGS="--sweep-test $PROJECT_ROOT/demo/tests/autowrapper"
-fi
-
 # Run the Python generator
 python3 "$SCRIPT_DIR/generate.py" \
     --compile-commands "$BUILD_DIR/compile_commands.json" \
     --output-dir "$AUTOWRAPPER_DIR" \
-    $SWEEP_ARGS \
     $EXTRA_ARGS
 
 echo ""

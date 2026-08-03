@@ -37,8 +37,6 @@ def main():
                         help="Only scan these modules (e.g. gp TopoDS)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Scan headers but don't generate code")
-    parser.add_argument("--sweep-test", type=str, default=None,
-                        help="Directory where to write auto-generated GDScript sweep test suites")
     parser.add_argument("--dump-model", action="store_true",
                         help="Dump parsed model as JSON for debugging")
     parser.add_argument("--dump-skips", action="store_true",
@@ -227,16 +225,6 @@ def main():
                         sig = ",".join(_type_to_string(p.type) for p in meth.parameters)
                         print(f"  SKIP {c.name}::{meth.name}({sig}) = {meth.skip_reason}",
                               file=sys.stderr)
-
-    if args.sweep_test:
-        from generate.sweep import generate_sweep_suite
-        sweep_dir = Path(args.sweep_test)
-        sweep_dir.mkdir(parents=True, exist_ok=True)
-        for mod in modules:
-            content = generate_sweep_suite(mod, type_map)
-            path = sweep_dir / "test_sweep_{}.gd".format(mod.name.replace("-", "_").replace("::", "_"))
-            write_if_changed(path, content)
-        print(f"  Generated sweep test suites in {sweep_dir}", file=sys.stderr)
 
     files_generated = 0
     for mod in modules:

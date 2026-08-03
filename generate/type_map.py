@@ -631,8 +631,12 @@ class TypeMap:
             # Non-value wrapped types (handles, etc.)
             if self.is_refcounted(base) and otype.is_ref and not otype.is_const:
                 return "Ref<{}>".format(wname)
+            # Const-reference returns of a wrapped class are deep-copied into a
+            # fresh transient by the generated body (never returned by `const
+            # OcgT&`, which cannot reference a temporary Ref), so the signature
+            # must be Ref<T> as well.
             if otype.is_ref and otype.is_const:
-                return "const {}&".format(wname)
+                return "Ref<{}>".format(wname)
             if otype.is_ref:
                 return "{}&".format(wname)
             return wname
