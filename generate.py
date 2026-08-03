@@ -172,8 +172,19 @@ def main():
     # leaving methods referencing now-unwrapped types.
     # Also includes collection types (NCollection typedefs) and non-scanned enums as wrapped.
     from classify.skippable import mark_skippable_methods
-    updated_wrapped_names = {cls.name for c in all_classes for cls in [c]} | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys()) | set(SYNTHESIZED_COLLECTION_TYPES)
-    updated_copyable_names = {cls.name for cls in all_classes if cls.has_copy_assignment}
+    scanned_class_names = {cls.name for c in all_classes for cls in [c]}
+    updated_wrapped_names = scanned_class_names | set(COLLECTION_TYPES.keys()) | set(HANDLE_COLLECTION_TYPES.keys()) | set(SYNTHESIZED_COLLECTION_TYPES)
+    # libclang only detects EXPLICIT `= delete` copy ops. Classes whose
+    # non-copyability is implicit (a non-copyable member, e.g. a
+    # std::unique_ptr or another non-copyable class) must be found by
+    # compiling a static_assert probe TU with the real build flags.
+    from occast.copyability_probe import detect_non_copyable_classes
+    probed_non_copyable = detect_non_copyable_classes(all_classes, args.compile_commands)
+    if probed_non_copyable:
+        print(f"  Probe: {len(probed_non_copyable)} implicitly non-copyable value classes: "
+              f"{', '.join(sorted(probed_non_copyable))}", file=sys.stderr)
+    updated_copyable_names = ({cls.name for cls in all_classes if cls.has_copy_assignment}
+                              - probed_non_copyable)
     updated_refcounted_names = {cls.name for cls in all_classes if cls.kind == ClassKind.REF_COUNTED}
     # Reset skip flags and re-run marking with complete type info
     for mod in modules:
@@ -181,7 +192,7 @@ def main():
             for m in cls.all_methods:
                 m.skip = False
                 m.skip_reason = ""
-            mark_skippable_methods(cls, updated_wrapped_names, all_enum_names, updated_copyable_names, updated_refcounted_names)
+            mark_skippable_methods(cls, updated_wrapped_names, all_enum_names, updated_copyable_names, updated_refcounted_names, scanned_class_names)
 
     # Overload suffixing and deduplication must be re-run with the FINAL skip
     # info.  The scanner's earlier pass ran with partial type info (before

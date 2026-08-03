@@ -93,30 +93,6 @@ UNWRAPPABLE_TYPES = {
     "Poly_CoherentTriPtr::Iterator",
     # Image
     "Image_VideoParams",
-    # DE
-    "DE_ShapeFixParameters",
-    # Interface module types (module not scanned)
-    "Interface_Graph",
-    "Interface_EntityIterator",
-    "IGESToBRep_CurveAndSurface",
-    # DESTEP module types (module not scanned)
-    "DESTEP_Parameters",
-    # BRepSweep module types (module not scanned)
-    "BRepSweep_Revol",
-    "BRepSweep_Prism",
-    # BRepFill module types (module not scanned)
-    "BRepFill_Pipe",
-    "BRepFill_Evolved",
-    # BRepOffset module types (module not scanned)
-    "BRepOffset_MakeOffset",
-    # BRepAdaptor module types (module not scanned)
-    "BRepAdaptor_Curve",
-    # Extrema module types (module not scanned)
-    "Extrema_ExtSS",
-    "Extrema_ExtPS",
-    "Extrema_ExtCS",
-    "Extrema_ExtCC",
-    "Extrema_ExtPC",
     # C array types
     "int[3]",
     "gp_XYZ[3]",
@@ -274,10 +250,34 @@ SKIP_METHODS_BY_CLASS: dict[str, set[str]] = {
         "getCellsCount",
         "postProcessMesh",
     },
+    # Declared Standard_EXPORT in the headers but with no definition in the
+    # compiled static libs (OCCT header/library drift): the linker allows the
+    # undefined symbol through a -shared extension build, then Godot fails to
+    # dlopen it. Found via `nm -D --undefined-only` on the built extension.
+    "BRepOffset_MakeOffset": {
+        "GetAnalyse",
+    },
+    "IGESToBRep_TopoSurface": {
+        "TransferPlaneSurface",
+    },
+    "IntTools_PntOnFace": {
+        "IsValid",
+    },
 }
 
 
 STREAM_TYPES = {"Standard_OStream", "Standard_IStream", "Standard_SStream"}
+
+# Value classes whose copy operations are *implicitly* deleted — libclang only
+# reports explicitly `= delete`d copy ctors/assignments, so classes whose
+# non-copyability comes from a non-copyable member (e.g. Extrema_ExtPS contains
+# Extrema_GenExtPS myExtPS; whose copy ops are `= delete`) never surface a
+# deleted-method cursor and would wrongly land in copyable_names. Any method
+# returning one of these by value cannot be marshalled (the wrapper copies the
+# result into _native storage).
+NON_COPYABLE_TYPES: set[str] = {
+    "Extrema_ExtPS",
+}
 
 # Enum types from OCCT modules we don't scan (plain C enums or scoped enums that
 # can be passed as int32_t). libclang fails to auto-detect some of them, so we
@@ -306,11 +306,17 @@ NON_SCANNED_ENUMS: set[str] = {
     # ChFi3d
     "ChFi3d_FilletShape",
     # ChFiDS
-    "ChFiDS_ErrorStatus", "ChFiDS_ChamfMode",
+    "ChFiDS_ErrorStatus", "ChFiDS_ChamfMode", "ChFiDS_TypeOfConcavity",
     # ChFi2d
     "ChFi2d_ConstructionError",
     # GeomFill
-    "GeomFill_Trihedron",
+    "GeomFill_Trihedron", "GeomFill_PipeError",
+    # MoniTool
+    "MoniTool_ValueType",
+    # AppParCurves
+    "AppParCurves_Constraint",
+    # DESTEP (nested in scanned DESTEP_Parameters)
+    "DESTEP_Parameters::ReadMode_ProductContext",
     # Draft
     "Draft_ErrorStatus",
     # BRepFill
@@ -623,7 +629,8 @@ def check_type_wrappable(param_type: OCCTType, context: str,
 def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None,
                            enum_names: set[str] | None = None,
                            copyable_names: set[str] | None = None,
-                           refcounted_names: set[str] | None = None) -> None:
+                           refcounted_names: set[str] | None = None,
+                           scanned_names: set[str] | None = None) -> None:
     """Mark methods that cannot be wrapped and print warnings.
 
     Sets method.skip = True for each un-wrappable method.
@@ -689,20 +696,36 @@ def mark_skippable_methods(cls: ClassDecl, wrapped_names: set[str] | None = None
                     print(f"  WARNING: skipping {context} — {method.skip_reason}", file=sys.stderr)
                     continue
 
-            # Reference returns of NON-COPYABLE REF_COUNTED wrapped classes
-            # (deleted copy ctor/assignment, e.g. Image_PixMap) cannot be
-            # marshalled safely: the wrapper would have to copy the borrowed
-            # object (`new T(result)`) or take ownership of it, both invalid
-            # for `= delete` copy semantics. Ref-returns of value classes are
-            # copied into _native storage and stay unaffected.
-            if (method.return_type.is_ref
-                    and not method.return_type.is_handle
+            # Returns of NON-COPYABLE wrapped classes (deleted copy
+            # ctor/assignment, e.g. Image_PixMap, Extrema_ExtCS) cannot be
+            # marshalled: the wrapper copies the result into _native storage
+            # (`_native = result` / `new T(result)`) which requires a working
+            # copy. The only copy-free return path is a handle<REF_COUNTED>
+            # transient, whose handle is grabbed directly. Only classes we
+            # actually scanned have a known copy state; unscanned handle/
+            # value overrides (which marshal differently) are left alone.
+            if (not method.return_type.is_handle
+                    and scanned_names is not None
+                    and copyable_names is not None
+                    and method.return_type.base_name in scanned_names
+                    and method.return_type.base_name in wrapped_names
+                    and (method.return_type.base_name not in copyable_names
+                         or method.return_type.base_name in NON_COPYABLE_TYPES)):
+                method.skip = True
+                method.skip_reason = f"return of non-copyable wrapped class '{method.return_type.base_name}'"
+                print(f"  WARNING: skipping {context} — {method.skip_reason}", file=sys.stderr)
+                continue
+            if (method.return_type.is_handle
+                    and scanned_names is not None
                     and copyable_names is not None
                     and refcounted_names is not None
-                    and method.return_type.base_name in refcounted_names
-                    and method.return_type.base_name not in copyable_names):
+                    and method.return_type.base_name in scanned_names
+                    and method.return_type.base_name in wrapped_names
+                    and (method.return_type.base_name not in copyable_names
+                         or method.return_type.base_name in NON_COPYABLE_TYPES)
+                    and method.return_type.base_name not in refcounted_names):
                 method.skip = True
-                method.skip_reason = f"reference return of non-copyable refcounted class '{method.return_type.base_name}'"
+                method.skip_reason = f"handle return of non-copyable value class '{method.return_type.base_name}'"
                 print(f"  WARNING: skipping {context} — {method.skip_reason}", file=sys.stderr)
                 continue
 

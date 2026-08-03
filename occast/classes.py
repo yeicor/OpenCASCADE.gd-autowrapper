@@ -121,6 +121,13 @@ def _extract_class(cursor: Cursor, module_name: str, known_transient: set[str]) 
         if child.kind == CursorKind.CXX_METHOD:
             if child.spelling.replace(" ", "") == "operator=" and child.is_deleted_method():
                 has_copy_assignment = False
+        # Deleted copy constructor (single reference param to this class)
+        if child.kind == CursorKind.CONSTRUCTOR and child.is_deleted_method():
+            parm_decls = [p for p in child.get_children() if p.kind == CursorKind.PARM_DECL]
+            if len(parm_decls) == 1:
+                parm_type = parm_decls[0].type.spelling.replace("const ", "").replace("&", "").strip()
+                if parm_type == cursor.spelling:
+                    has_copy_assignment = False
 
     # A class with NO user-declared constructors at all is implicitly
     # default-constructible (e.g. Bnd_Box2d, StlAPI_Reader). Without this, such

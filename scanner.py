@@ -59,6 +59,8 @@ MODULES = [
     ("BRepBuilderAPI", ["BRepBuilderAPI_"]),
     ("BRepPrimAPI", ["BRepPrimAPI_"]),
     ("BRepAlgoAPI", ["BRepAlgoAPI_"]),
+    ("BRepAlgo", ["BRepAlgo_"]),
+    ("IntTools", ["IntTools_"]),
     ("BRepMesh", ["BRepMesh_"]),
     ("StlAPI", ["StlAPI_"]),
     ("STEPControl", ["STEPControl_"]),
@@ -90,6 +92,22 @@ MODULES = [
     ("Transfer", ["Transfer_"]),
     ("XSControl", ["XSControl_"]),
     ("Select3D", ["Select3D_"]),
+    # Missing modules that resolve previously-unwrappable types (and add new API)
+    ("Extrema", ["Extrema_"]),
+    ("GeomAdaptor", ["GeomAdaptor_"]),
+    ("Geom2dAdaptor", ["Geom2dAdaptor_"]),
+    ("BRepAdaptor", ["BRepAdaptor_"]),
+    ("BRepSweep", ["BRepSweep_"]),
+    ("Sweep", ["Sweep_"]),
+    ("BRepFill", ["BRepFill_"]),
+    ("BRepOffset", ["BRepOffset_"]),
+    ("Interface", ["Interface_"]),
+    ("IGESToBRep", ["IGESToBRep_"]),
+    ("BOPDS", ["BOPDS_"]),
+    ("BOPTools", ["BOPTools_"]),
+    ("SelectBasics", ["SelectBasics_"]),
+    ("DESTEP", ["DESTEP_"]),
+    ("DE", ["DE_"]),
 ]
 
 
@@ -318,7 +336,7 @@ def scan_all_modules(
 
         # Mark skippable methods
         for cls in mod.classes:
-            mark_skippable_methods(cls, all_wrapped_names, all_enum_names, copyable_names, refcounted_names)
+            mark_skippable_methods(cls, all_wrapped_names, all_enum_names, copyable_names, refcounted_names, all_wrapped_names)
 
         # Group overloads
         for cls in mod.classes:
