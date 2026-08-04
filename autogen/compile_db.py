@@ -53,19 +53,15 @@ class CompileArgs:
 
     def _extract(self) -> list[str]:
         db_path = self.compile_commands_path
-        if not db_path.exists():
-            raise FileNotFoundError(
-                f"compile_commands.json not found: {db_path}\n"
-                "Run: cmake -S . -B .build-autowrapper -DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
-        try:
-            db = CompilationDatabase.fromDirectory(str(db_path.parent))
-            cmds = db.getAllCompileCommands()
-        except Exception:
-            cmds = []
-        if cmds:
-            args = self._filter_args(list(cmds[0].arguments))
-        else:
-            args = self._fallback_args()
+        args = self._fallback_args()
+        if db_path.exists():
+            try:
+                db = CompilationDatabase.fromDirectory(str(db_path.parent))
+                cmds = db.getAllCompileCommands()
+            except Exception:
+                cmds = []
+            if cmds:
+                args = self._filter_args(list(cmds[0].arguments))
         # Resource dir must be correct for template types to resolve.
         rd = find_resource_dir()
         if rd:
@@ -100,4 +96,24 @@ class CompileArgs:
     @staticmethod
     def _fallback_args() -> list[str]:
         return ["-std=gnu++17", "-DDEBUG_ENABLED", "-DGDEXTENSION",
-                "-DTHREADS_ENABLED", "-DUNIX_ENABLED", "-DLINUX_ENABLED"]
+                "-DTHREADS_ENABLED", "-DUNIX_ENABLED", "-DLINUX_ENABLED",
+                "-DHAVE_FREETYPE", "-DHAVE_OPENGL_EXT", "-DHAVE_RAPIDJSON",
+                "-DHAVE_XLIB", "-DOCC_CONVERT_SIGNALS"]
+
+
+def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:
+    """Return `args` guaranteed to contain the OCCT include dir and a C++ std.
+
+    The OCCT headers are resolved through `-isystem <include_dir>`; without it
+    libclang cannot see any `#include <*.hxx>` and the scan degrades to noise.
+    The fallback (no compile_commands.json, e.g. fresh CI checkouts) already
+    carries the defines OCCT headers branch on, so only the include path and
+    language standard need to be pinned here.
+    """
+    out = list(args)
+    if not any(a.startswith("-std=") for a in out):
+        out.append("-std=gnu++17")
+    target = str(include_dir)
+    if not any(a.endswith(target) for a in out):
+        out.append(f"-isystem {target}")
+    return out

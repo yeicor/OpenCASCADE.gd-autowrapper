@@ -1,0 +1,1094 @@
+"""Generate wrapper C++ (Ocg*.hpp/.cpp) + OcgEnums + module.h from IR.
+
+Output contract mirrors the legacy pipeline exactly (method names, factories,
+hash suffixes, stream absorption, guard macros, field accessors, enums).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from .model import (ClassDecl, ClassKind, MethodDecl, MethodKind, ModuleDecl,
+                    OCCTType)
+from .names import get_method_unique_name, group_overloads, to_snake_case
+from . import typemap as tm
+
+# ---------------------------------------------------------------------------
+# Fixed source blocks
+# ---------------------------------------------------------------------------
+
+GODOT_INCLUDES = """#include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/classes/ref.hpp>
+#include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/variant.hpp>
+#include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/packed_float64_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/core/class_db.hpp>"""
+
+GCC_CHANGES = """#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wchanges-meaning"
+#endif"""
+
+GCC_DEPRECATED = """#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif"""
+
+OPERATOR_SPELLING = {
+    "unary_minus": "-", "unary_plus": "+", "*deref": "*", "call": "()",
+}
+
+
+@dataclass
+class CgClass:
+    cls: ClassDecl
+    wrapper_base: str | None      # wrapper name of wrapped OCCT base, or None
+    base_occt: str | None         # OCCT name of that base
+    storage: str                  # "handle" | "native" | "unique_ptr"
+    has_sync: bool = False
+    is_aggregate: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Context building
+# ---------------------------------------------------------------------------
+
+def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
+    """Build a TypeContext shared across modules (in include-DAG order).
+
+    Wrapped classes, sync bases, enums and unique_ptr storage are accumulated
+    so that a module can reference classes/enums of every earlier module.
+    """
+    ctx = tm.TypeContext(module_name="__all__")
+    for module in modules:
+        ctx.occt_classes |= {cls.name for cls in module.classes}
+        for cls in module.classes:
+            if cls.header_file:
+                ctx.occt_headers[cls.name] = Path(cls.header_file).name
+    for module in modules:
+        for cls in module.classes:
+            if not cls.skip and cls.name != module.name:
+                ctx.wrapped[cls.name] = cls.wrapper_name
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip or cls.name == module.name:
+                continue
+            if not cls.has_copy_assignment and cls.kind != ClassKind.REF_COUNTED:
+                ctx.noncopyable.add(cls.name)
+    # Propagate non-copyability through data members: a class whose member is
+    # non-copyable is itself non-copyable (implicitly deleted copy semantics).
+    changed = True
+    while changed:
+        changed = False
+        for module in modules:
+            for cls in module.classes:
+                if cls.skip or cls.name == module.name:
+                    continue
+                if cls.name in ctx.noncopyable:
+                    continue
+                if cls.kind == ClassKind.REF_COUNTED:
+                    continue
+                if any(f.type.base_name in ctx.noncopyable for f in cls.fields):
+                    ctx.noncopyable.add(cls.name)
+                    changed = True
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip or cls.name == module.name:
+                continue
+            if cls.is_abstract:
+                # Abstract classes cannot be instantiated; drop parameterized
+                # constructors (the null-storage default ctor stays for
+                # Ref.instantiate(), and factory methods take over).
+                for ctor in cls.constructors:
+                    ctor.skip = True
+                    ctor.skip_reason = "abstract class (not instantiable)"
+            if cls.kind == ClassKind.REF_COUNTED:
+                base = next((b for b in cls.base_classes if b in ctx.wrapped), None)
+                if base is not None:
+                    ctx.sync_bases.add(cls.wrapper_name)
+                ctx.handles.add(cls.wrapper_name)
+            elif not _default_constructible(cls):
+                ctx.unique_ptr.add(cls.wrapper_name)
+    for module in modules:
+        for enum in module.enums:
+            if enum.is_public:
+                ctx.enums[enum.name] = enum
+    return ctx
+
+
+def _default_constructible(cls: ClassDecl) -> bool:
+    """A wrapper can hold `T _native` iff the class has a public default ctor
+    or declares no constructors at all (implicit default ctor)."""
+    if cls.is_abstract:
+        return False  # cannot value-initialize an abstract type
+    return cls.has_public_default_ctor or not cls.has_any_ctor
+
+
+def _cg(cls: ClassDecl, ctx: tm.TypeContext) -> CgClass:
+    base_occt = next((b for b in cls.base_classes if b in ctx.wrapped), None)
+    if cls.kind == ClassKind.REF_COUNTED:
+        wrapper_base = ctx.wrapped.get(base_occt) if base_occt else None
+        return CgClass(cls=cls, wrapper_base=wrapper_base,
+                       base_occt=base_occt, storage="handle",
+                       has_sync=wrapper_base is not None,
+                       is_aggregate=cls.name == ctx.module_name)
+    storage = "native" if _default_constructible(cls) else "unique_ptr"
+    return CgClass(cls=cls, wrapper_base=None, base_occt=None,
+                   storage=storage, is_aggregate=cls.name == ctx.module_name)
+
+
+def _occt_qual(cls: ClassDecl) -> str:
+    return f"::{cls.name}"
+
+
+def _params_decl(method: MethodDecl, ctx: tm.TypeContext) -> str | None:
+    parts = []
+    for p in method.parameters:
+        conv = tm.cpp_param(p.type, p.name, ctx)
+        if conv is None:
+            return None
+        if conv.is_ostream:
+            continue
+        parts.append(f"{conv.cpp_type} {conv.name}")
+    return ", ".join(parts)
+
+
+def _unique(method: MethodDecl) -> str:
+    return get_method_unique_name(method)
+
+
+def _has_ostream_param(method: MethodDecl) -> bool:
+    return any(tm.stream_kind(p.type) == "out" for p in method.parameters)
+
+
+def _uses_streams(cls: ClassDecl) -> bool:
+    return any(tm.stream_kind(p.type) is not None
+               for m in cls.all_methods for p in m.parameters)
+
+
+# ---------------------------------------------------------------------------
+# Referenced headers / forward declarations
+# ---------------------------------------------------------------------------
+
+def _type_occt_header(t: OCCTType, ctx: tm.TypeContext) -> str | None:
+    def header_of(name: str) -> str:
+        return ctx.occt_headers.get(name, f"{name}.hxx")
+    if t.is_handle and t.handle_inner in ctx.wrapped:
+        return f"<{header_of(t.handle_inner)}>"
+    if t.base_name in ctx.wrapped:
+        return f"<{header_of(t.base_name)}>"
+    if t.base_name in ("TCollection_AsciiString", "TCollection_ExtendedString"):
+        return f"<{t.base_name}.hxx>"
+    if t.base_name == "std::string" or t.base_name.startswith("std::basic_string<char>"):
+        return "<string>"
+    return None
+
+
+def _type_wrapper(t: OCCTType, ctx: tm.TypeContext) -> str | None:
+    if t.is_handle and t.handle_inner in ctx.wrapped:
+        return ctx.wrapped[t.handle_inner]
+    if t.base_name in ctx.wrapped:
+        return ctx.wrapped[t.base_name]
+    return None
+
+
+def _referenced_headers(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
+    headers: set[str] = set()
+    if cls.header_file:
+        headers.add(f"<{Path(cls.header_file).name}>")
+    for base in cls.base_classes:
+        if base in ctx.occt_classes:
+            headers.add(f"<{ctx.occt_headers.get(base, base + '.hxx')}>")
+    for method in cls.all_methods:
+        for p in method.parameters:
+            h = _type_occt_header(p.type, ctx)
+            if h:
+                headers.add(h)
+        if method.return_type is not None:
+            h = _type_occt_header(method.return_type, ctx)
+            if h:
+                headers.add(h)
+    for f in cls.fields:
+        h = _type_occt_header(f.type, ctx)
+        if h:
+            headers.add(h)
+    return sorted(headers)
+
+
+def _referenced_wrappers(cls: ClassDecl, ctx: tm.TypeContext) -> set[str]:
+    names: set[str] = set()
+    for method in cls.all_methods:
+        for p in method.parameters:
+            w = _type_wrapper(p.type, ctx)
+            if w:
+                names.add(w)
+        if method.return_type is not None:
+            w = _type_wrapper(method.return_type, ctx)
+            if w:
+                names.add(w)
+    for f in cls.fields:
+        w = _type_wrapper(f.type, ctx)
+        if w:
+            names.add(w)
+    return names
+
+
+def _uses_primitive_wrappers(cls: ClassDecl, ctx: tm.TypeContext) -> bool:
+    for method in cls.all_methods:
+        for p in method.parameters:
+            if p.type.base_name in tm.PRIMITIVE_WRAPPER_MAP:
+                return True
+        if method.return_type is not None and \
+                method.return_type.base_name in tm.PRIMITIVE_WRAPPER_MAP:
+            return True
+    for f in cls.fields:
+        if f.type.base_name in tm.PRIMITIVE_WRAPPER_MAP:
+            return True
+    return False
+
+
+def _uses_enums(cls: ClassDecl, ctx: tm.TypeContext) -> bool:
+    for method in cls.all_methods:
+        for p in method.parameters:
+            if p.type.base_name in ctx.enums:
+                return True
+        if method.return_type is not None and \
+                method.return_type.base_name in ctx.enums:
+            return True
+    for f in cls.fields:
+        if f.type.base_name in ctx.enums:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+
+def _public_nested_enums(cls: ClassDecl) -> list[object]:
+    return [e for e in cls.nested_enums if e.is_public]
+
+
+def _nested_enum_hpp_lines(cls: ClassDecl) -> list[str]:
+    lines: list[str] = []
+    for enum in _public_nested_enums(cls):
+        path = f"::{cls.name}::{enum.name}"
+        lines.append(f"    enum {enum.name} : int64_t {{")
+        for v in enum.values:
+            lines.append(
+                f"        {enum.name}_{v.name} = static_cast<int64_t>({path}::{v.name}),")
+        lines.append("    };")
+    return lines
+
+
+def _field_accessor_decls(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
+    lines: list[str] = []
+    for f in cls.fields:
+        if not f.is_public:
+            continue
+        snake = to_snake_case(f.name)
+        gret = tm.cpp_return(f.type, ctx)
+        sconv = tm.cpp_param(f.type, "value", ctx)
+        if gret is None or gret.cpp_type == "void":
+            continue  # not readable (e.g. void* return)
+        lines.append(f"    {gret.cpp_type} _ocg_field_get_{snake}() const;")
+        if sconv is not None and not f.is_const:
+            lines.append(
+                f"    void _ocg_field_set_{snake}({_field_setter_param(sconv)});")
+    return lines
+
+
+def _field_setter_param(sconv: tm.ParamConv) -> str:
+    if sconv.cpp_type == "String":
+        return "const ::godot::String& " + sconv.name
+    return f"{sconv.cpp_type} {sconv.name}"
+
+
+def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
+                           ctx: tm.TypeContext) -> str | None:
+    params = _params_decl(method, ctx)
+    if params is None:
+        return None
+    has_ostream = _has_ostream_param(method)
+    if method.return_type is None or (method.return_type.is_void
+                                      and not method.return_type.is_pointer):
+        if has_ostream:
+            ret = "String"
+        else:
+            ret = "void"
+    else:
+        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream)
+        if rconv is None:
+            return None
+        ret = rconv.cpp_type
+    const_suffix = " const" if method.is_const else ""
+    return f"{ret} {_unique(method)}({params}){const_suffix}"
+
+
+def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
+    cg = _cg(cls, ctx)
+    base = cg.wrapper_base or "RefCounted"
+    out: list[str] = []
+    out.append(f"// Auto-generated wrapper for {cls.name} \u2014 DO NOT EDIT")
+    out.append("#pragma once")
+    out.append("")
+    out.append(GODOT_INCLUDES)
+    out.append("")
+    out.append(GCC_CHANGES)
+    out.append("")
+    refs = _referenced_headers(cls, ctx)
+    own = f"<{Path(cls.header_file).name}>" if cls.header_file else None
+    if own in refs:
+        refs = [own] + [h for h in refs if h != own]
+    for h in refs:
+        out.append(f"#include {h}")
+    if cg.wrapper_base:
+        out.append(f'#include "{cg.wrapper_base}.hpp"')
+    if cg.storage == "unique_ptr":
+        out.append("#include <memory>")
+    if _uses_primitive_wrappers(cls, ctx):
+        out.append('#include "OcgPrimitiveWrappers.hpp"')
+    if _uses_enums(cls, ctx):
+        out.append('#include "OcgEnums.hpp"')
+    out.append("")
+    if _uses_enums(cls, ctx):
+        out.append("")
+    out.append("namespace godot {")
+    out.append("")
+    fwd = sorted(_referenced_wrappers(cls, ctx)
+                 - {cls.wrapper_name}
+                 - {base} if cg.wrapper_base
+                 else _referenced_wrappers(cls, ctx) - {cls.wrapper_name})
+    if fwd:
+        out.append("// Forward declarations")
+        for w in fwd:
+            out.append(f"class {w};")
+        out.append("")
+    out.append("")
+    out.append(f"class {cls.wrapper_name} : public {base} {{")
+    out.append(f"    GDCLASS({cls.wrapper_name}, {base})")
+    out.append("")
+    out.append("public:")
+    out.extend(_nested_enum_hpp_lines(cls))
+    if _public_nested_enums(cls):
+        out.append("")
+    if cg.storage == "handle":
+        out.append(f"    opencascade::handle<{cls.name}> _handle;")
+    elif cg.storage == "unique_ptr":
+        out.append(f"    std::unique_ptr<{cls.name}> _native = nullptr;")
+    else:
+        out.append(f"    {cls.name} _native;")
+    out.append("")
+    out.append("    static void _bind_methods();")
+    out.append("")
+    out.append(f"    {cls.wrapper_name}();")
+    if cg.has_sync:
+        out.append("")
+        out.append("    void _sync_base_storage();")
+    out.append("")
+    group_overloads(cls)
+    emitted = False
+    for ctor in cls.constructors:
+        if _default_ctor(ctor):
+            ctor.skip = True
+            ctor.skip_reason = "default constructor (native default-construction)"
+            continue
+        if ctor.skip:
+            continue
+        params = _params_decl(ctor, ctx)
+        if params is None:
+            ctor.skip = True
+            ctor.skip_reason = "unmappable type"
+            continue
+        out.append(f"    static Ref<{cls.wrapper_name}> {_unique(ctor)}({params});")
+        out.append("")
+        emitted = True
+    for m in cls.methods + cls.operators:
+        sig = _method_decl_signature(cls, m, ctx)
+        if sig is None:
+            m.skip = True
+            m.skip_reason = "unmappable type"
+            continue
+        out.append(f"    {sig};")
+        emitted = True
+    if cls.static_methods:
+        sigs = []
+        for m in cls.static_methods:
+            sig = _method_decl_signature(cls, m, ctx)
+            if sig is None:
+                m.skip = True
+                m.skip_reason = "unmappable type"
+                continue
+            sigs.append(f"    static {sig};")
+        if sigs:
+            if cls.methods or cls.operators:
+                out.append("")
+            out.extend(sigs)
+            emitted = True
+    field_decls = _field_accessor_decls(cls, ctx)
+    if field_decls:
+        out.extend(field_decls)
+        emitted = True
+    if emitted:
+        out.append("")
+    out.append("};")
+    out.append("")
+    out.append("} // namespace godot")
+    if _public_nested_enums(cls):
+        out.append("")
+        for enum in _public_nested_enums(cls):
+            out.append(f"VARIANT_ENUM_CAST({cls.wrapper_name}::{enum.name});")
+    return "\n".join(out) + ("\n\n" if not _public_nested_enums(cls) else "\n")
+
+
+# ---------------------------------------------------------------------------
+# Implementation
+# ---------------------------------------------------------------------------
+
+def _occt_call(cls: ClassDecl, method: MethodDecl, args: str,
+               ctx: tm.TypeContext) -> str:
+    if method.kind == MethodKind.STATIC_METHOD:
+        return f"{_occt_qual(cls)}::{method.name}({args})"
+    if method.operator_type is not None:
+        op = OPERATOR_SPELLING.get(method.operator_type.value,
+                                   method.operator_type.value)
+        if cls.kind == ClassKind.REF_COUNTED:
+            return f"_handle.get()->operator{op}({args})"
+        return f"_native.operator{op}({args})"
+    if cls.kind == ClassKind.REF_COUNTED:
+        return f"_handle.get()->{method.name}({args})"
+    if _cg(cls, ctx).storage == "unique_ptr":
+        return f"_native->{method.name}({args})"
+    return f"_native.{method.name}({args})"
+
+
+def _method_body(cls: ClassDecl, method: MethodDecl,
+                 ctx: tm.TypeContext) -> str | None:
+    unique = _unique(method)
+    params = _params_decl(method, ctx)
+    if params is None:
+        return None
+    preludes: list[str] = []
+    arg_exprs: list[str] = []
+    for p in method.parameters:
+        conv = tm.cpp_param(p.type, p.name, ctx)
+        if conv is None:
+            return None
+        if conv.prelude:
+            preludes.append(conv.prelude)
+        arg_exprs.append(conv.call_expr)
+    args = ", ".join(arg_exprs)
+    call = _occt_call(cls, method, args, ctx)
+    const_suffix = " const" if method.is_const else ""
+    ret_is_void = method.return_type is None or (
+        method.return_type.is_void and not method.return_type.is_pointer)
+    has_ostream = _has_ostream_param(method)
+
+    if ret_is_void and not has_ostream:
+        rconv = tm.RetConv(cpp_type="void", body="{call};")
+    elif ret_is_void and has_ostream:
+        rconv = tm.RetConv(
+            cpp_type="String", gd_type="STRING",
+            body="{call};\n        return ::godot::String::utf8(ocg_os.str().c_str());")
+    else:
+        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream)
+        if rconv is None:
+            return None
+
+    guard = ""
+    if method.kind != MethodKind.STATIC_METHOD:
+        if cls.kind == ClassKind.REF_COUNTED:
+            if rconv.cpp_type == "void":
+                guard = "        ERR_FAIL_COND(!_handle);\n"
+            else:
+                guard = (f"        ERR_FAIL_COND_V(!_handle, "
+                         f"{tm.default_value(rconv.cpp_type)});\n")
+        elif _cg(cls, ctx).storage == "unique_ptr":
+            if rconv.cpp_type == "void":
+                guard = "        ERR_FAIL_NULL(_native);\n"
+            else:
+                guard = (f"        ERR_FAIL_NULL_V(_native, "
+                         f"{tm.default_value(rconv.cpp_type)});\n")
+
+    body_lines = [f"        {p}" for p in preludes]
+    body_lines.append(f"        {rconv.body.replace('{call}', call)}")
+    catch = ("OCCT_GUARD_CATCH_VOID();" if rconv.cpp_type == "void"
+             else "OCCT_GUARD_CATCH({});")
+    return f"""{rconv.cpp_type} {cls.wrapper_name}::{unique}({params}){const_suffix} {{
+    try {{
+        OCC_CATCH_SIGNALS
+{guard}{chr(10).join(body_lines)}
+    }} {catch}
+}}"""
+
+
+def _ctor_body(cls: ClassDecl, ctor: MethodDecl, ctx: tm.TypeContext) -> str:
+    unique = _unique(ctor)
+    params = _params_decl(ctor, ctx)
+    if params is None:
+        return ""  # unmappable param; caller marks skip
+    preludes: list[str] = []
+    arg_exprs: list[str] = []
+    for p in ctor.parameters:
+        conv = tm.cpp_param(p.type, p.name, ctx)
+        if conv is None:
+            return ""
+        if conv.prelude:
+            preludes.append(conv.prelude)
+        arg_exprs.append(conv.call_expr)
+    args = ", ".join(arg_exprs)
+    pre = "\n".join(f"        {p}" for p in preludes) + "\n" if preludes else ""
+    cg = _cg(cls, ctx)
+    if cg.storage == "unique_ptr":
+        return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
+    try {{
+        OCC_CATCH_SIGNALS
+        Ref<{cls.wrapper_name}> ref; ref.instantiate();
+        occt_gd::clear_last_error();
+{pre}        ref->_native = std::make_unique<{_occt_qual(cls)}>({args});
+        return ref;
+    }} OCCT_GUARD_CATCH({{}});
+}}"""
+    if cg.storage == "handle":
+        sync = "\n        ref->_sync_base_storage();" if cg.has_sync else ""
+        return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
+    try {{
+        OCC_CATCH_SIGNALS
+        Ref<{cls.wrapper_name}> ref; ref.instantiate();
+        occt_gd::clear_last_error();
+{pre}        ref->_handle = new {_occt_qual(cls)}({args});
+{sync}
+        return ref;
+    }} OCCT_GUARD_CATCH({{}});
+}}"""
+    return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
+    try {{
+        OCC_CATCH_SIGNALS
+        Ref<{cls.wrapper_name}> ref; ref.instantiate();
+        occt_gd::clear_last_error();
+{pre}        new (&ref->_native) {_occt_qual(cls)}({args});
+        return ref;
+    }} OCCT_GUARD_CATCH({{}});
+}}"""
+
+
+def _plain_ctor_body(cls: ClassDecl, ctx: tm.TypeContext) -> str:
+    cg = _cg(cls, ctx)
+    base_init = f"{cg.wrapper_base}()" if cg.wrapper_base else "RefCounted()"
+    if cg.storage == "handle":
+        if cls.has_public_default_ctor and not cls.is_abstract:
+            sync = "\n        _sync_base_storage();" if cg.has_sync else ""
+            return f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} {{
+    try {{
+        OCC_CATCH_SIGNALS
+        _handle = new {_occt_qual(cls)}();
+{sync}
+    }} OCCT_GUARD_CATCH_CTOR()
+}}"""
+        return f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} {{
+    // No default constructor — _handle is null; use factory methods
+}}"""
+    if cg.storage == "unique_ptr":
+        return f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} {{
+    // No default constructor — use factory methods
+}}"""
+    return (f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} , _native() {{
+}}""")
+
+
+def _sync_body(cls: ClassDecl, ctx: tm.TypeContext) -> str:
+    cg = _cg(cls, ctx)
+    if not cg.has_sync:
+        return ""
+    lines = [f"    {cg.wrapper_base}::_handle = opencascade::handle<::{cg.base_occt}>"
+             f"(static_cast<::{cg.base_occt}*>(_handle.get()));"]
+    return "\n".join(lines)
+
+
+def _field_accessor_bodies(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
+    out: list[str] = []
+    cg = _cg(cls, ctx)
+    if cg.storage == "handle":
+        target = "(*_handle)"
+    elif cg.storage == "unique_ptr":
+        target = "(*_native)"
+    else:
+        target = "_native"
+    for f in cls.fields:
+        if not f.is_public:
+            continue
+        snake = to_snake_case(f.name)
+        gret = tm.cpp_return(f.type, ctx)
+        sconv = tm.cpp_param(f.type, "value", ctx)
+        if gret is None or gret.cpp_type == "void":
+            continue
+        get_body = gret.body.replace("{call}", f"{target}.{f.name}")
+        out.append(f"""{gret.cpp_type} {cls.wrapper_name}::_ocg_field_get_{snake}() const {{
+    {get_body}
+}}""")
+        out.append("")
+        if sconv is not None and not f.is_const:
+            pre = f"\n    {sconv.prelude}" if sconv.prelude else ""
+            out.append(f"""void {cls.wrapper_name}::_ocg_field_set_{snake}({_field_setter_param(sconv)}) {{{pre}
+    {target}.{f.name} = {sconv.call_expr};
+}}""")
+            out.append("")
+    return out
+
+
+def _default_ctor(ctor: MethodDecl) -> bool:
+    """True for a no-argument constructor (native default-construction)."""
+    return len(ctor.parameters) == 0
+
+
+_NUMERIC_DEFVAL_TYPES = {
+    "bool", "char", "unsigned char", "int", "long", "long long",
+    "unsigned long", "unsigned long long", "char16_t", "float", "double",
+}
+
+_CXX_KEYWORDS = frozenset({"true", "false", "nullptr"})
+
+
+def _qualify_default(cls: ClassDecl, dflt: str) -> str:
+    """Qualify a bare-identifier default with its owning OCCT class so it
+    resolves from the wrapper's _bind_methods.
+
+    Only identifiers that name a static member of the class itself are
+    qualified; global enumerators (e.g. Graphic3d_ZLayerId_UNKNOWN) and
+    namespace-qualified expressions are left untouched.
+    """
+    if dflt.isidentifier() and dflt not in _CXX_KEYWORDS:
+        if dflt in cls.static_constants:
+            return f"{cls.name}::{dflt}"
+    return dflt
+
+
+def _defval_suffix(cls: ClassDecl, method: MethodDecl, ctx: tm.TypeContext) -> str:
+    """DEFVAL(...) clauses for trailing parameters that carry C++ defaults.
+
+    Only defaults that are expressible as a godot-cpp `Variant` (numeric
+    primitives) are emitted; object/enum/string defaults cannot be forwarded
+    through `DEFVAL`, so the clause is dropped at the first such parameter.
+    """
+    parts = []
+    for p in reversed(method.parameters):
+        if p.default_value is None:
+            break
+        if p.type.is_enum or p.type.base_name not in _NUMERIC_DEFVAL_TYPES:
+            break
+        parts.append(f"DEFVAL({_qualify_default(cls, p.default_value)})")
+    if not parts:
+        return ""
+    return ", " + ", ".join(reversed(parts))
+
+
+def _bind_arg_names(method: MethodDecl, ctx: tm.TypeContext) -> str:
+    """D_METHOD argument names; absorbed ostream params are not exposed."""
+    names = []
+    for p in method.parameters:
+        conv = tm.cpp_param(p.type, p.name, ctx)
+        if conv is None:
+            continue
+        if conv.is_ostream:
+            continue
+        names.append(f'"{p.name}"')
+    return ", ".join(names)
+
+
+def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
+    out: list[str] = []
+    for ctor in cls.constructors:
+        if ctor.skip or _default_ctor(ctor):
+            continue
+        unique = _unique(ctor)
+        args = _bind_arg_names(ctor, ctx)
+        out.append(
+            f'    ClassDB::bind_static_method("{cls.wrapper_name}", '
+            f'D_METHOD("{unique}"{", " + args if args else ""}), '
+            f"&{cls.wrapper_name}::{unique}{_defval_suffix(cls, ctor, ctx)});")
+    for m in cls.methods + cls.operators + cls.static_methods:
+        if m.skip:
+            continue
+        unique = _unique(m)
+        args = _bind_arg_names(m, ctx)
+        defv = _defval_suffix(cls, m, ctx)
+        if m.kind == MethodKind.STATIC_METHOD:
+            out.append(
+                f'    ClassDB::bind_static_method("{cls.wrapper_name}", '
+                f'D_METHOD("{unique}"{", " + args if args else ""}), '
+                f"&{cls.wrapper_name}::{unique}{defv});")
+        else:
+            out.append(
+                f"    ClassDB::bind_method(D_METHOD(\"{unique}\""
+                f'{", " + args if args else ""}), '
+                f"&{cls.wrapper_name}::{unique}{defv});")
+    for f in cls.fields:
+        if not f.is_public:
+            continue
+        snake = to_snake_case(f.name)
+        gret = tm.cpp_return(f.type, ctx)
+        sconv = tm.cpp_param(f.type, "value", ctx)
+        if gret is None or gret.cpp_type == "void":
+            continue
+        gd = gret.gd_type
+        out.append(
+            f'    ClassDB::bind_method(D_METHOD("_ocg_field_get_{snake}"), '
+            f"&{cls.wrapper_name}::_ocg_field_get_{snake});")
+        if sconv is None or f.is_const:
+            # Read-only property: no setter; pass "" to add_property.
+            out.append(
+                f'    ClassDB::add_property(get_class_static(), '
+                f'PropertyInfo(Variant::{gd}, "{snake}", PROPERTY_HINT_NONE, "", '
+                f'PROPERTY_USAGE_DEFAULT, "{cls.wrapper_name}"), '
+                f'"", "_ocg_field_get_{snake}");')
+            continue
+        out.append(
+            f'    ClassDB::bind_method(D_METHOD("_ocg_field_set_{snake}", "value"), '
+            f"&{cls.wrapper_name}::_ocg_field_set_{snake});")
+        out.append(
+            f'    ClassDB::add_property(get_class_static(), '
+            f'PropertyInfo(Variant::{gd}, "{snake}", PROPERTY_HINT_NONE, "", '
+            f'PROPERTY_USAGE_DEFAULT, "{cls.wrapper_name}"), '
+            f'"_ocg_field_set_{snake}", "_ocg_field_get_{snake}");')
+    # Godot's ClassDB keys integer constants per class by constant NAME (the
+    # enum name is not part of the key), so enumerators repeated across nested
+    # enums of one OCCT class (e.g. GeomFill_Gordon::ResultStatus::NotStarted
+    # and GeomFill_Gordon::BuildStage::NotStarted) collide. Bind each name once.
+    bound_constants: set[str] = set()
+    for enum in _public_nested_enums(cls):
+        for v in enum.values:
+            if v.name in bound_constants:
+                continue
+            bound_constants.add(v.name)
+            out.append(
+                f'    ClassDB::bind_integer_constant(get_class_static(), '
+                f'"{enum.name}", "{v.name}", '
+                f"static_cast<int64_t>({cls.wrapper_name}::{enum.name}_{v.name}));")
+    return out
+
+
+def generate_class_cpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
+    cg = _cg(cls, ctx)
+    out: list[str] = []
+    out.append(f"// Auto-generated wrapper for {cls.name} -- DO NOT EDIT")
+    out.append(f'#include "{cls.wrapper_name}.hpp"')
+    out.append("")
+    out.append(GCC_DEPRECATED)
+    out.append("")
+    for w in sorted(_referenced_wrappers(cls, ctx) - {cls.wrapper_name}):
+        out.append(f'#include "{w}.hpp"')
+    if _uses_streams(cls):
+        out.append("")
+        out.append("#include <sstream>")
+    out.append("")
+    out.append("#include <godot_cpp/core/error_macros.hpp>")
+    out.append("")
+    out.append("namespace godot {")
+    out.append("")
+    out.append(f"void {cls.wrapper_name}::_bind_methods() {{")
+    out.extend(_bind_entries(cls, ctx))
+    out.append("}")
+    out.append("")
+    out.append(_plain_ctor_body(cls, ctx))
+    out.append("")
+    if cg.has_sync:
+        out.append(f"void {cls.wrapper_name}::_sync_base_storage() {{")
+        out.append(_sync_body(cls, ctx))
+        out.append("}")
+        out.append("")
+    for ctor in cls.constructors:
+        if ctor.skip:
+            continue
+        out.append(_ctor_body(cls, ctor, ctx))
+        out.append("")
+        out.append("")
+    for m in cls.methods + cls.operators + cls.static_methods:
+        if m.skip:
+            continue
+        body = _method_body(cls, m, ctx)
+        if body is None:
+            m.skip = True
+            m.skip_reason = "unmappable type"
+            continue
+        out.append(body)
+        out.append("")
+    out.extend(_field_accessor_bodies(cls, ctx))
+    out.append("} // namespace godot")
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# OcgEnums
+# ---------------------------------------------------------------------------
+
+def generate_enums_hpp(modules: list[ModuleDecl]) -> str:
+    enums = [e for m in modules for e in m.enums if e.is_public]
+    out: list[str] = []
+    out.append("// Auto-generated host class for standalone OCCT enums -- DO NOT EDIT")
+    out.append("#pragma once")
+    out.append("")
+    out.append(GODOT_INCLUDES)
+    out.append("")
+    out.append(GCC_CHANGES)
+    out.append("")
+    for enum in enums:
+        out.append(f"#include <{Path(enum.header_file).name}>")
+    out.append("")
+    out.append("namespace godot {")
+    out.append("")
+    out.append("class OcgEnums : public RefCounted {")
+    out.append("    GDCLASS(OcgEnums, RefCounted)")
+    out.append("")
+    out.append("public:")
+    out.append("    OcgEnums() = default;")
+    out.append("")
+    out.append("    static void _bind_methods();")
+    out.append("")
+    for enum in enums:
+        out.append(f"    enum {enum.name} : int64_t {{")
+        for v in enum.values:
+            out.append(
+                f"        {enum.name}_{v.name} = static_cast<int64_t>(::{enum.name}::{v.name}),")
+        out.append("    };")
+        out.append("")
+    out.append("};")
+    out.append("")
+    out.append("} // namespace godot")
+    out.append("")
+    for enum in enums:
+        out.append(f"VARIANT_ENUM_CAST(OcgEnums::{enum.name});")
+    return "\n".join(out) + "\n"
+
+
+def generate_enums_cpp(modules: list[ModuleDecl]) -> str:
+    enums = [e for m in modules for e in m.enums if e.is_public]
+    out: list[str] = []
+    out.append("// Auto-generated host class for standalone OCCT enums -- DO NOT EDIT")
+    out.append('#include "OcgEnums.hpp"')
+    out.append("")
+    out.append("#include <godot_cpp/core/error_macros.hpp>")
+    out.append("")
+    out.append("namespace godot {")
+    out.append("")
+    out.append("void OcgEnums::_bind_methods() {")
+    for enum in enums:
+        for v in enum.values:
+            out.append(
+                f'    ClassDB::bind_integer_constant(get_class_static(), '
+                f'"{enum.name}", "{v.name}", '
+                f"static_cast<int64_t>(OcgEnums::{enum.name}_{v.name}));")
+    out.append("}")
+    out.append("")
+    out.append("} // namespace godot")
+    out.append("")
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# OcgPrimitiveWrappers.hpp
+# ---------------------------------------------------------------------------
+
+_PRIMITIVE_WRAPPERS: dict[str, tuple[str, str, str, str, str]] = {
+    "bool": ("OcgStandardBoolean", "bool", "BOOL",
+             "bool get_value() const { return _native; }",
+             "void set_value(bool v) { _native = v; }"),
+    "unsigned char": ("OcgStandardByte", "uint8_t", "INT",
+                      "uint8_t get_value() const { return _native; }",
+                      "void set_value(uint8_t v) { _native = v; }"),
+    "char": ("OcgStandardCharacter", "char", "INT",
+             "int32_t get_value() const { return (int32_t)_native; }",
+             "void set_value(int32_t v) { _native = static_cast<char>(v); }"),
+    "int": ("OcgStandardInteger", "int32_t", "INT",
+            "int32_t get_value() const { return _native; }",
+            "void set_value(int32_t v) { _native = v; }"),
+    "long": ("OcgStandardLongInteger", "int64_t", "INT",
+             "int64_t get_value() const { return _native; }",
+             "void set_value(int64_t v) { _native = v; }"),
+    "double": ("OcgStandardReal", "double", "FLOAT",
+               "double get_value() const { return _native; }",
+               "void set_value(double v) { _native = v; }"),
+    "float": ("OcgStandardShortReal", "float", "FLOAT",
+              "float get_value() const { return _native; }",
+              "void set_value(float v) { _native = v; }"),
+    "unsigned long": ("OcgStandardULongInteger", "uint64_t", "INT",
+                      "uint64_t get_value() const { return _native; }",
+                      "void set_value(uint64_t v) { _native = v; }"),
+    "TCollection_AsciiString": (
+        "OcgTCollectionAsciiString", "TCollection_AsciiString", "STRING",
+        "::godot::String get_value() const { return ::godot::String::utf8(_native.ToCString()); }",
+        "void set_value(const ::godot::String& v) { _native = TCollection_AsciiString(v.utf8().get_data()); }"),
+    "TCollection_ExtendedString": (
+        "OcgTCollectionExtendedString", "TCollection_ExtendedString", "STRING",
+        "::godot::String get_value() const { Standard_Integer ocg_len = _native.LengthOfCString();char* ocg_buf = new char[ocg_len + 1];_native.ToUTF8CString(ocg_buf);ocg_buf[ocg_len] = '\\0';::godot::String ocg_ret = ::godot::String::utf8(ocg_buf);delete[] ocg_buf;return ocg_ret; }",
+        "void set_value(const ::godot::String& v) { _native = TCollection_ExtendedString(v.utf8().get_data()); }"),
+}
+
+
+def _primitive_wrapper_names_used(modules: list[ModuleDecl],
+                                  ctx: tm.TypeContext) -> set[str]:
+    keys: set[str] = set()
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip:
+                continue
+            for method in cls.all_methods:
+                for p in method.parameters:
+                    if p.type.is_ref and not p.type.is_const:
+                        if p.type.base_name in tm.PRIMITIVE_WRAPPER_MAP:
+                            keys.add(p.type.base_name)
+    return keys
+
+
+def generate_primitive_wrappers(keys: set[str]) -> str:
+    out: list[str] = []
+    out.append("// Auto-generated primitive wrapper classes for non-const ref output params -- DO NOT EDIT")
+    out.append("#pragma once")
+    out.append("")
+    out.append("#include <godot_cpp/classes/ref_counted.hpp>")
+    out.append("#include <godot_cpp/core/class_db.hpp>")
+    out.append("#include <godot_cpp/variant/string.hpp>")
+    out.append("")
+    for key in sorted(keys):
+        if key.startswith("TCollection_"):
+            out.append(f"#include <{key}.hxx>")
+    out.append("")
+    out.append("using namespace godot;")
+    out.append("")
+    for key in sorted(keys, key=lambda k: _PRIMITIVE_WRAPPERS[k][0]):
+        wclass, native, gd, getter, setter = _PRIMITIVE_WRAPPERS[key]
+        out.append(f"class {wclass} : public RefCounted {{")
+        out.append(f"    GDCLASS({wclass}, RefCounted)")
+        out.append("public:")
+        out.append(f"    {native} _native;")
+        out.append("")
+        out.append(f"    {wclass}() : RefCounted(), _native() {{}}")
+        out.append("")
+        out.append(f"    {getter}")
+        out.append(f"    {setter}")
+        out.append("")
+        out.append("protected:")
+        out.append("    static void _bind_methods() {")
+        out.append(f"        ClassDB::bind_method(D_METHOD(\"get_value\"), &{wclass}::get_value);")
+        out.append(f"        ClassDB::bind_method(D_METHOD(\"set_value\", \"value\"), &{wclass}::set_value);")
+        out.append(f"        ClassDB::add_property(get_class_static(), PropertyInfo(Variant::{gd}, \"value\"), \"set_value\", \"get_value\");")
+        out.append("    }")
+        out.append("};")
+        out.append("")
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# module.h
+# ---------------------------------------------------------------------------
+
+def _registration_order(wrappers: list[ClassDecl]) -> list[str]:
+    by_occt = {w.name: w for w in wrappers}
+    order: list[str] = []
+    seen: set[str] = set()
+
+    def visit(occt_name: str) -> None:
+        cls = by_occt.get(occt_name)
+        if cls is None:
+            return
+        if cls.wrapper_name in seen:
+            return
+        seen.add(cls.wrapper_name)
+        for base in cls.base_classes:
+            visit(base)
+        order.append(cls.wrapper_name)
+
+    for w in sorted(wrappers, key=lambda c: c.name):
+        visit(w.name)
+    return order
+
+
+def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
+                      primitive_keys: set[str]) -> str:
+    out: list[str] = []
+    out.append("// AUTOGENERATED by OpenCASCADE.gd-autowrapper — DO NOT EDIT")
+    out.append("#ifndef AUTOWRAPPER_MODULE_H")
+    out.append("#define AUTOWRAPPER_MODULE_H")
+    out.append("")
+    out.append("#include <godot_cpp/core/class_db.hpp>")
+    out.append("#include <godot_cpp/godot.hpp>")
+    out.append("")
+    out.append('#include "OcgEnums.hpp"')
+    for w in sorted({c.wrapper_name for c in wrappers}):
+        out.append(f'#include "{w}.hpp"')
+    out.append("")
+    out.append("namespace godot {")
+    out.append("")
+    out.append("inline void gdext_initialize_module_auto(godot::ModuleInitializationLevel p_level) {")
+    out.append("    (void)p_level;")
+    wrapper_names = {c.wrapper_name for c in wrappers}
+    for key in sorted(primitive_keys, key=lambda k: _PRIMITIVE_WRAPPERS[k][0]):
+        wclass = _PRIMITIVE_WRAPPERS[key][0]
+        # Primitive wrapper names that are also full generated wrappers (e.g.
+        # TCollection_AsciiString) are registered by the wrapper loop below.
+        if wclass in wrapper_names:
+            continue
+        out.append(f"    godot::ClassDB::register_class<{wclass}>();")
+    out.append("    godot::ClassDB::register_class<OcgEnums>();")
+    for w in _registration_order(wrappers):
+        out.append(f"    godot::ClassDB::register_class<{w}>();")
+    out.append("}")
+    out.append("")
+    out.append("inline void gdext_uninitialize_module_auto(godot::ModuleInitializationLevel p_level) {")
+    out.append("    (void)p_level;")
+    out.append("}")
+    out.append("")
+    out.append("} // namespace godot")
+    out.append("")
+    out.append("#endif // AUTOWRAPPER_MODULE_H")
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Top-level generation
+# ---------------------------------------------------------------------------
+
+def generate_all(modules: list[ModuleDecl], out_dir: Path) -> list[Path]:
+    """Generate all wrapper files for modules (in include-DAG order) into out_dir."""
+    ctx = build_context(modules)
+    wrappers: list[ClassDecl] = []
+    written: list[Path] = []
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def write(name: str, content: str) -> Path:
+        p = out_dir / name
+        if p.exists() and p.read_text() == content:
+            written.append(p)
+            return p
+        p.write_text(content)
+        written.append(p)
+        return p
+
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip:
+                continue
+            group_overloads(cls)
+            write(f"{cls.wrapper_name}.hpp", generate_class_hpp(cls, ctx))
+            write(f"{cls.wrapper_name}.cpp", generate_class_cpp(cls, ctx))
+            wrappers.append(cls)
+
+    write("OcgEnums.hpp", generate_enums_hpp(modules))
+    write("OcgEnums.cpp", generate_enums_cpp(modules))
+    keys = _primitive_wrapper_names_used(modules, ctx)
+    write("OcgPrimitiveWrappers.hpp", generate_primitive_wrappers(keys))
+    write("module.h", generate_module_h(module, wrappers, keys))
+
+    # Remove any wrapper files that are no longer generated (e.g. classes that
+    # became skippable since the last run).
+    generated = {p.name for p in written}
+    for stale in list(out_dir.glob("*.hpp")) + list(out_dir.glob("*.cpp")):
+        if stale.name not in generated:
+            stale.unlink()
+    return written
+
+
+def generate_module(module: ModuleDecl, out_dir: Path) -> list[Path]:
+    """Generate wrapper files for a single module (kept for compat)."""
+    return generate_all([module], out_dir)

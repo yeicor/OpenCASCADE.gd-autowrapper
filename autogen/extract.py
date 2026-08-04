@@ -35,6 +35,25 @@ SKIP_METHOD_NAMES = {
     "ObjectIterator",              # returns a typedef libclang cannot follow
 }
 
+# Methods/constructors declared Standard_EXPORT in a header but with NO
+# definition in the installed OCCT static libs (header/library drift).
+# Wrapping them makes the extension .so reference symbols dlopen cannot
+# resolve ("undefined symbol" at runtime). Keyed by OCCT class name, value is
+# a set of (method name, parameter count); a constructor's name is its class
+# name (matching the IR). Verified against OCCT 8.0.1 via
+# `nm -D --undefined-only` on the built extension.
+SKIP_METHODS_BY_CLASS: dict[str, set[tuple[str, int]]] = {
+    "AppDef_MultiLine": {("SetParameter", 2)},
+    "BRepFeat_MakeLinearForm": {("TransformShapeFU", 1)},
+    "BRepOffsetAPI_FindContigousEdges": {("NbEdges", 0)},
+    "BRepOffset_MakeOffset": {("GetAnalyse", 0)},
+    "GeomFill_SweepSectionGenerator": {("GeomFill_SweepSectionGenerator", 4),
+                                      ("Init", 4)},
+    "IntTools_PntOnFace": {("IsValid", 0)},
+    "ShapeFix_WireSegment": {("ShapeFix_WireSegment", 2)},
+    "TCollection_AsciiString": {("IsEqual", 2)},
+}
+
 # Operators we wrap, mapped to stable names.
 BINARY_OPERATOR_TYPES = {
     "+": OperatorType.PLUS, "-": OperatorType.MINUS,
@@ -135,6 +154,23 @@ def _is_copy_ctor(cursor: Cursor, class_name: str) -> bool:
         t.base_name == class_name and t.is_ref and t.is_const)
 
 
+def _has_explicit_noncopyable(cursor: Cursor) -> bool:
+    """True if the class explicitly deletes its copy ctor or copy/move assignment."""
+    for child in cursor.get_children():
+        try:
+            if child.kind == CursorKind.CXX_METHOD:
+                if (child.spelling == "operator=" and child.is_deleted_method()
+                        and (child.is_copy_assignment_operator_method()
+                             or child.is_move_assignment_operator_method())):
+                    return True
+            elif (child.kind == CursorKind.CONSTRUCTOR and child.is_copy_constructor()
+                  and child.is_deleted_method()):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _params(cursor: Cursor) -> list[Parameter]:
     out: list[Parameter] = []
     for child in cursor.get_children():
@@ -161,11 +197,15 @@ def _extract_method(cursor: Cursor, class_name: str) -> MethodDecl | None:
     name = cursor.spelling
     if name in SKIP_METHOD_NAMES:
         return None
+    params = _params(cursor)
+    if (name, len(params)) in SKIP_METHODS_BY_CLASS.get(class_name, ()):
+        return None
     if _is_deleted(cursor):
+        return None
+    if cursor.access_specifier != AccessSpecifier.PUBLIC:
         return None
 
     return_type = make_type(cursor.result_type)
-    params = _params(cursor)
     op_type, op_name = classify_operator(name)
 
     is_static = bool(cursor.is_static_method())
@@ -192,9 +232,12 @@ def _extract_constructor(cursor: Cursor, class_name: str) -> MethodDecl | None:
         return None
     if _is_copy_ctor(cursor, class_name):
         return None
+    params = _params(cursor)
+    if (class_name, len(params)) in SKIP_METHODS_BY_CLASS.get(class_name, ()):
+        return None
     return MethodDecl(
         name=class_name,
-        parameters=_params(cursor),
+        parameters=params,
         kind=MethodKind.CONSTRUCTOR,
         is_default=bool(cursor.is_default_method()),
         doc=_doc(cursor),
@@ -324,7 +367,10 @@ def _base_names(cursor: Cursor) -> list[str]:
             if c.kind == CursorKind.CXX_BASE_SPECIFIER]
 
 
-def _extract_enum(cursor: Cursor, header: str, parent: str = "") -> EnumDecl:
+def _extract_enum(cursor: Cursor, header: str, parent: str = "") -> EnumDecl | None:
+    name = cursor.spelling or ""
+    if not name or name.startswith("("):
+        return None  # anonymous enum: no stable name to expose across modules
     values: list[EnumValue] = []
     for c in cursor.get_children():
         if c.kind == CursorKind.ENUM_CONSTANT_DECL:
@@ -333,10 +379,17 @@ def _extract_enum(cursor: Cursor, header: str, parent: str = "") -> EnumDecl:
             except Exception:
                 val = None
             values.append(EnumValue(name=c.spelling, value=val))
+    try:
+        # Nested enums carry a real access specifier; file-scope enums report
+        # INVALID but are always public.
+        is_public = (not parent) or cursor.access_specifier == AccessSpecifier.PUBLIC
+    except Exception:
+        is_public = True
     return EnumDecl(
-        name=cursor.spelling, values=values,
+        name=name, values=values,
         is_scoped=cursor.kind == CursorKind.ENUM_DECL and "scoped" in str(cursor.type.spelling),
         is_nested=bool(parent), parent_class=parent,
+        is_public=is_public,
         header_file=header, doc=_doc(cursor),
     )
 
@@ -361,13 +414,28 @@ def _extract_class(cursor: Cursor, header: str) -> ClassDecl:
 
     for child in cursor.get_children():
         kind = child.kind
+        if kind == CursorKind.CLASS_TEMPLATE or kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
+            cls.is_template = True
+        if kind == CursorKind.DESTRUCTOR:
+            if child.access_specifier != AccessSpecifier.PUBLIC:
+                cls.has_protected_dtor = True
         if kind == CursorKind.CONSTRUCTOR:
+            cls.has_any_ctor = True
+            if child.access_specifier != AccessSpecifier.PUBLIC:
+                cls.has_any_nonpublic_ctor = True
+            else:
+                cls.has_any_public_ctor = True
             ctor = _extract_constructor(child, name)
             if ctor:
                 cls.constructors.append(ctor)
-                if ctor.is_default or len(ctor.parameters) == 0:
+                if (len(ctor.parameters) == 0
+                        or all(p.default_value is not None
+                               for p in ctor.parameters)):
                     cls.has_public_default_ctor = True
         elif kind == CursorKind.CXX_METHOD:
+            if child.spelling in ("operator new", "operator delete",
+                                  "operator new[]", "operator delete[]"):
+                cls.has_operator_new_delete = True
             method = _extract_method(child, name)
             if method:
                 if method.kind == MethodKind.STATIC_METHOD:
@@ -382,10 +450,23 @@ def _extract_class(cursor: Cursor, header: str) -> ClassDecl:
                 is_public = child.access_specifier == AccessSpecifier.PUBLIC
             cls.fields.append(FieldDecl(name=child.spelling,
                                         type=make_type(child.type),
-                                        doc=_doc(child), is_public=is_public))
+                                        doc=_doc(child), is_public=is_public,
+                                        is_const=bool(child.type.is_const_qualified())))
+        elif kind == CursorKind.VAR_DECL:
+            # A VarDecl directly under a class definition is a static data member.
+            cls.static_constants.append(child.spelling)
         elif kind == CursorKind.ENUM_DECL and child.is_definition():
-            cls.nested_enums.append(_extract_enum(child, header, parent=name))
+            enum = _extract_enum(child, header, parent=name)
+            if enum is not None:
+                cls.nested_enums.append(enum)
     cls.has_pure_virtual = any(m.is_pure_virtual for m in cls.methods)
+    cls.has_copy_assignment = not (
+        _has_explicit_noncopyable(cursor)
+        or any("unique_ptr" in f.type.base_name for f in cls.fields))
+    try:
+        cls.is_abstract = bool(cursor.is_abstract_record())
+    except Exception:
+        pass
     return cls
 
 
@@ -418,11 +499,20 @@ def extract_header(header: Path, tu: TranslationUnit) -> HeaderResult:
             except Exception:
                 continue
             if child.kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
-                if child.is_definition() and namespace != ("std",) \
+                if child.is_definition() and not namespace \
                         and is_occt_name(child.spelling):
+                    try:
+                        is_specialization = child.specialized_template is not None
+                    except Exception:
+                        is_specialization = False
+                    if is_specialization:
+                        continue  # class template specialization
                     result.classes.append(_extract_class(child, header))
-            elif child.kind == CursorKind.ENUM_DECL and child.is_definition():
-                result.enums.append(_extract_enum(child, header))
+            elif child.kind == CursorKind.ENUM_DECL and child.is_definition() \
+                    and not namespace:
+                enum = _extract_enum(child, header)
+                if enum is not None:
+                    result.enums.append(enum)
             elif child.kind == CursorKind.TYPEDEF_DECL:
                 t = make_type(child.underlying_typedef_type)
                 if t.is_enum or t.is_handle or t.is_collection or (

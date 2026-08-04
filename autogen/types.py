@@ -76,38 +76,46 @@ def _template_args(t: "Type") -> list[str]:
 
 
 def make_type(cursor_type: "Type") -> OCCTType:
-    """Build an OCCTType from a libclang Type using only the Type API."""
+    """Build an OCCTType using ONLY canonical libclang types.
+
+    Every typedef is collapsed through ``get_canonical()`` so that OCCT's
+    pervasive aliases (`Standard_Real`, `Standard_CString`, `occ::handle<T>`,
+    `Standard_OStream`, ...) are indistinguishable from their underlying
+    builtin / class / template types.  The generator therefore never has to
+    know OCCT's alias names: a `Standard_Integer` parameter *is* an `int`.
+    """
     T = cursor_type
-    spelling = T.spelling
     try:
         canonical = T.get_canonical()
     except Exception:
         canonical = T
 
-    is_ref = T.kind in (TypeKind.LVALUEREFERENCE, TypeKind.RVALUEREFERENCE)
-    is_pointer = T.kind == TypeKind.POINTER
+    spelling = T.spelling                      # as written in the header
+    can_spelling = canonical.spelling
 
+    is_ref = canonical.kind in (TypeKind.LVALUEREFERENCE, TypeKind.RVALUEREFERENCE)
+    is_rvalue_ref = canonical.kind == TypeKind.RVALUEREFERENCE
+    is_pointer = canonical.kind == TypeKind.POINTER
     if is_ref or is_pointer:
         try:
-            pointee = T.get_pointee()
+            pointee = canonical.get_pointee()
         except Exception:
-            pointee = T
+            pointee = canonical
     else:
-        pointee = T
+        pointee = canonical
 
-    is_const = "const" in spelling
     try:
-        pointee_is_const = pointee.is_const_qualified() if is_pointer else is_const
+        pointee_is_const = bool(pointee.is_const_qualified())
     except Exception:
-        pointee_is_const = is_const
+        pointee_is_const = "const" in can_spelling
 
-    core = _strip_qualifiers(pointee.spelling if (is_ref or is_pointer) else spelling)
+    core = _strip_qualifiers(pointee.spelling)
     if is_pointer:
         core = core.rstrip("*").rstrip()
     if is_ref:
         core = core.rstrip("&").rstrip()
 
-    # Top-level handle detection.
+    # Handle: top-level canonical spelling `occ::handle<T>` / `opencascade::handle<T>`.
     m = _HANDLE_RE.match(core)
     is_handle = m is not None
     handle_inner = m.group(1) if m else ""
@@ -117,28 +125,22 @@ def make_type(cursor_type: "Type") -> OCCTType:
         targs: list[str] = []
     else:
         base_name = core
-        targs = _template_args(T if not (is_ref or is_pointer) else pointee)
+        targs = _template_args(pointee)
 
-    # Enum detection from canonical kind.
+    # Enum detection from the canonical kind of the (pointee) type.
     is_enum = False
     try:
-        is_enum = canonical.kind == TypeKind.ENUM
+        is_enum = pointee.kind == TypeKind.ENUM
     except Exception:
         pass
-
-    # Primitive desugaring: libclang's spelling already collapses typedefs of
-    # builtins (Standard_Real -> double).  For non-builtin typedefs (e.g. an
-    # enum typedef) keep the spelled name.
-    if T.kind == TypeKind.TYPEDEF and not is_handle:
-        if canonical.kind in _BUILTIN_KINDS:
-            base_name = _strip_qualifiers(canonical.spelling)
 
     return OCCTType(
         spelling=spelling,
         base_name=base_name,
-        canonical_spelling=canonical.spelling,
-        is_const=is_const,
+        canonical_spelling=can_spelling,
+        is_const=pointee_is_const if (is_ref or is_pointer) else "const" in can_spelling,
         is_ref=is_ref,
+        is_rvalue_ref=is_rvalue_ref,
         is_pointer=is_pointer,
         is_handle=is_handle,
         handle_inner=handle_inner,

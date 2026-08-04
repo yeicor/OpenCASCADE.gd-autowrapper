@@ -78,6 +78,7 @@ class OCCTType:
     canonical_spelling: str = ""    # libclang canonical type (fully desugared)
     is_const: bool = False
     is_ref: bool = False            # &
+    is_rvalue_ref: bool = False     # &&
     is_pointer: bool = False        # *
     is_handle: bool = False         # occ::handle<T> / opencascade::handle<T>
     handle_inner: str = ""          # T if is_handle
@@ -141,6 +142,7 @@ class EnumDecl:
     is_scoped: bool = False        # enum class vs enum
     is_nested: bool = False        # declared inside a class
     parent_class: str = ""
+    is_public: bool = True         # false for private/protected nested enums
     header_file: str = ""
     doc: DocBlock = field(default_factory=DocBlock)
 
@@ -179,6 +181,7 @@ class FieldDecl:
     type: OCCTType
     doc: DocBlock = field(default_factory=DocBlock)
     is_public: bool = True
+    is_const: bool = False          # True for `const` data members (read-only)
 
 
 @dataclass
@@ -194,13 +197,23 @@ class ClassDecl:
     operators: list[MethodDecl] = field(default_factory=list)
     static_methods: list[MethodDecl] = field(default_factory=list)
     fields: list[FieldDecl] = field(default_factory=list)
+    static_constants: list[str] = field(default_factory=list)  # static constexpr member names
     nested_enums: list[EnumDecl] = field(default_factory=list)
     header_file: str = ""
     doc: DocBlock = field(default_factory=DocBlock)
     extra_occt_includes: list[str] = field(default_factory=list)  # OCCT headers this class's own header needs but doesn't include
     has_public_default_ctor: bool = False
+    has_any_ctor: bool = False        # True if the class declares any ctor (even private)
+    has_any_public_ctor: bool = False      # True if the class declares a public ctor
+    has_any_nonpublic_ctor: bool = False   # True if the class declares a private/protected ctor
+    has_protected_dtor: bool = False       # True if the destructor is private/protected
+    is_template: bool = False              # True for (primary) template classes
     has_pure_virtual: bool = False
+    is_abstract: bool = False              # cursor.is_abstract() (includes inherited pure virtuals)
     has_copy_assignment: bool = True   # False if copy assignment operator is deleted
+    has_operator_new_delete: bool = False  # class declares operator new/delete (custom allocation)
+    skip: bool = False                 # True if the class cannot be wrapped
+    skip_reason: str = ""
 
     @property
     def all_methods(self) -> list[MethodDecl]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,11 +178,19 @@ def _read_version(include_dir: Path) -> str:
 
 
 def find_occt_install(project_root: Path | None = None) -> OCCTInstall:
-    """Locate the OCCT include dir, preferring the project's vcpkg install."""
+    """Locate the OCCT include dir, preferring the project's vcpkg install.
+
+    Honors the `VCPKG_DEFAULT_TRIPLET` env var (used by CI) and
+    `OCCT_INCLUDE_DIR` for an explicit override.
+    """
     candidates: list[tuple[Path, str]] = []
+    explicit = os.environ.get("OCCT_INCLUDE_DIR")
+    if explicit:
+        candidates.append((Path(explicit), "explicit"))
     if project_root is not None:
+        triplet = os.environ.get("VCPKG_DEFAULT_TRIPLET", "x64-linux")
         candidates.append(
-            (project_root / "vcpkg" / "installed" / "x64-linux" / "include" / "opencascade", "vcpkg"))
+            (project_root / "vcpkg" / "installed" / triplet / "include" / "opencascade", "vcpkg"))
     candidates.append((Path("/usr/include/opencascade"), "system"))
     candidates.append((Path("/usr/local/include/opencascade"), "system"))
     for include_dir, source in candidates:
@@ -202,7 +211,11 @@ def get_install(project_root: Path | None = None) -> OCCTInstall:
 
 
 def module_headers(module: str, install: OCCTInstall) -> list[Path]:
-    """All *.hxx headers in the install belonging to the given module."""
+    """All *.hxx headers in the install belonging to the given module.
+
+    Also includes the module-aggregate header `<module>.hxx` when present
+    (e.g. Standard.hxx defines `class Standard`).
+    """
     prefixes = MODULE_BY_NAME.get(module)
     if prefixes is None:
         raise KeyError(f"unknown module: {module}")
@@ -210,7 +223,10 @@ def module_headers(module: str, install: OCCTInstall) -> list[Path]:
     for h in sorted(install.include_dir.glob("*.hxx")):
         if any(h.name.startswith(p) for p in prefixes):
             out.append(h)
-    return out
+    agg = install.include_dir / f"{module}.hxx"
+    if agg.exists() and agg not in out:
+        out.append(agg)
+    return sorted(out, key=lambda h: h.name)
 
 
 def module_for_header(header_name: str) -> str | None:
