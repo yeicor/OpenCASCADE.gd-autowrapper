@@ -84,17 +84,22 @@ def _skip_reason(cls: ClassDecl, by_name: dict[str, ClassDecl]) -> str:
     if cls.is_template:
         return "template class"
     if cls.kind != ClassKind.REF_COUNTED:
-        if cls.has_protected_dtor:
-            return "protected destructor"
-        if cls.has_any_nonpublic_ctor and not cls.has_any_public_ctor:
-            return "no public constructors"
         if cls.has_pure_virtual:
             return "abstract (pure virtual) class"
+        # Classes exposing only static methods carry no native storage, so the
+        # destructor/constructor/allocation requirements below do not apply
+        # (e.g. BRep_Tool declares no public ctor and custom new/delete).
+        if cls.static_methods and not cls.methods and not cls.operators and not cls.fields:
+            pass
+        elif cls.has_protected_dtor:
+            return "protected destructor"
+        elif cls.has_any_nonpublic_ctor and not cls.has_any_public_ctor:
+            return "no public constructors"
         # Non-default-constructible classes are stored via unique_ptr, which
         # needs the global operator new/delete; OCCT collection nodes instead
         # declare placement new/delete (DEFINE_NCOLLECTION_ALLOC) that hide it,
         # and some classes inherit it protectedly so it becomes inaccessible.
-        if not cls.has_public_default_ctor and _has_custom_alloc(cls, by_name, set()):
+        elif not cls.has_public_default_ctor and _has_custom_alloc(cls, by_name, set()):
             return "custom allocation (operator new/delete)"
     for base in cls.base_classes:
         if base.startswith("Standard_") and any(

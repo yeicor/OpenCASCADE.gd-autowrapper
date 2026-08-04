@@ -158,6 +158,13 @@ def _cg(cls: ClassDecl, ctx: tm.TypeContext) -> CgClass:
                        has_sync=wrapper_base is not None,
                        is_aggregate=cls.name == ctx.module_name)
     storage = "native" if _default_constructible(cls) else "unique_ptr"
+    # Pure-static utility classes (e.g. BRep_Tool) hold no native object: their
+    # ctors are non-public so storage (and its new/delete requirements) is
+    # skipped entirely.
+    if cls.static_methods and not cls.methods and not cls.operators \
+            and not cls.fields and not cls.has_any_public_ctor:
+        return CgClass(cls=cls, wrapper_base=None, base_occt=None, storage="none",
+                       is_aggregate=cls.name == ctx.module_name)
     if cls.wrapper_name in ctx.inherited_value:
         return CgClass(cls=cls,
                        wrapper_base=ctx.wrapped.get(base_occt) if base_occt else None,
@@ -410,7 +417,7 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     elif cg.inherited_native:
         out.append(f"    {cls.name}& _native_ref() {{ return *static_cast<{cls.name}*>(&this->_native); }}")
         out.append(f"    const {cls.name}& _native_ref() const {{ return *static_cast<const {cls.name}*>(&this->_native); }}")
-    else:
+    elif cg.storage == "native":
         out.append(f"    {cls.name} _native;")
     out.append("")
     out.append("    static void _bind_methods();")
@@ -639,6 +646,9 @@ def _plain_ctor_body(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     if cg.storage == "unique_ptr":
         return f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} {{
     // No default constructor — use factory methods
+}}"""
+    if cg.storage == "none":
+        return f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} {{
 }}"""
     if cg.inherited_native:
         return f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} {{
