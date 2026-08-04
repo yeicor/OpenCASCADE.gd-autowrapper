@@ -172,12 +172,17 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | None:
                          prelude=f"std::istringstream ocg_is({name}.utf8().get_data());",
                          call_expr="ocg_is")
     if t.is_ref and not t.is_const:
-        # Non-const reference -> primitive wrapper (in/out) if known.
+        # Non-const reference = in/out parameter.  Primitives and strings use
+        # the small box classes; wrapped OCCT value classes fall through to the
+        # shared wrapped-class conversion below, which passes the wrapper's
+        # native storage by reference so OCCT mutates the caller's object in
+        # place (exact in/out semantics, no copying).
         wrapper = PRIMITIVE_WRAPPER_MAP.get(t.base_name)
         if wrapper is not None:
             return ParamConv(cpp_type=f"Ref<{wrapper[0]}>", gd_type=wrapper[1],
                              name=name, call_expr=_rw(move, f"{name}->_native"))
-        return None
+        if t.base_name in PRIMITIVE_MAP or t.is_enum:
+            return None  # no box class -> cannot bind a by-value param to a T&
     if t.is_pointer:
         return _cpp_pointer_param(t, name, ctx)
     if t.base_name in PRIMITIVE_MAP:

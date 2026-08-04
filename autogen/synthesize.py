@@ -1,0 +1,331 @@
+"""Synthesize a concrete wrapper ClassDecl from a class-template specialization.
+
+All structure comes from libclang (the CLASS_TEMPLATE cursor: members, macros
+already expanded, source-text spellings).  Dependent types are resolved by
+re-parsing a tiny probe TU whose struct inherits the *instantiated*
+specialization, then running the pipeline's existing ``make_type`` on each
+alias.  No source is hand-parsed and no class body is reconstructed.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import tempfile
+from dataclasses import replace
+from pathlib import Path
+
+import clang.cindex as C
+from clang.cindex import CursorKind
+
+from .compile_db import ensure_occt_args, find_resource_dir
+from .extract import _extract_class
+from .occt import find_occt_install
+from .parser import parse_header
+from .types import make_type
+
+# autogen/ -> autowrapper/ -> project root.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_project_root() -> Path:
+    """Locate the repo root (with its vcpkg install)."""
+    if (_PROJECT_ROOT / "vcpkg" / "installed").exists():
+        return _PROJECT_ROOT
+    for p in [Path.cwd().resolve(), *Path.cwd().resolve().parents]:
+        if (p / "vcpkg" / "installed").exists():
+            return p
+    return _PROJECT_ROOT
+
+
+def _find_class_template(root: C.Cursor, name: str) -> C.Cursor | None:
+    for c in root.get_children():
+        if c.kind == CursorKind.CLASS_TEMPLATE and c.spelling == name:
+            return c
+        r = _find_class_template(c, name)
+        if r:
+            return r
+    return None
+
+
+def _split_args(argstr: str) -> list[str]:
+    args, depth, cur = [], 0, ""
+    for ch in argstr:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        args.append(cur)
+    return [a.strip() for a in args]
+
+
+_BUILTINS = {"void", "bool", "char", "short", "int", "long", "float", "double",
+             "unsigned", "signed", "size_t", "char16_t", "char32_t", "wchar_t",
+             "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t"}
+
+
+def _collect_includes(args_list: list[str]) -> list[str]:
+    """OCCT convention: header file name == class name."""
+    out: list[str] = []
+
+    def rec(arg: str) -> None:
+        base = arg.split("<")[0].strip().split("::")[-1].strip()
+        if base and base not in _BUILTINS and base not in ("handle",) and not base.endswith("_t"):
+            out.append(f"{base}.hxx")
+        for inner in _split_args(arg)[1:]:
+            rec(inner)
+
+    for a in args_list:
+        rec(a)
+    return out
+
+
+def _substitute(spelling: str, subst: dict[str, str]) -> str:
+    out = spelling
+    for name, repl in subst.items():
+        if not name:
+            continue
+        out = re.sub(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])",
+                     repl, out)
+    return out
+
+
+_KNOWN_BASIC = {
+    "void", "bool", "char", "short", "int", "long", "float", "double",
+    "unsigned", "signed", "size_t", "wchar_t", "char16_t", "char32_t",
+    "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t",
+    "int64_t", "uint64_t", "intptr_t", "uintptr_t",
+}
+
+
+def _finalize_type(t: object) -> object:
+    """Make a probe-resolved type usable for self-contained wrapper codegen.
+
+    Nested typedef names must be canonicalized even when they appear inside
+    qualifiers (``const Array1Type &`` -> ``const NCollection_Array1<double> &``)
+    so codegen stays self-contained.  Basic/Standard_ spellings are kept as-is
+    to preserve typemap conventions.
+    """
+    if t is None:
+        return t
+    sp = getattr(t, "spelling", "").strip()
+    canon = getattr(t, "canonical_spelling", "").strip()
+    if canon and canon != sp:
+        if sp in _KNOWN_BASIC or sp.startswith("Standard_"):
+            return t
+        return replace(t, spelling=canon)
+    return t
+
+
+def _resolve_types(spellings: list[str], template_spec: str,
+                   includes: list[str], args: list[str],
+                   include_dir: Path) -> dict[str, object]:
+    """Resolve each spelling to an OCCTType via a scoped probe TU."""
+    aliases = "\n".join(f"  using AW_T{i} = {s};"
+                        for i, s in enumerate(spellings))
+    incs = "\n".join(f"#include <{i}>" for i in includes)
+    src = (f"#include <{includes[0]}>\n{incs}\n"
+           f"template class {template_spec};\n"
+           f"namespace ocg_synth {{\n"
+           f"struct AW_Scope : public {template_spec} {{\n{aliases}\n}};\n}}\n")
+    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w", delete=False) as f:
+        f.write(src)
+        tmp = f.name
+    try:
+        index = C.Index.create()
+        tu = index.parse(tmp, args=args + ["-x", "c++", "-I", str(include_dir)])
+        out: dict[str, object] = {}
+        for ns in tu.cursor.get_children():
+            if ns.kind == CursorKind.NAMESPACE and ns.spelling == "ocg_synth":
+                for s in ns.get_children():
+                    if s.kind == CursorKind.STRUCT_DECL:
+                        for ta in s.get_children():
+                            if ta.kind == CursorKind.TYPE_ALIAS_DECL:
+                                idx = int(ta.spelling[len("AW_T"):])
+                                if 0 <= idx < len(spellings):
+                                    try:
+                                        out[spellings[idx]] = make_type(ta.underlying_typedef_type)
+                                    except Exception:
+                                        pass
+        return out
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _expand_spec_args(header_name: str, template_name: str,
+                      args_list: list[str], includes: list[str],
+                      args: list[str], include_dir: Path) -> list[str]:
+    """Fill in default template arguments from the specialization itself."""
+    incs = "\n".join(f"#include <{i}>" for i in includes)
+    spec = f"{template_name}<{', '.join(args_list)}>"
+    src = f"#include <{header_name}>\n{incs}\ntemplate class {spec};\n"
+    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w", delete=False) as f:
+        f.write(src)
+        tmp = f.name
+    try:
+        index = C.Index.create()
+        tu = index.parse(tmp, args=args + ["-x", "c++", "-I", str(include_dir)])
+        for d in tu.diagnostics:
+            if d.severity >= C.Diagnostic.Error:
+                return args_list
+
+        def find_spec(cursor: C.Cursor):
+            for c in cursor.get_children():
+                if c.kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL) \
+                        and c.spelling == template_name and c.is_definition():
+                    try:
+                        n = c.get_num_template_arguments()
+                    except Exception:
+                        n = -1
+                    if n > 0:
+                        return c
+                r = find_spec(c)
+                if r:
+                    return r
+            return None
+
+        sp = find_spec(tu.cursor)
+        if sp is None:
+            return args_list
+        try:
+            n = sp.get_num_template_arguments()
+            out = [sp.get_template_argument_type(i).spelling for i in range(n)]
+        except Exception:
+            return args_list
+        return out if out and len(out) >= len(args_list) else args_list
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def synth_template_spec(header_name: str, template_name: str,
+                        args_list: list[str],
+                        install: Path | None = None) -> object:
+    """Return a ClassDecl for the specialization ``template_name<args_list>``."""
+    if install is None:
+        install = find_occt_install(_default_project_root())
+    args = ensure_occt_args([], install.include_dir)
+    rd = find_resource_dir()
+    if rd:
+        args.append(f"-resource-dir={rd}")
+
+    header = install.include_dir / header_name
+    tu = parse_header(header, args)
+    ct = _find_class_template(tu.cursor, template_name)
+    if ct is None:
+        raise ValueError(f"no CLASS_TEMPLATE {template_name} in {header_name}")
+
+    params: list[tuple[str, bool]] = []
+    for c in ct.get_children():
+        if c.kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
+            params.append((c.spelling, True))
+        elif c.kind == CursorKind.PARM_DECL:
+            params.append((c.spelling, False))
+
+    subst: dict[str, str] = {}
+    for idx, (pname, is_type) in enumerate(params):
+        if idx < len(args_list):
+            subst[pname] = args_list[idx]
+            subst[f"type-parameter-0-{idx}"] = args_list[idx]
+
+    includes = [header_name] + _collect_includes(args_list)
+    full_args = _expand_spec_args(header_name, template_name, args_list,
+                                  includes, args, install.include_dir)
+    if full_args != args_list:
+        args_list = full_args
+        subst = {}
+        for idx, (pname, is_type) in enumerate(params):
+            if idx < len(args_list):
+                subst[pname] = args_list[idx]
+                subst[f"type-parameter-0-{idx}"] = args_list[idx]
+    template_spec = f"{template_name}<{', '.join(args_list)}>"
+
+    cls = _extract_class(ct, header_name)
+    cls.name = template_name  # keep base name; wrapper naming handles args
+    cls.base_classes = [_substitute(b, subst) for b in cls.base_classes]
+
+    to_resolve: dict[str, str] = {}  # substituted spelling -> substituted spelling
+
+    def queue(t: object) -> None:
+        s = _substitute(getattr(t, "spelling", ""), subst)
+        to_resolve.setdefault(s, s)
+
+    for b in cls.base_classes:
+        queue(type("T", (), {"spelling": b})())
+    for m in cls.constructors + cls.methods + cls.operators + cls.static_methods:
+        if m.return_type is not None:
+            queue(m.return_type)
+        for p in m.parameters:
+            queue(p.type)
+    for f in cls.fields:
+        queue(f.type)
+
+    resolved = _resolve_types(list(to_resolve), template_spec, includes,
+                              args, install.include_dir)
+
+    def rebind(t: object) -> object:
+        s = _substitute(getattr(t, "spelling", ""), subst)
+        nt = resolved.get(s)
+        return _finalize_type(nt) if nt is not None else t
+
+    for m in cls.constructors + cls.methods + cls.operators + cls.static_methods:
+        if m.return_type is not None:
+            m.return_type = rebind(m.return_type)
+        for p in m.parameters:
+            p.type = rebind(p.type)
+    for f in cls.fields:
+        f.type = rebind(f.type)
+    for i, b in enumerate(cls.base_classes):
+        nt = rebind(type("T", (), {"spelling": b})())
+        if isinstance(nt, object) and hasattr(nt, "spelling"):
+            cls.base_classes[i] = nt.spelling
+
+    cls.is_template = False
+    return cls
+
+
+# Representative specializations used by `autogen synth-check` to prove the
+# synthesis covers the pipeline's usage tiers (simple, handle-args, nested
+# templates, defaults expansion, macro-free HArray1).
+REPRESENTATIVE_SPECS: list[tuple[str, str, list[str]]] = [
+    ("NCollection_Vec3.hxx", "NCollection_Vec3", ["float"]),
+    ("NCollection_Array2.hxx", "NCollection_Array2", ["gp_Pnt"]),
+    ("NCollection_Array1.hxx", "NCollection_Array1", ["gp_Pnt"]),
+    ("NCollection_HArray1.hxx", "NCollection_HArray1", ["double"]),
+    ("NCollection_Sequence.hxx", "NCollection_Sequence", ["gp_Pnt"]),
+    ("NCollection_DataMap.hxx", "NCollection_DataMap",
+     ["TCollection_AsciiString", "TCollection_AsciiString"]),
+]
+
+
+def synth_check(verbose: bool = True) -> int:
+    """Synthesize the representative specs; return 0 when all succeed."""
+    failures = 0
+    for header, tname, targs in REPRESENTATIVE_SPECS:
+        label = f"{tname}<{', '.join(targs)}>"
+        try:
+            cls = synth_template_spec(header, tname, targs)
+        except Exception as e:  # noqa: BLE001
+            print(f"FAILED {label}: {e}")
+            failures += 1
+            continue
+        print(f"{label}: methods={len(cls.methods)} ctors={len(cls.constructors)} "
+              f"ops={len(cls.operators)} statics={len(cls.static_methods)} "
+              f"fields={len(cls.fields)} bases={cls.base_classes}")
+        if verbose:
+            for m in (cls.methods + cls.constructors + cls.operators)[:6]:
+                ps = ", ".join(p.type.spelling for p in m.parameters)
+                ret = m.return_type.spelling if m.return_type else "void"
+                print(f"    {m.name}({ps}) -> {ret}")
+    return failures

@@ -31,6 +31,7 @@ def _mdecl(d: dict) -> M.MethodDecl:
         is_default=d.get("is_default", False),
         is_deleted=d.get("is_deleted", False),
         is_pure_virtual=d.get("is_pure_virtual", False),
+        is_variadic=d.get("is_variadic", False),
         is_overload=d.get("is_overload", False),
         overload_index=d.get("overload_index", 0),
         overload_suffix=d.get("overload_suffix", ""),

@@ -132,8 +132,44 @@ def cmd_generate_all(args: argparse.Namespace) -> int:
     modules = [load_module(Path(p)) for p in args.irs]
     for module in modules:
         classify_module(module)
-    generate_all(modules, Path(args.out))
-    print(f"wrote          : {args.out} ({len(modules)} modules)")
+    missing = set()
+    if args.missing:
+        from .audit import load_missing
+        missing = load_missing(Path(args.missing))
+    generate_all(modules, Path(args.out), probe_out=args.probe_out,
+                 missing=missing)
+    print(f"wrote          : {args.out} ({len(modules)} modules)"
+          + (f" ({len(missing)} missing symbols skipped)" if missing else ""))
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    from .audit import run_audit
+    from .occt import find_occt_install
+    install = find_occt_install(PROJECT_ROOT)
+    modules = [load_module(Path(p)) for p in args.irs]
+    occt_classes = {cls.name for m in modules for cls in m.classes}
+    compile_args = CompileArgs(args.compile_db)
+    args_list = ensure_occt_args(compile_args.args, install.include_dir)
+    try:
+        missing = run_audit(Path(args.probe), Path(args.work), Path(args.out),
+                            PROJECT_ROOT, install, args_list, occt_classes,
+                            compiler=args.compiler, nm_tool=args.nm)
+    except FileNotFoundError as e:
+        print(f"audit          : skipped ({e})", file=sys.stderr)
+        return 1
+    print(f"audit          : {len(missing)} missing symbol(s) -> {args.out}"
+          + (f": {', '.join(missing[:5])}" if missing else ""))
+    return 0
+
+
+def cmd_synth_check(args: argparse.Namespace) -> int:
+    from .synthesize import REPRESENTATIVE_SPECS, synth_check
+    failures = synth_check(verbose=not args.quiet)
+    if failures:
+        print(f"synth-check    : {failures} specialization(s) failed")
+        return 1
+    print(f"synth-check    : {len(REPRESENTATIVE_SPECS)} specialization(s) OK")
     return 0
 
 
@@ -167,7 +203,32 @@ def main(argv: list[str] | None = None) -> int:
                        default=[SUBMODULE_DIR / "out" / "ir" / "Standard.json"])
     p_all.add_argument("--out", type=Path,
                        default=SUBMODULE_DIR / "out" / "gen")
+    p_all.add_argument("--probe-out", type=Path, default=None,
+                       help="also write a symbol-audit probe TU to this path")
+    p_all.add_argument("--missing", type=Path, default=None,
+                       help="skip methods whose link symbols are in this file")
     p_all.set_defaults(func=cmd_generate_all)
+
+    p_audit = sub.add_parser(
+        "audit", help="compile the probe TU and diff undefined vs library symbols")
+    p_audit.add_argument("--irs", nargs="+", type=Path,
+                         default=[SUBMODULE_DIR / "out" / "ir" / "Standard.json"])
+    p_audit.add_argument("--probe", type=Path,
+                         default=SUBMODULE_DIR / "out" / "audit" / "probe.cpp")
+    p_audit.add_argument("--work", type=Path,
+                         default=SUBMODULE_DIR / "out" / "audit")
+    p_audit.add_argument("--out", type=Path,
+                         default=SUBMODULE_DIR / "out" / "audit" / "missing.txt")
+    p_audit.add_argument("--compile-db", type=Path, default=DEFAULT_COMPILE_DB)
+    p_audit.add_argument("--compiler", type=str, default="g++")
+    p_audit.add_argument("--nm", type=str, default="nm")
+    p_audit.set_defaults(func=cmd_audit)
+
+    p_synth = sub.add_parser(
+        "synth-check", help="validate class-template specialization synthesis")
+    p_synth.add_argument("--quiet", action="store_true",
+                         help="only print pass/fail counts")
+    p_synth.set_defaults(func=cmd_synth_check)
 
     args = parser.parse_args(argv)
     return args.func(args)

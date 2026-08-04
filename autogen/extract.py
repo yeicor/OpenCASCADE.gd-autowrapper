@@ -220,6 +220,7 @@ def _extract_method(cursor: Cursor, class_name: str) -> MethodDecl | None:
         is_static=is_static,
         is_default=bool(cursor.is_default_method()),
         is_pure_virtual=bool(cursor.is_pure_virtual_method()),
+        is_variadic=bool(cursor.type.is_function_variadic()),
         operator_type=op_type,
         doc=_doc(cursor),
     )

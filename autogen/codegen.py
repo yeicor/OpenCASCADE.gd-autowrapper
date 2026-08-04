@@ -445,6 +445,8 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         out.append("")
         emitted = True
     for m in cls.methods + cls.operators:
+        if m.skip:
+            continue
         sig = _method_decl_signature(cls, m, ctx)
         if sig is None:
             m.skip = True
@@ -455,6 +457,8 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     if cls.static_methods:
         sigs = []
         for m in cls.static_methods:
+            if m.skip:
+                continue
             sig = _method_decl_signature(cls, m, ctx)
             if sig is None:
                 m.skip = True
@@ -1108,9 +1112,20 @@ def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
 # Top-level generation
 # ---------------------------------------------------------------------------
 
-def generate_all(modules: list[ModuleDecl], out_dir: Path) -> list[Path]:
-    """Generate all wrapper files for modules (in include-DAG order) into out_dir."""
+def generate_all(modules: list[ModuleDecl], out_dir: Path,
+                 probe_out: Path | None = None,
+                 missing: set[str] | None = None) -> list[Path]:
+    """Generate all wrapper files for modules (in include-DAG order) into out_dir.
+
+    `missing` (see autogen.audit) marks every generated method whose OCCT symbol
+    is absent from the linked libraries as skipped.  When `probe_out` is set, a
+    symbol-audit probe TU is also written there after all skip decisions are
+    final.
+    """
     ctx = build_context(modules)
+    if missing:
+        from .audit import apply_missing
+        apply_missing(modules, missing)
     wrappers: list[ClassDecl] = []
     written: list[Path] = []
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1145,6 +1160,15 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path) -> list[Path]:
     for stale in list(out_dir.glob("*.hpp")) + list(out_dir.glob("*.cpp")):
         if stale.name not in generated:
             stale.unlink()
+
+    if probe_out:
+        from .audit import generate_probe_tu
+        from .occt import find_occt_install
+        project_root = Path(__file__).resolve().parent.parent.parent
+        probe = Path(probe_out)
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        probe.write_text(generate_probe_tu(modules, ctx,
+                                           find_occt_install(project_root)))
     return written
 
 

@@ -39,7 +39,30 @@ mkdir -p out/ir
 echo "Scanning OCCT headers (all modules)..."
 "$PYTHON" -m autogen scan-all --jobs "${AUTOWRAPPER_JOBS:-8}"
 
-echo "Generating wrappers into ../src/autowrapper..."
-"$PYTHON" -m autogen generate-all --irs out/ir/*.json --out "$SCRIPT_DIR/../src/autowrapper"
+# Pass 1: generate wrappers and a symbol-audit probe TU.  The audit then
+# compares the probe's undefined symbols against the OCCT libraries' defined
+# set; methods whose member symbol is missing from the libs (e.g.
+# OSD_Path::LocateExecFile, where only the free function is exported) are
+# skipped in pass 2, before the slow vcpkg rebuild runs.
+mkdir -p out/audit
+
+echo "Generating wrappers (pass 1) + symbol probe..."
+"$PYTHON" -m autogen generate-all --irs out/ir/*.json \
+    --out "$SCRIPT_DIR/../src/autowrapper" \
+    --probe-out "$SCRIPT_DIR/out/audit/probe.cpp"
+
+if "$PYTHON" -m autogen audit --irs out/ir/*.json \
+        --probe "$SCRIPT_DIR/out/audit/probe.cpp" \
+        --work "$SCRIPT_DIR/out/audit" \
+        --out "$SCRIPT_DIR/out/audit/missing.txt"; then
+    if [ -s "$SCRIPT_DIR/out/audit/missing.txt" ]; then
+        echo "Regenerating wrappers (pass 2): skipping $(wc -l < "$SCRIPT_DIR/out/audit/missing.txt") missing symbol(s)..."
+        "$PYTHON" -m autogen generate-all --irs out/ir/*.json \
+            --out "$SCRIPT_DIR/../src/autowrapper" \
+            --missing "$SCRIPT_DIR/out/audit/missing.txt"
+    fi
+else
+    echo "Symbol audit unavailable (g++/nm or OCCT libraries missing); using pass-1 output." >&2
+fi
 
 echo "Autowrapper bindings generated (out/ir -> ../src/autowrapper)."

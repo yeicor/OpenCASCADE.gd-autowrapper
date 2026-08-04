@@ -166,6 +166,7 @@ class MethodDecl:
     is_default: bool = False       # = default
     is_deleted: bool = False       # = delete
     is_pure_virtual: bool = False  # = 0
+    is_variadic: bool = False      # C-style variadic (...)
     is_overload: bool = False      # has same-name sibling
     overload_index: int = 0        # 0-based index among overloads
     overload_suffix: str = ""      # collision-aware hash disambiguator (set by group_overloads)
