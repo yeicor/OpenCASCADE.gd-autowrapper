@@ -86,6 +86,7 @@ class TypeContext:
         self.unique_ptr: set[str] = set()       # wrapper names with unique_ptr storage
         self.handles: set[str] = set()          # wrapper names with handle storage
         self.noncopyable: set[str] = set()      # occt names that cannot be copied
+        self.inherited_value: set[str] = set()  # wrapper names sharing base storage via _native_ref()
 
 
 def _enum_occt_path(enum_decl) -> str:
@@ -194,7 +195,8 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | None:
         elif w in ctx.unique_ptr:
             call = f"*{name}->_native"
         else:
-            call = f"{name}->_native"
+            native = "_native_ref()" if w in ctx.inherited_value else "_native"
+            call = f"{name}->{native}"
         return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
                          call_expr=_rw(move, call))
     if t.is_enum:
@@ -295,9 +297,10 @@ def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False,
                     "        return wrapper;")
         else:
             decl = "auto& result" if t.is_ref else "auto result"
+            native = "_native_ref()" if w in ctx.inherited_value else "_native"
             body = (decl + " = {call};\n"
                     "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
-                    "        wrapper->_native = result;\n"
+                    "        wrapper->" + native + " = result;\n"
                     "        return wrapper;")
         return RetConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", body=body)
     if t.is_enum:

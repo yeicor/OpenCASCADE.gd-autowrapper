@@ -49,6 +49,7 @@ class CgClass:
     storage: str                  # "handle" | "native" | "unique_ptr"
     has_sync: bool = False
     is_aggregate: bool = False
+    inherited_native: bool = False  # shares base wrapper's _native via _native_ref()
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +72,28 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
         for cls in module.classes:
             if not cls.skip and cls.name != module.name:
                 ctx.wrapped[cls.name] = cls.wrapper_name
+    # Empty value-class type tags that derive a wrapped value class share the
+    # base wrapper's native storage (accessed via a downcast _native_ref()).
+    # Restricted to TopoDS_Shape tags: those classes are provably member-less,
+    # so the base storage layout matches and a downcast reference is sound.
+    # Other hierarchies (e.g. BRepMesh splitters) carry state/vptrs and would
+    # slice or overflow, so they stay standalone RefCounted wrappers.
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip or cls.name == module.name:
+                continue
+            if cls.kind == ClassKind.REF_COUNTED:
+                continue
+            if not _default_constructible(cls):
+                continue
+            base = next((b for b in cls.base_classes if b in ctx.wrapped), None)
+            if base != "TopoDS_Shape":
+                continue
+            if cls.fields or cls.methods or cls.operators or cls.static_methods:
+                continue
+            if any(not _default_ctor(c) for c in cls.constructors):
+                continue
+            ctx.inherited_value.add(cls.wrapper_name)
     for module in modules:
         for cls in module.classes:
             if cls.skip or cls.name == module.name:
@@ -135,6 +158,12 @@ def _cg(cls: ClassDecl, ctx: tm.TypeContext) -> CgClass:
                        has_sync=wrapper_base is not None,
                        is_aggregate=cls.name == ctx.module_name)
     storage = "native" if _default_constructible(cls) else "unique_ptr"
+    if cls.wrapper_name in ctx.inherited_value:
+        return CgClass(cls=cls,
+                       wrapper_base=ctx.wrapped.get(base_occt) if base_occt else None,
+                       base_occt=base_occt, storage="native",
+                       inherited_native=True,
+                       is_aggregate=cls.name == ctx.module_name)
     return CgClass(cls=cls, wrapper_base=None, base_occt=None,
                    storage=storage, is_aggregate=cls.name == ctx.module_name)
 
@@ -378,6 +407,9 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         out.append(f"    opencascade::handle<{cls.name}> _handle;")
     elif cg.storage == "unique_ptr":
         out.append(f"    std::unique_ptr<{cls.name}> _native = nullptr;")
+    elif cg.inherited_native:
+        out.append(f"    {cls.name}& _native_ref() {{ return *static_cast<{cls.name}*>(&this->_native); }}")
+        out.append(f"    const {cls.name}& _native_ref() const {{ return *static_cast<const {cls.name}*>(&this->_native); }}")
     else:
         out.append(f"    {cls.name} _native;")
     out.append("")
@@ -456,11 +488,15 @@ def _occt_call(cls: ClassDecl, method: MethodDecl, args: str,
                                    method.operator_type.value)
         if cls.kind == ClassKind.REF_COUNTED:
             return f"_handle.get()->operator{op}({args})"
+        if _cg(cls, ctx).inherited_native:
+            return f"_native_ref().operator{op}({args})"
         return f"_native.operator{op}({args})"
     if cls.kind == ClassKind.REF_COUNTED:
         return f"_handle.get()->{method.name}({args})"
     if _cg(cls, ctx).storage == "unique_ptr":
         return f"_native->{method.name}({args})"
+    if _cg(cls, ctx).inherited_native:
+        return f"_native_ref().{method.name}({args})"
     return f"_native.{method.name}({args})"
 
 
@@ -563,6 +599,16 @@ def _ctor_body(cls: ClassDecl, ctor: MethodDecl, ctx: tm.TypeContext) -> str:
         return ref;
     }} OCCT_GUARD_CATCH({{}});
 }}"""
+    if cg.inherited_native:
+        return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
+    try {{
+        OCC_CATCH_SIGNALS
+        Ref<{cls.wrapper_name}> ref; ref.instantiate();
+        occt_gd::clear_last_error();
+{pre}        ref->_native_ref() = {_occt_qual(cls)}({args});
+        return ref;
+    }} OCCT_GUARD_CATCH({{}});
+}}"""
     return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
     try {{
         OCC_CATCH_SIGNALS
@@ -594,6 +640,9 @@ def _plain_ctor_body(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         return f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} {{
     // No default constructor — use factory methods
 }}"""
+    if cg.inherited_native:
+        return f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} {{
+}}"""
     return (f"""{cls.wrapper_name}::{cls.wrapper_name}() : {base_init} , _native() {{
 }}""")
 
@@ -615,7 +664,7 @@ def _field_accessor_bodies(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
     elif cg.storage == "unique_ptr":
         target = "(*_native)"
     else:
-        target = "_native"
+        target = "_native_ref()" if cg.inherited_native else "_native"
     for f in cls.fields:
         if not f.is_public:
             continue
