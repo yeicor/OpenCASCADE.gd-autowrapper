@@ -675,10 +675,15 @@ def _field_accessor_bodies(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
     cg = _cg(cls, ctx)
     if cg.storage == "handle":
         target = "(*_handle)"
+        get_guard = "ERR_FAIL_COND_V(!_handle, {dflt});"
+        set_guard = "ERR_FAIL_COND(!_handle);"
     elif cg.storage == "unique_ptr":
         target = "(*_native)"
+        get_guard = "ERR_FAIL_NULL_V(_native, {dflt});"
+        set_guard = "ERR_FAIL_NULL(_native);"
     else:
         target = "_native_ref()" if cg.inherited_native else "_native"
+        get_guard, set_guard = None, None
     for f in cls.fields:
         if not f.is_public:
             continue
@@ -688,14 +693,20 @@ def _field_accessor_bodies(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
         if gret is None or gret.cpp_type == "void":
             continue
         get_body = gret.body.replace("{call}", f"{target}.{f.name}")
+        if get_guard is not None:
+            get_guard = get_guard.format(dflt=tm.default_value(gret.cpp_type))
+            get_body = f"    {get_guard}\n    {get_body}"
         out.append(f"""{gret.cpp_type} {cls.wrapper_name}::_ocg_field_get_{snake}() const {{
-    {get_body}
+{get_body}
 }}""")
         out.append("")
         if sconv is not None and not f.is_const:
             pre = f"\n    {sconv.prelude}" if sconv.prelude else ""
+            set_body = f"{target}.{f.name} = {sconv.call_expr};"
+            if set_guard is not None:
+                set_body = f"    {set_guard}\n    {set_body}"
             out.append(f"""void {cls.wrapper_name}::_ocg_field_set_{snake}({_field_setter_param(sconv)}) {{{pre}
-    {target}.{f.name} = {sconv.call_expr};
+{set_body}
 }}""")
             out.append("")
     return out
