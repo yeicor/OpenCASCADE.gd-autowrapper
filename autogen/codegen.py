@@ -195,10 +195,11 @@ def _occt_qual(cls: ClassDecl) -> str:
     return f"::{cls.name}"
 
 
-def _params_decl(method: MethodDecl, ctx: tm.TypeContext) -> str | None:
+def _params_decl(method: MethodDecl, ctx: tm.TypeContext,
+                 cls=None) -> str | None:
     parts = []
     for p in method.parameters:
-        conv = tm.cpp_param(p.type, p.name, ctx)
+        conv = tm.cpp_param(p.type, p.name, ctx, cls)
         if conv is None:
             return None
         if conv.is_ostream:
@@ -405,6 +406,13 @@ def _exception_method_body(cls: ClassDecl, method: MethodDecl,
 }}"""
 
 
+# Range-for iterator protocol: begin/end/cbegin/cend return container-internal
+# iterator objects that have no GDScript meaning (containers are indexed
+# directly).  Their unmappable signature is skipped with a dedicated reason.
+_ITERATOR_PROTOCOL_METHODS = frozenset(
+    {"begin", "end", "cbegin", "cend", "rbegin", "rend", "crbegin", "crend"})
+
+
 def _method_skip_reason(cls: ClassDecl, method: MethodDecl,
                         ctx: tm.TypeContext) -> str:
     """Precise reason a method's signature cannot cross the FFI.
@@ -416,6 +424,8 @@ def _method_skip_reason(cls: ClassDecl, method: MethodDecl,
     if cls.kind == ClassKind.EXCEPTION \
             and _exception_method_kind(cls, method) is None:
         return "exception diagnostic method (no native storage)"
+    if method.name in _ITERATOR_PROTOCOL_METHODS:
+        return "container iterator protocol (begin/end)"
     return "unmappable type"
 
 
@@ -424,7 +434,7 @@ def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
     if cls.kind == ClassKind.EXCEPTION \
             and _exception_method_kind(cls, method) is None:
         return None
-    params = _params_decl(method, ctx)
+    params = _params_decl(method, ctx, cls)
     if params is None:
         return None
     has_ostream = _has_ostream_param(method)
@@ -542,7 +552,7 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         sig = _method_decl_signature(cls, m, ctx)
         if sig is None:
             m.skip = True
-            m.skip_reason = "unmappable type"
+            m.skip_reason = _method_skip_reason(cls, m, ctx)
             continue
         out.append(f"    {sig};")
         emitted = True
@@ -606,7 +616,7 @@ def _occt_call(cls: ClassDecl, method: MethodDecl, args: str,
 def _method_body(cls: ClassDecl, method: MethodDecl,
                  ctx: tm.TypeContext) -> str | None:
     unique = _unique(method)
-    params = _params_decl(method, ctx)
+    params = _params_decl(method, ctx, cls)
     if params is None:
         return None
     if cls.kind == ClassKind.EXCEPTION:
@@ -620,7 +630,7 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
     preludes: list[str] = []
     arg_exprs: list[str] = []
     for p in method.parameters:
-        conv = tm.cpp_param(p.type, p.name, ctx)
+        conv = tm.cpp_param(p.type, p.name, ctx, cls)
         if conv is None:
             return None
         if conv.prelude:
@@ -673,13 +683,13 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
 
 def _ctor_body(cls: ClassDecl, ctor: MethodDecl, ctx: tm.TypeContext) -> str:
     unique = _unique(ctor)
-    params = _params_decl(ctor, ctx)
+    params = _params_decl(ctor, ctx, cls)
     if params is None:
         return ""  # unmappable param; caller marks skip
     preludes: list[str] = []
     arg_exprs: list[str] = []
     for p in ctor.parameters:
-        conv = tm.cpp_param(p.type, p.name, ctx)
+        conv = tm.cpp_param(p.type, p.name, ctx, cls)
         if conv is None:
             return ""
         if conv.prelude:
@@ -864,11 +874,12 @@ def _defval_suffix(cls: ClassDecl, method: MethodDecl, ctx: tm.TypeContext) -> s
     return ", " + ", ".join(reversed(parts))
 
 
-def _bind_arg_names(method: MethodDecl, ctx: tm.TypeContext) -> str:
+def _bind_arg_names(method: MethodDecl, ctx: tm.TypeContext,
+                    cls=None) -> str:
     """D_METHOD argument names; absorbed ostream params are not exposed."""
     names = []
     for p in method.parameters:
-        conv = tm.cpp_param(p.type, p.name, ctx)
+        conv = tm.cpp_param(p.type, p.name, ctx, cls)
         if conv is None:
             continue
         if conv.is_ostream:
@@ -883,7 +894,7 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
         if ctor.skip or _default_ctor(ctor):
             continue
         unique = _unique(ctor)
-        args = _bind_arg_names(ctor, ctx)
+        args = _bind_arg_names(ctor, ctx, cls)
         out.append(
             f'    ClassDB::bind_static_method("{cls.wrapper_name}", '
             f'D_METHOD("{unique}"{", " + args if args else ""}), '
@@ -892,7 +903,7 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
         if m.skip:
             continue
         unique = _unique(m)
-        args = _bind_arg_names(m, ctx)
+        args = _bind_arg_names(m, ctx, cls)
         defv = _defval_suffix(cls, m, ctx)
         if m.kind == MethodKind.STATIC_METHOD:
             out.append(

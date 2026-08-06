@@ -73,7 +73,7 @@ def finalize_skips(modules: list[ModuleDecl],
                     continue
                 if ctor.skip:
                     continue
-                if _params_decl(ctor, ctx) is None:
+                if _params_decl(ctor, ctx, cls) is None:
                     ctor.skip = True
                     ctor.skip_reason = "unmappable type"
                 if ctor.skip:

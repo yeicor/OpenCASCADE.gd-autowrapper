@@ -119,6 +119,12 @@ METHOD_SKIP_POLICIES: dict[str, SkipPolicy] = {
         "mapping. Close by extending typemap (raw buffers, std::string_view, "
         "NCollection by-ref crossings, handle<>& out-params, nested "
         "typedefs) and by API-driven template synthesis."),
+    "container iterator protocol (begin/end)": SkipPolicy(
+        "accepted",
+        "begin/end/cbegin/cend (and rbegin/rend variants) return opaque "
+        "container-internal iterator objects that only make sense in a C++ "
+        "range-for loop. GDScript indexes NCollection containers directly, so "
+        "the range-for surface is intentionally not exposed."),
     "abstract class (not instantiable)": SkipPolicy(
         "gap",
         "Parameterized constructors of abstract classes are dropped because "

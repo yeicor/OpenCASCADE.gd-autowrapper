@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .model import OCCTType
+from .model import ClassKind, OCCTType
 
 # Canonical builtin name -> (wrapper C++ type, Godot Variant type name).
 # Types are canonicalized in types.py, so OCCT aliases (Standard_Real = double,
@@ -155,10 +155,64 @@ def safe_param_name(name: str) -> str:
     return name
 
 
-def cpp_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | None:
+def _container_expr(cls, ctx: TypeContext) -> str:
+    """C++ expression yielding the wrapped container for iterator positioning."""
+    if cls.kind == ClassKind.REF_COUNTED:
+        return "*_handle"
+    if cls.wrapper_name in ctx.unique_ptr:
+        return "*_native"
+    if cls.wrapper_name in ctx.inherited_value:
+        return "_native_ref()"
+    return "_native"
+
+
+def _is_own_iterator_type(t: OCCTType, cls) -> bool:
+    """True if `t` is the current class's iterator type.
+
+    NCollection_Sequence<T> addresses elements via its nested
+    ``Sequence<T>::Iterator``; NCollection_List<T> aliases ``Iterator`` to the
+    base-class ``NCollection_TListIterator<T>`` that its methods actually take.
+    Both are positionable from the wrapped container and map to an int index.
+    """
+    bn = t.base_name
+    if bn == f"{cls.name}::Iterator":
+        return True
+    if cls.name.startswith("NCollection_List<") \
+            and bn.startswith("NCollection_TListIterator<"):
+        return f"NCollection_List<{bn[len('NCollection_TListIterator<'):]}" == cls.name
+    return False
+
+
+def _container_iterator_param(t: OCCTType, name: str, cls,
+                              ctx: TypeContext) -> ParamConv | None:
+    """Map a `{Container}::Iterator&` in-parameter to an int position.
+
+    OCCT sequence/list/map methods address elements by an opaque iterator that
+    can only be obtained by walking from the front.  GDScript cannot build one,
+    so the wrapper takes a 0-based position and walks the iterator there.  Only
+    the current class's own iterator type is recognized (container-internal
+    iterators of *other* types stay unmappable).
+    """
+    if t.is_pointer or not _is_own_iterator_type(t, cls):
+        return None
+    it = f"ocg_it_{name}"
+    idx = f"ocg_idx_{name}"
+    prelude = (f"{t.base_name} {it}({_container_expr(cls, ctx)});\n"
+               f"    for (int32_t {idx} = 0; {idx} < {name}; ++{idx}) "
+               f"{{ {it}.Next(); }}")
+    return ParamConv(cpp_type="int32_t", gd_type="INT", name=name,
+                     prelude=prelude, call_expr=it)
+
+
+def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
+              cls=None) -> ParamConv | None:
     name = safe_param_name(name)
     move = t.is_rvalue_ref
     stream = stream_kind(t) if t.is_ref else None
+    if cls is not None:
+        conv = _container_iterator_param(t, name, cls, ctx)
+        if conv is not None:
+            return conv
     if t.is_ref and stream == "out":
         return ParamConv(cpp_type="", gd_type="", name=name,
                          prelude="std::ostringstream ocg_os;",
