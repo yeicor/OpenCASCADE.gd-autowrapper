@@ -128,8 +128,15 @@ def _type_headers(t: OCCTType, ctx: tm.TypeContext) -> list[str]:
     """OCCT header basenames a signature type requires to be complete."""
     if t.is_handle and t.handle_inner in ctx.wrapped:
         return [ctx.occt_headers.get(t.handle_inner, t.handle_inner + ".hxx")]
-    if t.base_name in ctx.wrapped:
-        return [ctx.occt_headers.get(t.base_name, t.base_name + ".hxx")]
+    key = tm._wrapped_key(t.base_name, ctx)
+    if key is not None:
+        return [ctx.occt_headers.get(key, key + ".hxx")]
+    # A templated type the header map has no key for (e.g. spelled with
+    # defaulted template args): the class template header is still required.
+    m = re.match(r"^([A-Za-z_]\w*)<", t.base_name)
+    if m:
+        tname = m.group(1)
+        return [ctx.occt_headers.get(tname, tname + ".hxx")]
     return []
 
 

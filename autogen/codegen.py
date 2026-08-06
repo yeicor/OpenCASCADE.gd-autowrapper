@@ -250,8 +250,9 @@ def _type_occt_header(t: OCCTType, ctx: tm.TypeContext) -> str | None:
 def _type_wrapper(t: OCCTType, ctx: tm.TypeContext) -> str | None:
     if t.is_handle and t.handle_inner in ctx.wrapped:
         return ctx.wrapped[t.handle_inner]
-    if t.base_name in ctx.wrapped:
-        return ctx.wrapped[t.base_name]
+    key = tm._wrapped_key(t.base_name, ctx)
+    if key is not None:
+        return ctx.wrapped[key]
     return None
 
 

@@ -8,6 +8,7 @@ cannot cross the FFI boundary maps to None and the owning method is skipped.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .model import ClassKind, OCCTType
@@ -108,6 +109,50 @@ def stream_kind(t: OCCTType) -> str | None:
         return "in"
     if b.startswith("std::basic_stringstream") or b == "std::stringstream":
         return "ss"
+    return None
+
+
+_TEMPLATE_RE = re.compile(r"^([A-Za-z_]\w*)\s*<(.*)>$", re.S)
+
+
+def _split_template_args(argstr: str) -> list[str]:
+    """Split top-level template arguments, honouring nested angle brackets."""
+    args: list[str] = []
+    depth, start = 0, 0
+    for i, ch in enumerate(argstr):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append(argstr[start:i].strip())
+            start = i + 1
+    args.append(argstr[start:].strip())
+    return args
+
+
+def _wrapped_key(base_name: str, ctx: TypeContext) -> str | None:
+    """OCCT name in `ctx.wrapped` matching `base_name`.
+
+    Exact match first; otherwise OCCT signatures often spell out defaulted
+    trailing template parameters (e.g. ``NCollection_DataMap<K,V,H>`` against
+    the wrapped ``NCollection_DataMap<K,V>``), so fall back to the wrapped
+    specialization whose arguments form a strict prefix of the spelled ones.
+    """
+    if base_name in ctx.wrapped:
+        return base_name
+    m = _TEMPLATE_RE.match(base_name)
+    if not m:
+        return None
+    tname = m.group(1)
+    args = _split_template_args(m.group(2))
+    for key in ctx.wrapped:
+        km = _TEMPLATE_RE.match(key)
+        if not km or km.group(1) != tname:
+            continue
+        kargs = _split_template_args(km.group(2))
+        if len(kargs) < len(args) and kargs == args[: len(kargs)]:
+            return key
     return None
 
 
@@ -247,8 +292,9 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
         w = ctx.wrapped[t.handle_inner]
         return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
                          call_expr=_rw(move, f"{name}->_handle"))
-    if t.base_name in ctx.wrapped:
-        w = ctx.wrapped[t.base_name]
+    key = _wrapped_key(t.base_name, ctx)
+    if key is not None:
+        w = ctx.wrapped[key]
         if w in ctx.handles:
             call = f"*{name}->_handle"
         elif w in ctx.unique_ptr:
@@ -291,20 +337,22 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
         return ParamConv(cpp_type=f"Ref<{ctx.wrapped[t.handle_inner]}>",
                          gd_type="OBJECT", name=name,
                          call_expr=f"&{name}->_handle")
-    if b in ctx.wrapped:
-        # Raw T* to a wrapped class: pass the wrapper's native storage address
-        # (null GDScript refs pass nullptr).  Mutations through the pointer are
-        # visible on the caller's object, matching OCCT in/out semantics.
-        w = ctx.wrapped[b]
-        if w in ctx.handles:
-            call = f"{name}->_handle.get()"
-        elif w in ctx.unique_ptr:
-            call = f"{name}->_native.get()"
-        else:
-            native = "_native_ref()" if w in ctx.inherited_value else "_native"
-            call = f"&{name}->{native}"
-        return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
-                         call_expr=call)
+    if b in ctx.wrapped or _TEMPLATE_RE.match(b):
+        key = _wrapped_key(b, ctx)
+        if key is not None:
+            # Raw T* to a wrapped class: pass the wrapper's native storage address
+            # (null GDScript refs pass nullptr).  Mutations through the pointer are
+            # visible on the caller's object, matching OCCT in/out semantics.
+            w = ctx.wrapped[key]
+            if w in ctx.handles:
+                call = f"{name}->_handle.get()"
+            elif w in ctx.unique_ptr:
+                call = f"{name}->_native.get()"
+            else:
+                native = "_native_ref()" if w in ctx.inherited_value else "_native"
+                call = f"&{name}->{native}"
+            return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
+                             call_expr=call)
     return None
 
 
@@ -358,9 +406,10 @@ def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False) -> RetC
                 "        wrapper->_handle = result;" + sync + "\n"
                 "        return wrapper;")
         return RetConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", body=body)
-    if t.base_name in ctx.wrapped:
-        w = ctx.wrapped[t.base_name]
-        if t.base_name in ctx.noncopyable:
+    key = _wrapped_key(t.base_name, ctx)
+    if key is not None:
+        w = ctx.wrapped[key]
+        if key in ctx.noncopyable:
             # The value type cannot be copied/assigned (e.g. holds a
             # std::unique_ptr member); a reference to a callee-owned object
             # cannot be transferred safely, and by-value returns cannot be
@@ -377,7 +426,7 @@ def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False) -> RetC
             body = (decl + " = {call};\n"
                     "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
                     "        wrapper->_native = std::make_unique<" +
-                    _occt_qual(t.base_name) + ">(result);\n"
+                    _occt_qual(key) + ">(result);\n"
                     "        return wrapper;")
         else:
             decl = "auto& result" if t.is_ref else "auto result"
