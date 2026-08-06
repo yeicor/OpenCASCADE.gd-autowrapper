@@ -463,6 +463,7 @@ def _extract_class(cursor: Cursor, header: str,
     cls = ClassDecl(
         name=name, base_classes=_base_names(cursor),
         is_transient_descendant=_is_transient(cursor, defs, tu_root),
+        is_template=cursor.kind == CursorKind.CLASS_TEMPLATE,
         header_file=header, doc=_doc(cursor),
     )
     source = ""
@@ -478,8 +479,6 @@ def _extract_class(cursor: Cursor, header: str,
 
     for child in cursor.get_children():
         kind = child.kind
-        if kind == CursorKind.CLASS_TEMPLATE or kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
-            cls.is_template = True
         if kind == CursorKind.DESTRUCTOR:
             if child.access_specifier != AccessSpecifier.PUBLIC:
                 cls.has_protected_dtor = True

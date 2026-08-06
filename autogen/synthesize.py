@@ -157,6 +157,7 @@ SYNTHESIZABLE_TEMPLATES: dict[str, str] = {
     "NCollection_DataMap": "NCollection_DataMap.hxx",
     "NCollection_HArray1": "NCollection_HArray1.hxx",
     "NCollection_HArray2": "NCollection_HArray2.hxx",
+    "NCollection_HSequence": "NCollection_HSequence.hxx",
     "NCollection_Set": "NCollection_Set.hxx",
 }
 

@@ -153,6 +153,13 @@ def _default_constructible(cls: ClassDecl) -> bool:
 def _cg(cls: ClassDecl, ctx: tm.TypeContext) -> CgClass:
     base_occt = next((b for b in cls.base_classes if b in ctx.wrapped), None)
     if cls.kind == ClassKind.REF_COUNTED:
+        # Only a Transient base shares the handle storage; a value-class base
+        # (e.g. NCollection_HArray1<double> derives NCollection_Array1<double>)
+        # is value-stored in its own wrapper, so picking it would emit a
+        # _sync_base_storage() into a member that does not exist.
+        base_occt = next((b for b in cls.base_classes
+                          if b in ctx.wrapped and ctx.wrapped[b] in ctx.handles),
+                         None)
         wrapper_base = ctx.wrapped.get(base_occt) if base_occt else None
         return CgClass(cls=cls, wrapper_base=wrapper_base,
                        base_occt=base_occt, storage="handle",
@@ -774,15 +781,15 @@ def _field_accessor_bodies(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
     cg = _cg(cls, ctx)
     if cg.storage == "handle":
         target = "(*_handle)"
-        get_guard = "ERR_FAIL_COND_V(!_handle, {dflt});"
+        get_guard_tmpl = "ERR_FAIL_COND_V(!_handle, {dflt});"
         set_guard = "ERR_FAIL_COND(!_handle);"
     elif cg.storage == "unique_ptr":
         target = "(*_native)"
-        get_guard = "ERR_FAIL_NULL_V(_native, {dflt});"
+        get_guard_tmpl = "ERR_FAIL_NULL_V(_native, {dflt});"
         set_guard = "ERR_FAIL_NULL(_native);"
     else:
         target = "_native_ref()" if cg.inherited_native else "_native"
-        get_guard, set_guard = None, None
+        get_guard_tmpl, set_guard = None, None
     for f in cls.fields:
         if not f.is_public:
             continue
@@ -792,9 +799,9 @@ def _field_accessor_bodies(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
         if gret is None or gret.cpp_type == "void":
             continue
         get_body = gret.body.replace("{call}", f"{target}.{f.name}")
-        if get_guard is not None:
-            get_guard = get_guard.format(dflt=tm.default_value(gret.cpp_type))
-            get_body = f"    {get_guard}\n    {get_body}"
+        if get_guard_tmpl is not None:
+            guard = get_guard_tmpl.format(dflt=tm.default_value(gret.cpp_type))
+            get_body = f"    {guard}\n    {get_body}"
         out.append(f"""{gret.cpp_type} {cls.wrapper_name}::_ocg_field_get_{snake}() const {{
 {get_body}
 }}""")

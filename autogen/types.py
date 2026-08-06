@@ -18,9 +18,30 @@ from .model import OCCTType
 if TYPE_CHECKING:
     from clang.cindex import Type
 
-_HANDLE_RE = re.compile(
-    r"^(?:(?:occ|opencascade)::handle)\s*<\s*([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\s*>"
-)
+_HANDLE_PREFIX_RE = re.compile(r"^(?:(?:occ|opencascade)::handle)\s*<")
+
+
+def _handle_inner(s: str) -> str | None:
+    """Return the inner type of a ``occ::handle<...>`` spelling, or None.
+
+    Handles may wrap template specializations (``occ::handle<HArray1<double>>``
+    or nested ``occ::handle<HArray2<occ::handle<Geom_Surface>>>``), so the
+    closing ``>`` is found by angle-depth counting rather than a flat regex.
+    """
+    if _HANDLE_PREFIX_RE.match(s) is None:
+        return None
+    start = _HANDLE_PREFIX_RE.match(s).end()
+    depth = 0
+    for i in range(start, len(s)):
+        ch = s[i]
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            if depth == 0:
+                inner = s[start:i].strip()
+                return inner or None
+            depth -= 1
+    return None
 
 _BUILTIN_KINDS = frozenset({
     TypeKind.BOOL, TypeKind.CHAR_S, TypeKind.CHAR_U, TypeKind.UCHAR,
@@ -116,9 +137,9 @@ def make_type(cursor_type: "Type") -> OCCTType:
         core = core.rstrip("&").rstrip()
 
     # Handle: top-level canonical spelling `occ::handle<T>` / `opencascade::handle<T>`.
-    m = _HANDLE_RE.match(core)
-    is_handle = m is not None
-    handle_inner = m.group(1) if m else ""
+    inner = _handle_inner(core)
+    is_handle = inner is not None
+    handle_inner = inner if inner else ""
 
     if is_handle:
         base_name = handle_inner
