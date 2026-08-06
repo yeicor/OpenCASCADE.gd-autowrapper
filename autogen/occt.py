@@ -180,6 +180,9 @@ def _read_version(include_dir: Path) -> str:
 def find_occt_install(project_root: Path | None = None) -> OCCTInstall:
     """Locate the OCCT include dir, preferring the project's vcpkg install.
 
+    Only the project's own vcpkg install (or `OCCT_INCLUDE_DIR`) is ever
+    used; system OCCT installs under /usr are intentionally ignored.
+
     Honors the `VCPKG_DEFAULT_TRIPLET` env var (used by CI) and
     `OCCT_INCLUDE_DIR` for an explicit override.
     """
@@ -191,14 +194,13 @@ def find_occt_install(project_root: Path | None = None) -> OCCTInstall:
         triplet = os.environ.get("VCPKG_DEFAULT_TRIPLET", "x64-linux")
         candidates.append(
             (project_root / "vcpkg" / "installed" / triplet / "include" / "opencascade", "vcpkg"))
-    candidates.append((Path("/usr/include/opencascade"), "system"))
-    candidates.append((Path("/usr/local/include/opencascade"), "system"))
     for include_dir, source in candidates:
         if (include_dir / "Standard_Version.hxx").exists():
             return OCCTInstall(include_dir=include_dir, source=source,
                                version=_read_version(include_dir))
     raise FileNotFoundError(
-        "No OCCT install found; set OCCT_INCLUDE_DIR or install via vcpkg.")
+        "No OCCT install found; set OCCT_INCLUDE_DIR or install via vcpkg "
+        f"(checked: {[str(d) for d, _ in candidates] or 'none'}).")
 
 _install: OCCTInstall | None = None
 

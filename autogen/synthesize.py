@@ -20,12 +20,121 @@ from clang.cindex import CursorKind
 
 from .compile_db import ensure_occt_args, find_resource_dir
 from .extract import _extract_class
+from .model import ModuleDecl, occt_name_to_wrapper
 from .occt import find_occt_install
 from .parser import parse_header
 from .types import make_type
 
 # autogen/ -> autowrapper/ -> project root.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+# Class templates that the pipeline can synthesize, by template name.  The
+# header filename is the template's own header; argument headers are derived
+# from the specialization (see _collect_includes).
+SYNTHESIZABLE_TEMPLATES: dict[str, str] = {
+    "NCollection_Array1": "NCollection_Array1.hxx",
+    "NCollection_Array2": "NCollection_Array2.hxx",
+    "NCollection_Vec2": "NCollection_Vec2.hxx",
+    "NCollection_Vec3": "NCollection_Vec3.hxx",
+    "NCollection_Sequence": "NCollection_Sequence.hxx",
+    "NCollection_List": "NCollection_List.hxx",
+    "NCollection_Map": "NCollection_Map.hxx",
+    "NCollection_IndexedMap": "NCollection_IndexedMap.hxx",
+    "NCollection_IndexedDataMap": "NCollection_IndexedDataMap.hxx",
+    "NCollection_DataMap": "NCollection_DataMap.hxx",
+    "NCollection_HArray1": "NCollection_HArray1.hxx",
+    "NCollection_HArray2": "NCollection_HArray2.hxx",
+    "NCollection_Set": "NCollection_Set.hxx",
+}
+
+_SPEC_RE = re.compile(r"^([A-Za-z_]\w*)<(.*)>$")
+
+_OCG_RE = re.compile(r"\bOcg[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _collect_template_specs(modules: list[ModuleDecl]) -> dict[str, tuple[str, list[str]]]:
+    """Distinct class-template specializations used in OCCT signatures.
+
+    Returns ``{ "NCollection_Array2<gp_Pnt>": (header, [args...]) }`` for every
+    specialization of a synthesizable template that appears in any method,
+    constructor, static method, operator or field of the scanned IR.
+    """
+    specs: dict[str, tuple[str, list[str]]] = {}
+
+    def handle(t) -> None:
+        if t is None:
+            return
+        b = getattr(t, "base_name", "")
+        m = _SPEC_RE.match(b)
+        if not m:
+            return
+        tname, argstr = m.group(1), m.group(2)
+        header = SYNTHESIZABLE_TEMPLATES.get(tname)
+        if header is None:
+            return
+        args = _split_args(argstr)
+        if not args:
+            return
+        key = f"{tname}<{', '.join(args)}>"
+        specs.setdefault(key, (header, args))
+
+    for module in modules:
+        for cls in module.classes:
+            for m in cls.all_methods:
+                handle(m.return_type)
+                for p in m.parameters:
+                    handle(p.type)
+            for f in cls.fields:
+                handle(f.type)
+    return specs
+
+
+def _collect_demo_refs(project_root: Path) -> set[str]:
+    """Wrapper names referenced by the demo project's GDScript sources."""
+    out: set[str] = set()
+    demo = Path(project_root) / "demo"
+    if not demo.is_dir():
+        return out
+    for p in demo.rglob("*.gd*"):
+        if p.suffix not in (".gd", ".gd.disabled"):
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out.update(_OCG_RE.findall(text))
+    return out
+
+
+def synthesize_used(project_root: Path,
+                    modules: list[ModuleDecl]) -> list[object]:
+    """Synthesize the class-template specializations the demo code uses.
+
+    Usage-driven: only specializations whose wrapper name appears in the demo
+    GDScript sources (and that occur in the scanned OCCT IR) are synthesized,
+    keeping the generated surface small and deterministic.
+    """
+    demo_refs = _collect_demo_refs(project_root)
+    if not demo_refs:
+        return []
+    specs = _collect_template_specs(modules)
+    if not specs:
+        return []
+    install = find_occt_install(_default_project_root())
+    out: list[object] = []
+    for key, (header, args) in sorted(specs.items()):
+        tname = key.split("<", 1)[0]
+        if occt_name_to_wrapper(key, "NCollection") not in demo_refs:
+            continue
+        try:
+            cls = synth_template_spec(header, tname, args, install=install)
+            cls.name = key  # exact spelling used in signatures
+            out.append(cls)
+        except Exception as e:  # noqa: BLE001
+            print(f"synthesize    : SKIP {key}: {e}", file=__import__("sys").stderr)
+    return out
+
 
 
 def _default_project_root() -> Path:
@@ -67,7 +176,11 @@ def _split_args(argstr: str) -> list[str]:
 
 _BUILTINS = {"void", "bool", "char", "short", "int", "long", "float", "double",
              "unsigned", "signed", "size_t", "char16_t", "char32_t", "wchar_t",
-             "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t"}
+             "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t",
+             "unsigned char", "signed char", "unsigned short", "signed short",
+             "unsigned int", "signed int", "unsigned long", "signed long",
+             "unsigned long long", "signed long long", "long double",
+             "long long", "unsigned long long"}
 
 
 def _collect_includes(args_list: list[str]) -> list[str]:
@@ -252,8 +365,20 @@ def synth_template_spec(header_name: str, template_name: str,
     template_spec = f"{template_name}<{', '.join(args_list)}>"
 
     cls = _extract_class(ct, header_name)
-    cls.name = template_name  # keep base name; wrapper naming handles args
+    # Full specialization spelling (e.g. "NCollection_Array2<gp_Pnt>") is the
+    # class name: it is exactly the spelling the scanner reports for template
+    # arguments in other classes' signatures, so build_context registers the
+    # specialization -> wrapper mapping and `native` storage emits the full
+    # type in the generated header.  Wrapper naming derives Ocg-prefixed names
+    # from it via occt_name_to_wrapper.
+    cls.name = template_spec
     cls.base_classes = [_substitute(b, subst) for b in cls.base_classes]
+    # The generated header spells `_native` as the full specialization, so the
+    # template argument headers must be available even though no individual
+    # method signature mentions them (e.g. TopTools_ShapeMapHasher.hxx for
+    # NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>).
+    cls.extra_occt_includes = [i for i in _collect_includes(args_list)
+                               if i != header_name]
 
     to_resolve: dict[str, str] = {}  # substituted spelling -> substituted spelling
 

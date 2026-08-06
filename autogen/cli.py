@@ -132,6 +132,22 @@ def cmd_generate_all(args: argparse.Namespace) -> int:
     modules = [load_module(Path(p)) for p in args.irs]
     for module in modules:
         classify_module(module)
+    # Usage-driven class-template specialization synthesis: any specialization
+    # the demo GDScript references (and that appears in the scanned IR) becomes
+    # a regular wrapper class.  This is what re-enables NCollection_Array2<gp_Pnt>
+    # & co. so OCCT APIs like GeomAPI_PointsToBSplineSurface::Init can bind.
+    try:
+        from .model import ModuleDecl
+        from .synthesize import synthesize_used
+        synthesized = synthesize_used(PROJECT_ROOT, modules)
+        if synthesized:
+            synth_mod = ModuleDecl(name="NCollection", classes=synthesized)
+            classify_module(synth_mod)
+            modules.append(synth_mod)
+            print(f"synth          : {len(synthesized)} specialization(s): "
+                  + ", ".join(c.wrapper_name for c in synthesized))
+    except Exception as e:  # noqa: BLE001
+        print(f"synth          : skipped ({e})", file=sys.stderr)
     missing = set()
     if args.missing:
         from .audit import load_missing

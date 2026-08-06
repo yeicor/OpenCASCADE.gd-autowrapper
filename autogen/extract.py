@@ -477,6 +477,9 @@ class HeaderResult:
     classes: list[ClassDecl] = field(default_factory=list)
     enums: list[EnumDecl] = field(default_factory=list)
     typedefs: list[tuple[str, str]] = field(default_factory=list)
+    # OCCT headers that had to be pre-included for this header to parse at all
+    # (closure + retry fixes); wrappers of its classes must include them too.
+    extra_includes: list[str] = field(default_factory=list)
 
 
 def extract_header(header: Path, tu: TranslationUnit) -> HeaderResult:

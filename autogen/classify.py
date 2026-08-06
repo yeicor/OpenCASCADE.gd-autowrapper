@@ -99,7 +99,11 @@ def _skip_reason(cls: ClassDecl, by_name: dict[str, ClassDecl]) -> str:
         # needs the global operator new/delete; OCCT collection nodes instead
         # declare placement new/delete (DEFINE_NCOLLECTION_ALLOC) that hide it,
         # and some classes inherit it protectedly so it becomes inaccessible.
-        elif not cls.has_public_default_ctor and _has_custom_alloc(cls, by_name, set()):
+        # A class that declares no constructors at all is implicitly
+        # default-constructible, so its implicit (public) default ctor counts
+        # (mirrors _default_constructible in codegen.py).
+        elif (not cls.has_public_default_ctor and cls.has_any_ctor
+              and _has_custom_alloc(cls, by_name, set())):
             return "custom allocation (operator new/delete)"
     for base in cls.base_classes:
         if base.startswith("Standard_") and any(

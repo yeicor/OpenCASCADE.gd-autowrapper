@@ -6,6 +6,7 @@ hash suffixes, stream absorption, guard macros, field accessors, enums).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -209,8 +210,16 @@ def _uses_streams(cls: ClassDecl) -> bool:
 # ---------------------------------------------------------------------------
 
 def _type_occt_header(t: OCCTType, ctx: tm.TypeContext) -> str | None:
+    _spec_re = re.compile(r"^([A-Za-z_]\w*)<")
+
     def header_of(name: str) -> str:
-        return ctx.occt_headers.get(name, f"{name}.hxx")
+        if name in ctx.occt_headers:
+            return ctx.occt_headers[name]
+        m = _spec_re.match(name)
+        if m:
+            return f"{m.group(1)}.hxx"
+        return f"{name}.hxx"
+
     if t.is_handle and t.handle_inner in ctx.wrapped:
         return f"<{header_of(t.handle_inner)}>"
     if t.base_name in ctx.wrapped:
@@ -376,9 +385,15 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     out.append("")
     refs = _referenced_headers(cls, ctx)
     own = f"<{Path(cls.header_file).name}>" if cls.header_file else None
-    if own in refs:
+    # The class's own header is not self-contained: the scan needed these
+    # pre-includes before it would parse, so the wrapper must include them
+    # *before* the class header (extra_occt_includes), then the referenced
+    # headers.  Dedupe them out of `refs` so they are not emitted again after.
+    extras = [f"<{e}>" for e in cls.extra_occt_includes if e and f"<{e}>" != own]
+    refs = [h for h in refs if h not in extras]
+    if own:
         refs = [own] + [h for h in refs if h != own]
-    for h in refs:
+    for h in extras + refs:
         out.append(f"#include {h}")
     if cg.wrapper_base:
         out.append(f'#include "{cg.wrapper_base}.hpp"')
@@ -667,6 +682,12 @@ def _sync_body(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         return ""
     lines = [f"    {cg.wrapper_base}::_handle = opencascade::handle<::{cg.base_occt}>"
              f"(static_cast<::{cg.base_occt}*>(_handle.get()));"]
+    # Propagate up the whole inheritance chain: the direct base's own
+    # _sync_base_storage() copies its (just-set) handle to the next level, so a
+    # method taking e.g. Ref<OcgGeomSurface> sees a valid handle even when the
+    # concrete wrapper is OcgGeomBSplineSurface (two levels below).
+    if cg.wrapper_base in ctx.sync_bases:
+        lines.append(f"    {cg.wrapper_base}::_sync_base_storage();")
     return "\n".join(lines)
 
 

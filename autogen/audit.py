@@ -132,6 +132,9 @@ def probe_headers(classes, ctx: tm.TypeContext, install: OCCTInstall) -> list[Pa
     for cls in classes:
         if cls.header_file:
             names.add(Path(cls.header_file).name)
+        for e in cls.extra_occt_includes:
+            if e and (install.include_dir / e).exists():
+                names.add(e)
         for base in cls.base_classes:
             if base in ctx.occt_classes:
                 names.add(ctx.occt_headers.get(base, base + ".hxx"))
@@ -223,8 +226,6 @@ def _occt_lib_dir(project_root: Path | None, install: OCCTInstall) -> Path | Non
     if project_root is not None:
         candidates.append(project_root / "vcpkg" / "installed" / triplet / "lib")
     candidates.append(install.include_dir.parent.parent / "lib")
-    candidates += [Path("/usr/lib/x86_64-linux-gnu"), Path("/usr/local/lib"),
-                   Path("/usr/lib")]
     for d in candidates:
         if d.is_dir() and list(d.glob("libTKMath.*")):
             return d

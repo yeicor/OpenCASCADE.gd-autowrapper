@@ -109,11 +109,37 @@ def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:
     The fallback (no compile_commands.json, e.g. fresh CI checkouts) already
     carries the defines OCCT headers branch on, so only the include path and
     language standard need to be pinned here.
+
+    `-isystem` and its path must be separate argv entries: clang treats the
+    combined string `"-isystem /path"` as an unknown option, which silently
+    disables the OCCT include path (quoted `#include "x.hxx"` still resolved
+    via the parse-file directory, masking the breakage).  Combined-form
+    entries coming from a compile_commands.json are normalized to pairs here.
     """
-    out = list(args)
+    out: list[str] = []
+    for a in args:
+        if a.startswith("-isystem ") and not a.startswith("-isystem="):
+            out += ["-isystem", a[len("-isystem "):]]
+        else:
+            out.append(a)
     if not any(a.startswith("-std=") for a in out):
         out.append("-std=gnu++17")
     target = str(include_dir)
-    if not any(a.endswith(target) for a in out):
-        out.append(f"-isystem {target}")
+    has_occt = False
+    prev = None
+    for a in out:
+        if a == "-isystem":
+            prev = "-isystem"
+        elif prev == "-isystem":
+            if a.endswith(target):
+                has_occt = True
+            prev = None
+        elif a.startswith("-isystem="):
+            if a[len("-isystem="):].endswith(target):
+                has_occt = True
+    if not has_occt:
+        out += ["-isystem", target]
+    rd = find_resource_dir()
+    if rd and not any(a.startswith("-resource-dir") for a in out):
+        out.append(f"-resource-dir={rd}")
     return out

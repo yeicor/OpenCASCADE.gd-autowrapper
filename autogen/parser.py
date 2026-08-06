@@ -15,7 +15,9 @@ from clang.cindex import Diagnostic, Index, TranslationUnit
 
 
 class ParseError(RuntimeError):
-    pass
+    def __init__(self, message: str, loc_file: str | None = None):
+        super().__init__(message)
+        self.loc_file = loc_file
 
 
 def parse_header(header_path: Path, args: list[str],
@@ -30,34 +32,22 @@ def parse_header(header_path: Path, args: list[str],
     pre_lines = "".join(f"#include <{h}>\n" for h in (pre_headers or []))
     index = Index.create()
 
-    if header_dir.startswith("/usr/"):
-        tmp_dir = tempfile.mkdtemp(prefix="_aw_parse_")
+    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w", delete=False,
+                                     dir=header_dir, prefix="_aw_parse_") as f:
+        f.write(pre_lines + f'#include "{header_name}"\n')
+        tmp_path = f.name
+    try:
+        tu = index.parse(tmp_path, args=args + ["-x", "c++"])
+    finally:
         try:
-            tmp_path = os.path.join(tmp_dir, "_aw_parse.cpp")
-            with open(tmp_path, "w") as f:
-                f.write(pre_lines + f"#include <{header_name}>\n")
-            tu = index.parse(tmp_path, args=args + ["-x", "c++", "-I", header_dir])
-        finally:
-            try:
-                os.unlink(tmp_path)
-                os.rmdir(tmp_dir)
-            except OSError:
-                pass
-    else:
-        with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w", delete=False,
-                                         dir=header_dir, prefix="_aw_parse_") as f:
-            f.write(pre_lines + f'#include "{header_name}"\n')
-            tmp_path = f.name
-        try:
-            tu = index.parse(tmp_path, args=args + ["-x", "c++"])
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
     hard = [d for d in tu.diagnostics if d.severity >= Diagnostic.Error]
     if hard:
+        loc = hard[0].location
         raise ParseError(
-            f"{header_name}: {len(hard)} parse errors; first: {hard[0].spelling}")
+            f"{header_name}: {len(hard)} parse errors; first: {hard[0].spelling}",
+            loc_file=loc.file.name if loc.file else None)
     return tu
