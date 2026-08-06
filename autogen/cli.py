@@ -128,26 +128,60 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_generate_all(args: argparse.Namespace) -> int:
-    modules = [load_module(Path(p)) for p in args.irs]
-    for module in modules:
-        classify_module(module)
-    # Usage-driven class-template specialization synthesis: any specialization
-    # the demo GDScript references (and that appears in the scanned IR) becomes
-    # a regular wrapper class.  This is what re-enables NCollection_Array2<gp_Pnt>
-    # & co. so OCCT APIs like GeomAPI_PointsToBSplineSurface::Init can bind.
+def _load_or_synthesize(modules, cache: Path | None):
+    """Return the synthesized NCollection specialization classes.
+
+    If `cache` exists, load them from it (fast, deterministic); otherwise run
+    the API-driven synthesis and write the cache so later runs skip the
+    ~8-minute libclang instantiation pass.
+    """
+    from .model import ModuleDecl
+    if cache and cache.exists():
+        from .ir import load_module
+        synth = load_module(cache)
+        if synth.name == "NCollection" and synth.classes:
+            print(f"synth          : loaded {len(synth.classes)}"
+                  f" specialization(s) from {cache}")
+            return synth.classes, True
     try:
-        from .model import ModuleDecl
-        from .synthesize import synthesize_used
-        synthesized = synthesize_used(PROJECT_ROOT, modules)
-        if synthesized:
-            synth_mod = ModuleDecl(name="NCollection", classes=synthesized)
-            classify_module(synth_mod)
-            modules.append(synth_mod)
-            print(f"synth          : {len(synthesized)} specialization(s): "
-                  + ", ".join(c.wrapper_name for c in synthesized))
+        from .synthesize import synthesize_all
+        classes = synthesize_all(modules)
+        if cache:
+            from .ir import dump_module
+            from .synthesize import SYNTHESIZABLE_TEMPLATES
+            synth_mod = ModuleDecl(name="NCollection", classes=classes)
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(
+                dump_module(synth_mod), indent=1, default=_json_default))
+            print(f"synth          : wrote {len(classes)}"
+                  f" specialization(s) to {cache}")
+        return classes, False
     except Exception as e:  # noqa: BLE001
         print(f"synth          : skipped ({e})", file=sys.stderr)
+        return [], False
+
+
+def cmd_generate_all(args: argparse.Namespace) -> int:
+    modules = [load_module(Path(p)) for p in args.irs]
+    # Cross-module class map: exception detection and custom-allocation probing
+    # follow base classes that live in other modules.
+    global_by_name = {cls.name: cls for m in modules for cls in m.classes}
+    for module in modules:
+        classify_module(module, global_by_name)
+    # API-driven class-template specialization synthesis: every specialization
+    # of a synthesizable template that appears in any scanned signature becomes
+    # a regular wrapper class (not just the ones the demo references).  This
+    # is what re-enables NCollection_Array2<gp_Pnt> & co. so OCCT APIs like
+    # GeomAPI_PointsToBSplineSurface::Init can bind.
+    synthesized, _ = _load_or_synthesize(modules, args.synth_cache)
+    if synthesized:
+        from .model import ModuleDecl
+        synth_mod = ModuleDecl(name="NCollection", classes=synthesized)
+        classify_module(synth_mod, global_by_name)
+        modules.append(synth_mod)
+        print(f"synth          : {len(synthesized)} specialization(s): "
+              + ", ".join(c.wrapper_name for c in synthesized[:8])
+              + (" ..." if len(synthesized) > 8 else ""))
     missing = set()
     if args.missing:
         from .audit import load_missing
@@ -189,6 +223,82 @@ def cmd_synth_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_coverage(args: argparse.Namespace) -> int:
+    from .coverage import compute_all, format_module_detail, format_table
+
+    ir_dir = Path(args.ir_dir)
+    missing: set[str] = set()
+    if args.missing and Path(args.missing).exists():
+        from .audit import load_missing
+        missing = load_missing(Path(args.missing))
+    modules = [load_module(p) for p in sorted(ir_dir.glob("*.json"))]
+    table, entries, meta = compute_all(
+        modules, missing=missing,
+        synthesized=_load_or_synthesize(modules, args.synth_cache)[0])
+    print(format_table(table, module_filter=args.module))
+    print()
+    if args.module:
+        for cov in table:
+            if cov.name == args.module:
+                print(format_module_detail(cov))
+                print()
+    else:
+        print(f"TOTAL          : {meta['classes_wrapped']}/{meta['classes_total']} classes, "
+              f"{meta['methods_wrapped']}/{meta['methods_total']} methods, "
+              f"{meta['enums_total']} enums")
+        if meta["synthesis_failures"]:
+            print(f"synth-fail     : {len(meta['synthesis_failures'])}"
+                  f" specialization(s) failed to synthesize")
+            for f in meta["synthesis_failures"][:5]:
+                print(f"  - {f[:120]}")
+    if meta["unclassified_reasons"]:
+        print("UNCLASSIFIED   : skip reasons missing from autogen/policy.py:")
+        for reason, targets in sorted(meta["unclassified_reasons"].items()):
+            print(f"  {reason} ({len(targets)}):")
+            for t in targets[:5]:
+                print(f"    - {t}")
+        if args.check:
+            print("coverage-check : FAIL (unclassified skip reasons)")
+            return 1
+    if args.check:
+        from .policy import classify_reason
+        unaccepted = [e for e in entries
+                      if e.status != "accepted"]
+        print(f"coverage-check : {len(entries)} skips, "
+              f"{len(entries) - len(unaccepted)} accepted, "
+              f"{len(unaccepted)} gap/unclassified")
+        if unaccepted:
+            print("  remaining gaps (first 25):")
+            for e in unaccepted[:25]:
+                print(f"    {e.module}:{e.where or e.target} [{e.reason}]")
+            return 1
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        # dataclasses.asdict() corrupts Counter fields (it rebuilds them with
+        # (key, value) pairs as keys), so serialise rows manually.
+        rows = [{
+            "name": c.name,
+            "classes_total": c.classes_total,
+            "classes_wrapped": c.classes_wrapped,
+            "classes_skipped": c.classes_skipped,
+            "methods_total": c.methods_total,
+            "methods_wrapped": c.methods_wrapped,
+            "methods_skipped": c.methods_skipped,
+            "enums_total": c.enums_total,
+            "enum_values": c.enum_values,
+            "class_skip_reasons": dict(c.class_skip_reasons),
+            "method_skip_reasons": dict(c.method_skip_reasons),
+        } for c in table]
+        out.write_text(json.dumps({
+            "meta": meta,
+            "modules": rows,
+            "skips": [__import__("dataclasses").asdict(e) for e in entries],
+        }, indent=1, default=_json_default))
+        print(f"wrote          : {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="autogen")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -223,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="also write a symbol-audit probe TU to this path")
     p_all.add_argument("--missing", type=Path, default=None,
                        help="skip methods whose link symbols are in this file")
+    p_all.add_argument("--synth-cache", type=Path, default=None,
+                       help="reuse/cache synthesized specializations (fast reruns)")
     p_all.set_defaults(func=cmd_generate_all)
 
     p_audit = sub.add_parser(
@@ -245,6 +357,23 @@ def main(argv: list[str] | None = None) -> int:
     p_synth.add_argument("--quiet", action="store_true",
                          help="only print pass/fail counts")
     p_synth.set_defaults(func=cmd_synth_check)
+
+    p_cov = sub.add_parser(
+        "coverage", help="per-module wrapped/skipped report (skip-registry gate)")
+    p_cov.add_argument("--ir-dir", type=Path,
+                       default=SUBMODULE_DIR / "out" / "ir")
+    p_cov.add_argument("--missing", type=Path,
+                       default=SUBMODULE_DIR / "out" / "audit" / "missing.txt")
+    p_cov.add_argument("--module", type=str, default=None,
+                       help="focus the report on one OCCT module")
+    p_cov.add_argument("--out", type=Path,
+                       default=SUBMODULE_DIR / "out" / "coverage.json")
+    p_cov.add_argument("--check", action="store_true",
+                       help="exit 1 while any skip is a gap or unclassified")
+    p_cov.add_argument("--synth-cache", type=Path,
+                       default=SUBMODULE_DIR / "out" / "audit" / "synth_cache.json",
+                       help="reuse/cache synthesized specializations")
+    p_cov.set_defaults(func=cmd_coverage)
 
     args = parser.parse_args(argv)
     return args.func(args)

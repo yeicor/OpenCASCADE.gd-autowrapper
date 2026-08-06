@@ -158,6 +158,14 @@ def _cg(cls: ClassDecl, ctx: tm.TypeContext) -> CgClass:
                        base_occt=base_occt, storage="handle",
                        has_sync=wrapper_base is not None,
                        is_aggregate=cls.name == ctx.module_name)
+    if cls.kind == ClassKind.EXCEPTION:
+        # Standard_Failure hierarchy: wrapped as a diagnostics-only class chain.
+        # No native storage (exceptions never cross the FFI); instance methods
+        # read the thread-local last-error state recorded by OCCT_GUARD_CATCH.
+        return CgClass(cls=cls,
+                       wrapper_base=ctx.wrapped.get(base_occt) if base_occt else None,
+                       base_occt=base_occt, storage="none",
+                       is_aggregate=cls.name == ctx.module_name)
     storage = "native" if _default_constructible(cls) else "unique_ptr"
     # Pure-static utility classes (e.g. BRep_Tool) hold no native object: their
     # ctors are non-public so storage (and its new/delete requirements) is
@@ -351,8 +359,50 @@ def _field_setter_param(sconv: tm.ParamConv) -> str:
     return f"{sconv.cpp_type} {sconv.name}"
 
 
+def _exception_method_kind(cls: ClassDecl, method: MethodDecl) -> str | None:
+    """Diagnostic role of an instance method on an EXCEPTION-kind wrapper.
+
+    Exception wrappers carry no native object; the instance API reads the
+    thread-local last-error state recorded by OCCT_GUARD_CATCH.  Returns one
+    of "message" / "stack" / "type" / "print", or None if the method has no
+    diagnostics mapping (and must be skipped).
+    """
+    if method.kind == MethodKind.STATIC_METHOD:
+        return "static"
+    name = method.name
+    if name in ("what", "GetMessageString"):
+        return "message"
+    if name == "GetStackString":
+        return "stack"
+    if name == "ExceptionType":
+        return "type"
+    if name == "Print" and _has_ostream_param(method):
+        return "print"
+    return None
+
+
+def _exception_method_body(cls: ClassDecl, method: MethodDecl,
+                           kind: str, params: str) -> str:
+    unique = _unique(method)
+    const_suffix = " const" if method.is_const else ""
+    if kind == "message":
+        body = "return ::godot::String(occt_gd::get_last_error_message());"
+    elif kind == "stack":
+        body = "return ::godot::String(occt_gd::get_last_error_stack());"
+    elif kind == "type":
+        body = f'return ::godot::String("{cls.name}");'
+    else:  # print: the message, since exceptions have no native to stream.
+        body = "return ::godot::String(occt_gd::get_last_error_message());"
+    return f"""String {cls.wrapper_name}::{unique}({params}){const_suffix} {{
+    {body}
+}}"""
+
+
 def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
                            ctx: tm.TypeContext) -> str | None:
+    if cls.kind == ClassKind.EXCEPTION \
+            and _exception_method_kind(cls, method) is None:
+        return None
     params = _params_decl(method, ctx)
     if params is None:
         return None
@@ -445,6 +495,12 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     group_overloads(cls)
     emitted = False
     for ctor in cls.constructors:
+        if cls.kind == ClassKind.EXCEPTION:
+            # Exceptions are diagnostics-only: they are produced by caught
+            # OCCT failures, never constructed from GDScript.
+            ctor.skip = True
+            ctor.skip_reason = "exception class constructor (diagnostics-only)"
+            continue
         if _default_ctor(ctor):
             ctor.skip = True
             ctor.skip_reason = "default constructor (native default-construction)"
@@ -532,6 +588,14 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
     params = _params_decl(method, ctx)
     if params is None:
         return None
+    if cls.kind == ClassKind.EXCEPTION:
+        kind = _exception_method_kind(cls, method)
+        if kind is None:
+            return None
+        if kind == "static":
+            pass  # static methods take the normal native-call path
+        else:
+            return _exception_method_body(cls, method, kind, params)
     preludes: list[str] = []
     arg_exprs: list[str] = []
     for p in method.parameters:

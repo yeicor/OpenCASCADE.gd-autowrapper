@@ -27,8 +27,6 @@ _BUILDER_BASES = {"BRepBuilderAPI_MakeShape", "BRepBuilderAPI_Command"}
 _BUILDER_PREFIXES = ("BRepPrimAPI_", "BRepBuilderAPI_", "BRepFilletAPI_",
                      "BRepOffsetAPI_", "BRepFeat_", "BRepAlgoAPI_")
 _EXCEPTION_ROOT = "Standard_Failure"
-_EXCEPTION_BASE_KEYWORDS = ("Failure", "Error", "OutOfRange", "OutOfMemory",
-                            "DomainError", "RangeError")
 
 
 def classify_kind(cls: ClassDecl) -> ClassKind:
@@ -76,11 +74,19 @@ def _has_custom_alloc(cls: ClassDecl, by_name: dict[str, ClassDecl],
 
 
 def _skip_reason(cls: ClassDecl, by_name: dict[str, ClassDecl]) -> str:
-    """Legacy class-level skip rules; "" means the class is wrapped."""
+    """Legacy class-level skip rules; "" means the class is wrapped.
+
+    Exception detection is structural: any class whose base chain reaches
+    Standard_Failure is classified EXCEPTION (wrapped as a diagnostics-only
+    class preserving the hierarchy), checked *before* the constructor/
+    allocation rules so the whole OCCT exception hierarchy is classified
+    uniformly (Standard_Mutex, whose base happens to contain "Error" as a
+    nested type name, is not an exception and stays wrapped).
+    """
+    if cls.kind == ClassKind.EXCEPTION:
+        return ""  # wrapped as a diagnostics-only hierarchy (see codegen)
     if cls.name == cls.module_name:
         return ""  # module aggregate host (e.g. Standard, gp): keep it
-    if cls.name == _EXCEPTION_ROOT:
-        return "root OCCT exception"
     if cls.is_template:
         return "template class"
     if cls.kind != ClassKind.REF_COUNTED:
@@ -106,23 +112,29 @@ def _skip_reason(cls: ClassDecl, by_name: dict[str, ClassDecl]) -> str:
               and _has_custom_alloc(cls, by_name, set())):
             return "custom allocation (operator new/delete)"
     for base in cls.base_classes:
-        if base.startswith("Standard_") and any(
-                kw in base for kw in _EXCEPTION_BASE_KEYWORDS):
-            return "Standard_* exception base"
         if base.startswith("TopoDS_T") and base != "TopoDS_TShape":
             return "internal TopoDS shape implementation"
-    if _is_failure_descendant(cls, by_name, set()):
-        return "derives from Standard_Failure (exception)"
     return ""
 
 
-def classify_module(module: ModuleDecl) -> None:
-    """Set kind/wrapper_name/skip for every class in the module, in-place."""
-    by_name: dict[str, ClassDecl] = {c.name: c for c in module.classes}
+def classify_module(module: ModuleDecl,
+                    global_by_name: dict[str, ClassDecl] | None = None) -> None:
+    """Set kind/wrapper_name/skip for every class in the module, in-place.
+
+    `global_by_name` (name -> ClassDecl across *all* modules) lets exception
+    detection and custom-allocation probing follow base classes that live in
+    other modules (e.g. Geom_UndefinedDerivative -> Standard_DomainError).
+    """
+    by_name: dict[str, ClassDecl] = (
+        global_by_name if global_by_name is not None
+        else {c.name: c for c in module.classes})
 
     for cls in module.classes:
         cls.kind = classify_kind(cls)
         cls.wrapper_name = occt_wrapper_name(cls.name, cls.module_name)
+        if cls.name == _EXCEPTION_ROOT \
+                or _is_failure_descendant(cls, by_name, set()):
+            cls.kind = ClassKind.EXCEPTION
 
     reasons: dict[str, str] = {}
     for cls in module.classes:

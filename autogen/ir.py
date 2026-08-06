@@ -107,3 +107,110 @@ def load_module(path: Path) -> M.ModuleDecl:
         classes=[_class(c) for c in data.get("classes", [])],
         enums=[_enum(e) for e in data.get("enums", [])],
     )
+
+
+def _otype_out(t: M.OCCTType) -> dict:
+    return {k: v for k, v in t.__dict__.items() if v not in ("", [], None)}
+
+
+def _param_out(p: M.Parameter) -> dict:
+    d = {"name": p.name, "type": _otype_out(p.type)}
+    if p.default_value:
+        d["default_value"] = p.default_value
+    return d
+
+
+def _mdecl_out(m: M.MethodDecl) -> dict:
+    d = {
+        "name": m.name,
+        "parameters": [_param_out(p) for p in m.parameters],
+        "kind": m.kind.value,
+        "is_const": m.is_const,
+        "is_virtual": m.is_virtual,
+        "is_static": m.is_static,
+        "is_default": m.is_default,
+        "is_deleted": m.is_deleted,
+        "is_pure_virtual": m.is_pure_virtual,
+        "is_variadic": m.is_variadic,
+        "is_overload": m.is_overload,
+        "overload_index": m.overload_index,
+        "overload_suffix": m.overload_suffix,
+    }
+    if m.return_type:
+        d["return_type"] = _otype_out(m.return_type)
+    if m.operator_type:
+        d["operator_type"] = m.operator_type.value
+    if m.doc.brief or m.doc.raw:
+        d["doc"] = {k: v for k, v in m.doc.__dict__.items() if v not in ("", [], {})}
+    if m.skip:
+        d["skip"] = True
+        d["skip_reason"] = m.skip_reason
+    return d
+
+
+def _enum_out(e: M.EnumDecl) -> dict:
+    d = {
+        "name": e.name,
+        "values": [{"name": v.name, "value": v.value} for v in e.values],
+        "is_scoped": e.is_scoped,
+        "is_nested": e.is_nested,
+        "parent_class": e.parent_class,
+        "is_public": e.is_public,
+        "header_file": e.header_file,
+    }
+    if e.doc.brief or e.doc.raw:
+        d["doc"] = {k: v for k, v in e.doc.__dict__.items() if v not in ("", [], {})}
+    return d
+
+
+def _field_out(f: M.FieldDecl) -> dict:
+    d = {"name": f.name, "type": _otype_out(f.type),
+         "is_public": f.is_public, "is_const": f.is_const}
+    if f.doc.brief or f.doc.raw:
+        d["doc"] = {k: v for k, v in f.doc.__dict__.items() if v not in ("", [], {})}
+    return d
+
+
+def _class_out(c: M.ClassDecl) -> dict:
+    d = {
+        "name": c.name,
+        "wrapper_name": c.wrapper_name,
+        "module_name": c.module_name,
+        "base_classes": c.base_classes,
+        "kind": c.kind.value,
+        "is_transient_descendant": c.is_transient_descendant,
+        "constructors": [_mdecl_out(x) for x in c.constructors],
+        "methods": [_mdecl_out(x) for x in c.methods],
+        "operators": [_mdecl_out(x) for x in c.operators],
+        "static_methods": [_mdecl_out(x) for x in c.static_methods],
+        "fields": [_field_out(x) for x in c.fields],
+        "static_constants": c.static_constants,
+        "nested_enums": [_enum_out(x) for x in c.nested_enums],
+        "header_file": c.header_file,
+        "extra_occt_includes": c.extra_occt_includes,
+        "has_public_default_ctor": c.has_public_default_ctor,
+        "has_any_ctor": c.has_any_ctor,
+        "has_any_public_ctor": c.has_any_public_ctor,
+        "has_any_nonpublic_ctor": c.has_any_nonpublic_ctor,
+        "has_protected_dtor": c.has_protected_dtor,
+        "is_template": c.is_template,
+        "has_pure_virtual": c.has_pure_virtual,
+        "is_abstract": c.is_abstract,
+        "has_copy_assignment": c.has_copy_assignment,
+        "has_operator_new_delete": c.has_operator_new_delete,
+        "skip": c.skip,
+        "skip_reason": c.skip_reason,
+    }
+    if c.doc.brief or c.doc.raw:
+        d["doc"] = {k: v for k, v in c.doc.__dict__.items() if v not in ("", [], {})}
+    return d
+
+
+def dump_module(module: M.ModuleDecl) -> dict:
+    """Serialize a ModuleDecl back to the scan-JSON shape (round-trips with
+    ``load_module``).  Used to cache synthesized specializations."""
+    return {
+        "module": module.name,
+        "classes": [_class_out(c) for c in module.classes],
+        "enums": [_enum_out(e) for e in module.enums],
+    }

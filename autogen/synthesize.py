@@ -136,6 +136,40 @@ def synthesize_used(project_root: Path,
     return out
 
 
+def synthesize_all(modules: list[ModuleDecl]) -> list[object]:
+    """API-driven: synthesize *every* specialization of a synthesizable
+    template that appears in any scanned signature, not just the ones the demo
+    references.  This is what closes the NCollection coverage gap: a method is
+    bindable once its container argument types have concrete wrapper classes.
+
+    Specializations that cannot be instantiated cleanly (nested templates,
+    args naming skipped classes, ...) are reported in `last_failures` and left
+    for the typemap/synthesis generalizations that target them.
+    """
+    specs = _collect_template_specs(modules)
+    out: list[object] = []
+    failures: list[str] = []
+    if not specs:
+        synthesize_all.last_failures = failures
+        return out
+    install = find_occt_install(_default_project_root())
+    for i, (key, (header, args)) in enumerate(sorted(specs.items())):
+        tname = key.split("<", 1)[0]
+        print(f"synth[{i + 1}/{len(specs)}]    : {key}", flush=True)
+        try:
+            cls = synth_template_spec(header, tname, args, install=install)
+            cls.name = key  # exact spelling used in signatures
+            out.append(cls)
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"{key}: {e}")
+            print(f"synth          : SKIP {key}: {e}", flush=True)
+    synthesize_all.last_failures = failures
+    return out
+
+
+synthesize_all.last_failures: list[str] = []
+
+
 
 def _default_project_root() -> Path:
     """Locate the repo root (with its vcpkg install)."""

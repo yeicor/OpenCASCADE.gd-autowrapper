@@ -20,6 +20,7 @@ class ClassKind(enum.Enum):
     REF_COUNTED = "ref_counted"  # Standard_Transient + Handle<T>
     TOPODS_SHAPE = "topods_shape"  # TopoDS_Shape and subtypes
     BUILDER = "builder"          # BRepBuilderAPI_MakeShape descendants
+    EXCEPTION = "exception"      # Standard_Failure hierarchy (diagnostics-only)
     OTHER = "other"              # Anything else (opaque, skipped or wrapped minimally)
 
 
