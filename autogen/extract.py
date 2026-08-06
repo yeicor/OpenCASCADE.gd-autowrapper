@@ -350,16 +350,77 @@ def _field_is_public(field: Cursor, changes: dict[int, str] | None) -> bool | No
 # Extraction
 # ---------------------------------------------------------------------------
 
-def _is_transient(cursor: Cursor) -> bool:
-    """True when the class (or any base) derives from Standard_Transient."""
-    if cursor.spelling == "Standard_Transient":
+def _find_type_def(root: Cursor, name: str,
+                   defs: dict[str, Cursor | None] | None = None) -> Cursor | None:
+    """Find the definition cursor of the type named `name` in the TU.
+
+    Memoized: the scan runs once per parsed header and the TU is large, so a
+    repeated search for the same root name must not re-walk the whole tree.
+    """
+    if defs is None:
+        defs = {}
+    if name in defs:
+        return defs[name]
+
+    def search(cursor: Cursor) -> Cursor | None:
+        if cursor.spelling == name and cursor.kind in (
+                CursorKind.CLASS_DECL, CursorKind.CLASS_TEMPLATE,
+                CursorKind.STRUCT_DECL,
+                CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION):
+            if cursor.is_definition():
+                return cursor
+        for c in cursor.get_children():
+            r = search(c)
+            if r:
+                return r
+        return None
+
+    defs[name] = search(root)
+    return defs[name]
+
+
+def _is_transient(cursor: Cursor, defs: dict[str, Cursor | None] | None = None,
+                  root: Cursor | None = None) -> bool:
+    """True when the class (or any base) derives from Standard_Transient.
+
+    OCCT marks Transient descendants with DEFINE_STANDARD_RTTIEXT.  The base
+    chain can cross typedefs (``BVH_PrimitiveSet3d`` is a typedef of the
+    template ``BVH_PrimitiveSet<double, 3>``) and class templates whose base
+    specifiers are dependent types.  libclang's ``get_definition`` on a
+    typedef base yields the TYPEDEF_DECL (no bases to follow) and on a
+    dependent base yields the template definition; a type that cannot be
+    followed structurally is resolved by root name in the translation unit.
+    """
+    if cursor is None or not cursor.is_definition():
+        return False
+    name = cursor.spelling or ""
+    if name == "Standard_Transient":
         return True
+    if cursor.kind == CursorKind.TYPEDEF_DECL:
+        t = cursor.underlying_typedef_type
+        if t is None or root is None:
+            return False
+        root_name = re.sub(r"<.*", "", t.get_canonical().spelling).strip().split("::")[-1]
+        found = _find_type_def(root, root_name, defs)
+        return found is not None and _is_transient(found, defs, root)
     for child in cursor.get_children():
-        if child.kind == CursorKind.CXX_BASE_SPECIFIER:
-            base = child.get_definition()
-            if base and base.is_definition():
-                if _is_transient(base):
-                    return True
+        if child.kind != CursorKind.CXX_BASE_SPECIFIER:
+            continue
+        base = child.get_definition()
+        if base is None or not base.is_definition():
+            # Dependent base (e.g. BVH_Object<T, N> inside a class template):
+            # resolve the root template name in the TU and follow its own base.
+            if root is None:
+                continue
+            root_name = re.sub(r"<.*", "", child.type.spelling).strip().split("::")[-1]
+            if not root_name or root_name == name:
+                continue
+            found = _find_type_def(root, root_name, defs)
+            if found is not None and _is_transient(found, defs, root):
+                return True
+            continue
+        if _is_transient(base, defs, root):
+            return True
     return False
 
 
@@ -395,11 +456,13 @@ def _extract_enum(cursor: Cursor, header: str, parent: str = "") -> EnumDecl | N
     )
 
 
-def _extract_class(cursor: Cursor, header: str) -> ClassDecl:
+def _extract_class(cursor: Cursor, header: str,
+                   tu_root: Cursor | None = None,
+                   defs: dict[str, Cursor | None] | None = None) -> ClassDecl:
     name = cursor.spelling
     cls = ClassDecl(
         name=name, base_classes=_base_names(cursor),
-        is_transient_descendant=_is_transient(cursor),
+        is_transient_descendant=_is_transient(cursor, defs, tu_root),
         header_file=header, doc=_doc(cursor),
     )
     source = ""
@@ -511,7 +574,8 @@ def extract_header(header: Path, tu: TranslationUnit) -> HeaderResult:
                         is_specialization = False
                     if is_specialization:
                         continue  # class template specialization
-                    result.classes.append(_extract_class(child, header))
+                    result.classes.append(
+                        _extract_class(child, header, tu.cursor, defs))
             elif child.kind == CursorKind.ENUM_DECL and child.is_definition() \
                     and not namespace:
                 enum = _extract_enum(child, header)
@@ -523,5 +587,6 @@ def extract_header(header: Path, tu: TranslationUnit) -> HeaderResult:
                         t.base_name and t.base_name[0].isupper()):
                     result.typedefs.append((child.spelling, t.base_name))
 
+    defs: dict[str, Cursor | None] = {}
     walk(tu.cursor)
     return result

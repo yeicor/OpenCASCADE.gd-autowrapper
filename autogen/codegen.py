@@ -398,6 +398,20 @@ def _exception_method_body(cls: ClassDecl, method: MethodDecl,
 }}"""
 
 
+def _method_skip_reason(cls: ClassDecl, method: MethodDecl,
+                        ctx: tm.TypeContext) -> str:
+    """Precise reason a method's signature cannot cross the FFI.
+
+    Mirrors the None return of ``_method_decl_signature``/``_method_body`` so
+    the skip registry (autogen/coverage.py) classifies every skip with the
+    reason the generator actually emitted, not a blanket ``unmappable type``.
+    """
+    if cls.kind == ClassKind.EXCEPTION \
+            and _exception_method_kind(cls, method) is None:
+        return "exception diagnostic method (no native storage)"
+    return "unmappable type"
+
+
 def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
                            ctx: tm.TypeContext) -> str | None:
     if cls.kind == ClassKind.EXCEPTION \
@@ -533,7 +547,7 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
             sig = _method_decl_signature(cls, m, ctx)
             if sig is None:
                 m.skip = True
-                m.skip_reason = "unmappable type"
+                m.skip_reason = _method_skip_reason(cls, m, ctx)
                 continue
             sigs.append(f"    static {sig};")
         if sigs:
@@ -969,7 +983,7 @@ def generate_class_cpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         body = _method_body(cls, m, ctx)
         if body is None:
             m.skip = True
-            m.skip_reason = "unmappable type"
+            m.skip_reason = _method_skip_reason(cls, m, ctx)
             continue
         out.append(body)
         out.append("")
@@ -1210,18 +1224,23 @@ def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
 
 def generate_all(modules: list[ModuleDecl], out_dir: Path,
                  probe_out: Path | None = None,
-                 missing: set[str] | None = None) -> list[Path]:
+                 missing: set[str] | None = None,
+                 illformed: set[str] | None = None) -> list[Path]:
     """Generate all wrapper files for modules (in include-DAG order) into out_dir.
 
     `missing` (see autogen.audit) marks every generated method whose OCCT symbol
-    is absent from the linked libraries as skipped.  When `probe_out` is set, a
-    symbol-audit probe TU is also written there after all skip decisions are
-    final.
+    is absent from the linked libraries as skipped.  `illformed` (same source)
+    marks methods whose instantiation does not compile for the substituted
+    template arguments.  When `probe_out` is set, a symbol-audit probe TU is
+    also written there after all skip decisions are final.
     """
     ctx = build_context(modules)
     if missing:
         from .audit import apply_missing
         apply_missing(modules, missing)
+    if illformed:
+        from .audit import apply_illformed
+        apply_illformed(modules, illformed)
     wrappers: list[ClassDecl] = []
     written: list[Path] = []
     out_dir.mkdir(parents=True, exist_ok=True)

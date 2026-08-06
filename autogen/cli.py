@@ -138,8 +138,13 @@ def _load_or_synthesize(modules, cache: Path | None):
     from .model import ModuleDecl
     if cache and cache.exists():
         from .ir import load_module
+        from .synthesize import filter_noncopyable, filter_undeclarable
+        from .occt import find_occt_install
         synth = load_module(cache)
         if synth.name == "NCollection" and synth.classes:
+            synth.classes = filter_undeclarable(
+                filter_noncopyable(synth.classes, modules),
+                find_occt_install(PROJECT_ROOT), modules)
             print(f"synth          : loaded {len(synth.classes)}"
                   f" specialization(s) from {cache}")
             return synth.classes, True
@@ -147,6 +152,9 @@ def _load_or_synthesize(modules, cache: Path | None):
         from .synthesize import synthesize_all
         classes = synthesize_all(modules)
         if cache:
+            # Write the cache only when synthesizing fresh.  A partial module
+            # set (e.g. a per-module coverage run) would otherwise silently
+            # shrink a full-project cache, so never overwrite one that loads.
             from .ir import dump_module
             from .synthesize import SYNTHESIZABLE_TEMPLATES
             synth_mod = ModuleDecl(name="NCollection", classes=classes)
@@ -183,13 +191,18 @@ def cmd_generate_all(args: argparse.Namespace) -> int:
               + ", ".join(c.wrapper_name for c in synthesized[:8])
               + (" ..." if len(synthesized) > 8 else ""))
     missing = set()
-    if args.missing:
+    if args.missing and Path(args.missing).exists():
         from .audit import load_missing
         missing = load_missing(Path(args.missing))
+    illformed = set()
+    if args.illformed and Path(args.illformed).exists():
+        from .audit import load_illformed
+        illformed = load_illformed(Path(args.illformed))
     generate_all(modules, Path(args.out), probe_out=args.probe_out,
-                 missing=missing)
+                 missing=missing, illformed=illformed)
     print(f"wrote          : {args.out} ({len(modules)} modules)"
-          + (f" ({len(missing)} missing symbols skipped)" if missing else ""))
+          + (f" ({len(missing)} missing symbols skipped)" if missing else "")
+          + (f" ({len(illformed)} ill-formed methods skipped)" if illformed else ""))
     return 0
 
 
@@ -204,12 +217,22 @@ def cmd_audit(args: argparse.Namespace) -> int:
     try:
         missing = run_audit(Path(args.probe), Path(args.work), Path(args.out),
                             PROJECT_ROOT, install, args_list, occt_classes,
-                            compiler=args.compiler, nm_tool=args.nm)
-    except FileNotFoundError as e:
+                            compiler=args.compiler, nm_tool=args.nm,
+                            illformed_path=Path(args.illformed_out))
+    except (FileNotFoundError, RuntimeError) as e:
         print(f"audit          : skipped ({e})", file=sys.stderr)
         return 1
+    illformed = []
+    if Path(args.illformed_out).exists():
+        from .audit import load_illformed
+        illformed = sorted(load_illformed(Path(args.illformed_out)))
+    if not missing and not illformed:
+        print("audit          : probe clean; no missing symbols", flush=True)
+        return 0
     print(f"audit          : {len(missing)} missing symbol(s) -> {args.out}"
-          + (f": {', '.join(missing[:5])}" if missing else ""))
+          + (f": {', '.join(missing[:5])}" if missing else "")
+          + (f"; {len(illformed)} ill-formed method(s) -> {args.illformed_out}"
+             if illformed else ""), flush=True)
     return 0
 
 
@@ -231,9 +254,13 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     if args.missing and Path(args.missing).exists():
         from .audit import load_missing
         missing = load_missing(Path(args.missing))
+    illformed: set[str] = set()
+    if args.illformed and Path(args.illformed).exists():
+        from .audit import load_illformed
+        illformed = load_illformed(Path(args.illformed))
     modules = [load_module(p) for p in sorted(ir_dir.glob("*.json"))]
     table, entries, meta = compute_all(
-        modules, missing=missing,
+        modules, missing=missing, illformed=illformed,
         synthesized=_load_or_synthesize(modules, args.synth_cache)[0])
     print(format_table(table, module_filter=args.module))
     print()
@@ -262,9 +289,12 @@ def cmd_coverage(args: argparse.Namespace) -> int:
             return 1
     if args.check:
         from .policy import classify_reason
+        if args.module:
+            entries = [e for e in entries if e.module == args.module]
         unaccepted = [e for e in entries
                       if e.status != "accepted"]
-        print(f"coverage-check : {len(entries)} skips, "
+        scope = f"module {args.module}" if args.module else "all modules"
+        print(f"coverage-check : {len(entries)} skips ({scope}), "
               f"{len(entries) - len(unaccepted)} accepted, "
               f"{len(unaccepted)} gap/unclassified")
         if unaccepted:
@@ -333,7 +363,11 @@ def main(argv: list[str] | None = None) -> int:
                        help="also write a symbol-audit probe TU to this path")
     p_all.add_argument("--missing", type=Path, default=None,
                        help="skip methods whose link symbols are in this file")
-    p_all.add_argument("--synth-cache", type=Path, default=None,
+    p_all.add_argument("--illformed", type=Path, default=None,
+                       help="skip methods whose instantiation fails to compile "
+                            "(Class::method lines from the audit)")
+    p_all.add_argument("--synth-cache", type=Path,
+                       default=SUBMODULE_DIR / "out" / "synth" / "specs.json",
                        help="reuse/cache synthesized specializations (fast reruns)")
     p_all.set_defaults(func=cmd_generate_all)
 
@@ -347,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
                          default=SUBMODULE_DIR / "out" / "audit")
     p_audit.add_argument("--out", type=Path,
                          default=SUBMODULE_DIR / "out" / "audit" / "missing.txt")
+    p_audit.add_argument("--illformed-out", type=Path,
+                         default=SUBMODULE_DIR / "out" / "audit" / "illformed.txt")
     p_audit.add_argument("--compile-db", type=Path, default=DEFAULT_COMPILE_DB)
     p_audit.add_argument("--compiler", type=str, default="g++")
     p_audit.add_argument("--nm", type=str, default="nm")
@@ -363,7 +399,10 @@ def main(argv: list[str] | None = None) -> int:
     p_cov.add_argument("--ir-dir", type=Path,
                        default=SUBMODULE_DIR / "out" / "ir")
     p_cov.add_argument("--missing", type=Path,
-                       default=SUBMODULE_DIR / "out" / "audit" / "missing.txt")
+                       default=SUBMODULE_DIR / "out" / "audit" / "skips-missing.txt")
+    p_cov.add_argument("--illformed", type=Path,
+                       default=SUBMODULE_DIR / "out" / "audit" / "skips-illformed.txt",
+                       help="skip methods whose instantiation fails to compile")
     p_cov.add_argument("--module", type=str, default=None,
                        help="focus the report on one OCCT module")
     p_cov.add_argument("--out", type=Path,
@@ -371,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     p_cov.add_argument("--check", action="store_true",
                        help="exit 1 while any skip is a gap or unclassified")
     p_cov.add_argument("--synth-cache", type=Path,
-                       default=SUBMODULE_DIR / "out" / "audit" / "synth_cache.json",
+                       default=SUBMODULE_DIR / "out" / "synth" / "specs.json",
                        help="reuse/cache synthesized specializations")
     p_cov.set_defaults(func=cmd_coverage)
 

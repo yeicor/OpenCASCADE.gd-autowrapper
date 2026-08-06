@@ -230,10 +230,32 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
     if b in ("char16_t",) and t.pointee_is_const:
         return ParamConv(cpp_type="String", gd_type="STRING", name=name,
                          call_expr=f"{name}.utf16()")
+    if t.is_handle and t.handle_inner in ctx.wrapped:
+        # handle<T>* — pointer to a handle, not to the pointee (e.g. the
+        # NCollection_Array1/Array2 ctor taking `const T* theBegin` with
+        # T = handle<...>).  Pass the address of the wrapper's stored handle.
+        return ParamConv(cpp_type=f"Ref<{ctx.wrapped[t.handle_inner]}>",
+                         gd_type="OBJECT", name=name,
+                         call_expr=f"&{name}->_handle")
+    if b in ctx.wrapped:
+        # Raw T* to a wrapped class: pass the wrapper's native storage address
+        # (null GDScript refs pass nullptr).  Mutations through the pointer are
+        # visible on the caller's object, matching OCCT in/out semantics.
+        w = ctx.wrapped[b]
+        if w in ctx.handles:
+            call = f"{name}->_handle.get()"
+        elif w in ctx.unique_ptr:
+            call = f"{name}->_native.get()"
+        else:
+            native = "_native_ref()" if w in ctx.inherited_value else "_native"
+            call = f"&{name}->{native}"
+        return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
+                         call_expr=call)
     return None
 
 
 def _enum_param(t: OCCTType, name: str, ctx: TypeContext, move: bool = False) -> ParamConv | None:
+    """Map an enum-typed parameter; wrapped enums cross as their own type."""
     enum_decl = ctx.enums.get(t.base_name)
     if enum_decl is not None:
         return ParamConv(cpp_type=f"OcgEnums::{t.base_name}", gd_type="INT", name=name,
@@ -243,13 +265,16 @@ def _enum_param(t: OCCTType, name: str, ctx: TypeContext, move: bool = False) ->
                      call_expr=f"static_cast<{t.base_name}>({_rw(move, name)})")
 
 
-def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False,
-               ostream_is_only_param: bool = False) -> RetConv | None:
+def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False) -> RetConv | None:
     """Map a return type; has_ostream: method consumes a Standard_OStream&."""
+    if has_ostream and (stream_kind(t) is not None or
+                        (t.base_name == "void" and not t.is_pointer)):
+        # Print/Dump(Standard_OStream&) -> Standard_OStream& or void: the
+        # stream argument was captured into ocg_os by the parameter
+        # conversion, so surface the text that would have been written.
+        return RetConv(cpp_type="String", gd_type="STRING",
+                       body="{call};\n        return ::godot::String::utf8(ocg_os.str().c_str());")
     if t.base_name == "void" and not t.is_pointer:
-        if has_ostream and not ostream_is_only_param:
-            return RetConv(cpp_type="String", gd_type="STRING",
-                           body="{call};\n        return ::godot::String::utf8(ocg_os.str().c_str());")
         return RetConv(cpp_type="void", gd_type="NIL", body="{call};")
     if t.is_pointer:
         return _cpp_pointer_return(t, ctx)

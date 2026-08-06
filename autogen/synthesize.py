@@ -29,6 +29,118 @@ from .types import make_type
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _split_top_level(s: str) -> list[str]:
+    """Split on top-level commas (angle-bracket depth aware)."""
+    parts: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in s:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+
+def _chunk_noncopyable(chunk: str, noncopyable: set[str]) -> bool:
+    """True if a template-argument chunk is a value (not handle/pointer/ref)
+    OCCT class with deleted/broken copy semantics."""
+    chunk = chunk.strip()
+    if not chunk:
+        return False
+    if chunk.startswith("opencascade::handle"):
+        return False  # handles copy regardless of the pointee
+    if chunk.endswith("*") or chunk.endswith("&"):
+        return False  # pointers/references copy
+    m = re.match(r"^[A-Za-z_]\w*\s*<(.*)>\s*$", chunk, re.S)
+    if m:
+        # Nested specialization: only the inner VALUE args can be non-copyable.
+        return any(_chunk_noncopyable(inner, noncopyable)
+                   for inner in _split_top_level(m.group(1)))
+    return chunk in noncopyable
+
+
+def _noncopyable_classes(modules: list[ModuleDecl]) -> set[str]:
+    """OCCT value classes whose copy semantics are deleted or broken."""
+    return {cls.name for m in modules for cls in m.classes
+            if not cls.has_copy_assignment}
+
+
+def _specialization_broken(spec_name: str, noncopyable: set[str]) -> bool:
+    """A container specialization is ill-formed when a value template arg is
+    a non-copyable OCCT class (e.g. NCollection_Sequence<CSLib_Class2d>, whose
+    Append/Insert copy the item).  handle<X>, pointer and reference args are
+    exempt."""
+    m = re.match(r"^[A-Za-z_]\w*\s*<(.*)>\s*$", spec_name, re.S)
+    if not m:
+        return False
+    return any(_chunk_noncopyable(inner, noncopyable)
+               for inner in _split_top_level(m.group(1)))
+
+
+def filter_noncopyable(classes: list[object], modules: list[ModuleDecl]) -> list[object]:
+    """Drop synthesized specializations over non-copyable value args.
+
+    Applied both when synthesizing fresh and when loading a cached spec list,
+    so a stale cache cannot resurrect a specialization whose members do not
+    compile (the probe TU instantiates every wrapped member symbol).
+    """
+    noncopyable = _noncopyable_classes(modules)
+    kept = []
+    for cls in classes:
+        if _specialization_broken(getattr(cls, "name", ""), noncopyable):
+            print(f"synth          : SKIP {cls.name} (non-copyable template arg)",
+                  file=__import__("sys").stderr)
+            continue
+        kept.append(cls)
+    return kept
+
+
+def filter_undeclarable(classes: list[object], install: Path,
+                        modules: list[ModuleDecl] | None = None) -> list[object]:
+    """Drop cached specializations whose args are not publicly nameable.
+
+    Rebuilds the spec map from cached ClassDecls so a stale cache cannot
+    resurrect a specialization over private/protected nested types (those
+    cannot be referenced from generated wrappers and trip the probe TU).
+    """
+    specs: dict[str, tuple[str, list[str]]] = {}
+    for cls in classes:
+        m = _SPEC_RE.match(getattr(cls, "name", ""))
+        if not m:
+            continue
+        header = getattr(cls, "header_file", "") or SYNTHESIZABLE_TEMPLATES.get(m.group(1), "")
+        args = _split_args(m.group(2))
+        if header and args:
+            specs[cls.name] = (header, args)
+    bad = _undeclarable_specs(specs, install, modules) if specs else set()
+    header_map = _build_header_map(modules) if modules else None
+    kept = []
+    for cls in classes:
+        if getattr(cls, "name", "") in bad:
+            print(f"synth          : SKIP {cls.name} (template arg not publicly "
+                  "nameable)", file=__import__("sys").stderr)
+            continue
+        m = _SPEC_RE.match(getattr(cls, "name", ""))
+        if m and header_map:
+            # A stale cache may carry a name-derived header that does not
+            # exist (Graphic3d_Attribute.hxx); rebind to the declaring header
+            # from the scanned IR so the wrapper compiles.
+            args = _split_args(m.group(2))
+            own = getattr(cls, "header_file", "") or ""
+            cls.extra_occt_includes = [
+                i for i in _collect_includes(args, header_map=header_map)
+                if i != own]
+        kept.append(cls)
+    return kept
+
+
 # Class templates that the pipeline can synthesize, by template name.  The
 # header filename is the template's own header; argument headers are derived
 # from the specialization (see _collect_includes).
@@ -86,6 +198,12 @@ def _collect_template_specs(modules: list[ModuleDecl]) -> dict[str, tuple[str, l
                 for p in m.parameters:
                     handle(p.type)
             for f in cls.fields:
+                if not f.is_public:
+                    # A specialization reachable only through a private field
+                    # can never be named by a wrapper; synthesizing it would
+                    # only surface unusable methods (and, for private nested
+                    # types, probe compile failures).
+                    continue
                 handle(f.type)
     return specs
 
@@ -128,12 +246,74 @@ def synthesize_used(project_root: Path,
         if occt_name_to_wrapper(key, "NCollection") not in demo_refs:
             continue
         try:
-            cls = synth_template_spec(header, tname, args, install=install)
+            cls = synth_template_spec(header, tname, args, install=install,
+                                      header_map=_build_header_map(modules))
             cls.name = key  # exact spelling used in signatures
             out.append(cls)
         except Exception as e:  # noqa: BLE001
             print(f"synthesize    : SKIP {key}: {e}", file=__import__("sys").stderr)
     return out
+
+
+def _undeclarable_specs(specs: dict[str, tuple[str, list[str]]],
+                        install: Path,
+                        modules: list[ModuleDecl] | None = None) -> set[str]:
+    """Spec keys whose template arguments are not publicly nameable.
+
+    A free-namespace ``using OcgUndeclN = Spec<args>;`` fails to compile when
+    any argument names a private/protected nested type (e.g.
+    ``NCollection_Array1<Aspect_VKeySet::KeyState>`` where ``KeyState`` is a
+    private nested struct).  No wrapper can ever name such a type, so the spec
+    must not be synthesized at all; otherwise every one of its methods trips
+    the symbol-audit probe.  Member-level breakage (e.g. an ambiguous ``abs``
+    in ``NCollection_Vec3<unsigned long>::cwiseAbs``) is *not* caught here --
+    that spec is declarable and is handled by the audit's ill-formed-method
+    skipping instead.
+    """
+    args = ensure_occt_args([], install.include_dir)
+    rd = find_resource_dir()
+    if rd:
+        args.append(f"-resource-dir={rd}")
+    header_map = _build_header_map(modules) if modules else None
+    includes: set[str] = set()
+    for key, (header, _) in specs.items():
+        includes.add(header)
+    for key, (_, as_) in specs.items():
+        includes.update(_collect_includes(as_, header_map=header_map))
+    # Some specializations carry args whose derived "header" does not exist
+    # (e.g. array bounds); a missing #include would abort the whole batch TU,
+    # so only pull in headers that are actually present.
+    include_dir = install.include_dir
+    includes = {i for i in includes if (include_dir / i).exists()}
+    lines: list[str] = [f"#include <{i}>" for i in sorted(includes)]
+    lines.append("")
+    lines.append("namespace ocg_undecl {")
+    key_lines: dict[str, int] = {}
+    for i, key in enumerate(sorted(specs)):
+        lines.append(f"using OcgUndecl{i} = {key};")
+        key_lines[key] = len(lines)
+    lines.append("}")
+    src = "\n".join(lines) + "\n"
+    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w", delete=False) as f:
+        f.write(src)
+        tmp = f.name
+    try:
+        index = C.Index.create()
+        tu = index.parse(tmp, args=args + ["-x", "c++", "-I",
+                                           str(install.include_dir)])
+        out: set[str] = set()
+        for d in tu.diagnostics:
+            if d.severity >= C.Diagnostic.Error:
+                for key, line_no in key_lines.items():
+                    if d.location.line == line_no:
+                        out.add(key)
+                        break
+        return out
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def synthesize_all(modules: list[ModuleDecl]) -> list[object]:
@@ -153,11 +333,27 @@ def synthesize_all(modules: list[ModuleDecl]) -> list[object]:
         synthesize_all.last_failures = failures
         return out
     install = find_occt_install(_default_project_root())
+    header_map = _build_header_map(modules)
+    undeclarable = _undeclarable_specs(specs, install, modules)
+    if undeclarable:
+        print(f"synth          : dropping {len(undeclarable)}"
+              f" specialization(s) with private/protected template args",
+              file=__import__("sys").stderr)
+    noncopyable = _noncopyable_classes(modules)
     for i, (key, (header, args)) in enumerate(sorted(specs.items())):
         tname = key.split("<", 1)[0]
         print(f"synth[{i + 1}/{len(specs)}]    : {key}", flush=True)
+        if key in undeclarable:
+            print(f"synth          : SKIP {key} (template arg not publicly "
+                  "nameable)", flush=True)
+            continue
+        if _specialization_broken(key, noncopyable):
+            print(f"synth          : SKIP {key} (non-copyable template arg)",
+                  flush=True)
+            continue
         try:
-            cls = synth_template_spec(header, tname, args, install=install)
+            cls = synth_template_spec(header, tname, args, install=install,
+                                      header_map=header_map)
             cls.name = key  # exact spelling used in signatures
             out.append(cls)
         except Exception as e:  # noqa: BLE001
@@ -217,20 +413,65 @@ _BUILTINS = {"void", "bool", "char", "short", "int", "long", "float", "double",
              "long long", "unsigned long long"}
 
 
-def _collect_includes(args_list: list[str]) -> list[str]:
-    """OCCT convention: header file name == class name."""
+def _build_header_map(modules: list[ModuleDecl]) -> dict[str, str]:
+    """OCCT class name -> header basename, from the scanned IR.
+
+    OCCT usually declares one class per header, so ``Graphic3d_Attribute.hxx``
+    is the natural include for ``Graphic3d_Attribute``.  Some classes break the
+    convention and live in another header (``Graphic3d_Attribute`` is declared
+    in ``Graphic3d_Buffer.hxx``); the scanner records the real header.  Passing
+    this map to ``_collect_includes`` lets a synthesized spec include the
+    declaring header instead of a name-derived one that does not exist.
+    """
+    out: dict[str, str] = {}
+    for module in modules:
+        for cls in module.classes:
+            hf = getattr(cls, "header_file", "") or ""
+            if hf:
+                out[cls.name] = Path(hf).name
+    return out
+
+
+def _collect_includes(args_list: list[str],
+                      include_dir: Path | None = None,
+                      header_map: dict[str, str] | None = None) -> list[str]:
+    """OCCT convention: header file name == (outermost) class name.
+
+    A nested class A::B lives in the enclosing class's header A.hxx, the
+    std/opencascade namespaces contribute no header of their own (handles and
+    std::* types resolve from their template arguments), and a template's
+    arguments are recursed into so ``handle<Geom_Curve>`` yields
+    ``Geom_Curve.hxx``.  ``header_map`` (see ``_build_header_map``) overrides
+    the name-derived header when the class lives in a different header.  When
+    ``include_dir`` is given only headers that exist there are returned, so a
+    speculative include can never break the probe TU.
+    """
     out: list[str] = []
 
     def rec(arg: str) -> None:
-        base = arg.split("<")[0].strip().split("::")[-1].strip()
-        if base and base not in _BUILTINS and base not in ("handle",) and not base.endswith("_t"):
-            out.append(f"{base}.hxx")
-        for inner in _split_args(arg)[1:]:
-            rec(inner)
+        head = re.sub(r"^(?:const|volatile)\s+", "", arg.strip())
+        head = re.sub(r"(?:[*&])$", "", head)
+        head = head.split("<")[0].strip()
+        parts = [p for p in head.split("::") if p]
+        if parts and parts[0] not in ("std", "opencascade") \
+                and parts[0] not in _BUILTINS and not parts[0].endswith("_t") \
+                and re.match(r"^[A-Za-z_]\w*$", parts[0]):
+            out.append(f"{parts[0]}.hxx")
+        m = re.match(r"^[^<]*<(.*)>$", arg.strip(), re.S)
+        if m:
+            for inner in _split_args(m.group(1)):
+                rec(inner)
 
     for a in args_list:
         rec(a)
-    return out
+    if header_map:
+        out = [header_map.get(i[:-len(".hxx")] if i.endswith(".hxx") else i, i)
+               for i in out]
+    if include_dir is not None:
+        existing = {p.name for p in include_dir.iterdir()} if include_dir.is_dir() else set()
+        out = [i for i in out if i in existing]
+    seen: set[str] = set()
+    return [i for i in out if not (i in seen or seen.add(i))]
 
 
 def _substitute(spelling: str, subst: dict[str, str]) -> str:
@@ -358,7 +599,8 @@ def _expand_spec_args(header_name: str, template_name: str,
 
 def synth_template_spec(header_name: str, template_name: str,
                         args_list: list[str],
-                        install: Path | None = None) -> object:
+                        install: Path | None = None,
+                        header_map: dict[str, str] | None = None) -> object:
     """Return a ClassDecl for the specialization ``template_name<args_list>``."""
     if install is None:
         install = find_occt_install(_default_project_root())
@@ -386,7 +628,7 @@ def synth_template_spec(header_name: str, template_name: str,
             subst[pname] = args_list[idx]
             subst[f"type-parameter-0-{idx}"] = args_list[idx]
 
-    includes = [header_name] + _collect_includes(args_list)
+    includes = [header_name] + _collect_includes(args_list, header_map=header_map)
     full_args = _expand_spec_args(header_name, template_name, args_list,
                                   includes, args, install.include_dir)
     if full_args != args_list:
@@ -411,7 +653,7 @@ def synth_template_spec(header_name: str, template_name: str,
     # template argument headers must be available even though no individual
     # method signature mentions them (e.g. TopTools_ShapeMapHasher.hxx for
     # NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>).
-    cls.extra_occt_includes = [i for i in _collect_includes(args_list)
+    cls.extra_occt_includes = [i for i in _collect_includes(args_list, header_map=header_map)
                                if i != header_name]
 
     to_resolve: dict[str, str] = {}  # substituted spelling -> substituted spelling
@@ -443,6 +685,9 @@ def synth_template_spec(header_name: str, template_name: str,
             m.return_type = rebind(m.return_type)
         for p in m.parameters:
             p.type = rebind(p.type)
+            dflt = getattr(p, "default_value", None)
+            if dflt:
+                p.default_value = _substitute(dflt, subst)
     for f in cls.fields:
         f.type = rebind(f.type)
     for i, b in enumerate(cls.base_classes):

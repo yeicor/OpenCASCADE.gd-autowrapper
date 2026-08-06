@@ -47,11 +47,6 @@ CLASS_SKIP_POLICIES: dict[str, SkipPolicy] = {
         "Exceptions are produced by caught OCCT failures, never constructed "
         "from GDScript. The wrapper default constructor yields an empty "
         "diagnostics object whose methods read the last-error state."),
-    "exception diagnostic method (no native storage)": SkipPolicy(
-        "accepted",
-        "An exception instance method with no diagnostics mapping (the "
-        "standard set is what/GetMessageString/GetStackString/ExceptionType/"
-        "Print). Exception wrappers carry no native object by design."),
     "internal TopoDS shape implementation": SkipPolicy(
         "accepted",
         "Internal TopoDS_T* storage nodes behind TopoDS_Shape; they are "
@@ -76,6 +71,13 @@ CLASS_SKIP_POLICIES: dict[str, SkipPolicy] = {
         "The OCCT symbol is absent from the compiled libraries (header/lib "
         "drift); the method cannot link and is dropped with the symbol-audit "
         "referencing it in out/audit/missing.txt."),
+    "ill-formed instantiation (OCCT member does not compile for the "
+    "substituted template args)": SkipPolicy(
+        "accepted",
+        "The OCCT template member is ill-formed for the substituted arguments "
+        "(e.g. NCollection_Vec3<unsigned long>::cwiseAbs calling an ambiguous "
+        "std::abs); the API itself is unusable, so the audit probe cannot "
+        "compile it and the method is dropped, matching out/audit/illformed.txt."),
 
     # --- Gaps: must be closed by generalizing the generator ----------------
     "abstract (pure virtual) class": SkipPolicy(
@@ -106,6 +108,11 @@ CLASS_SKIP_POLICIES: dict[str, SkipPolicy] = {
 # ---------------------------------------------------------------------------
 
 METHOD_SKIP_POLICIES: dict[str, SkipPolicy] = {
+    "exception diagnostic method (no native storage)": SkipPolicy(
+        "accepted",
+        "An exception instance method with no diagnostics mapping (the "
+        "standard set is what/GetMessageString/GetStackString/ExceptionType/"
+        "Print). Exception wrappers carry no native object by design."),
     "unmappable type": SkipPolicy(
         "gap",
         "The signature crosses the FFI with a type that has no wrapper "
@@ -127,3 +134,74 @@ def classify_reason(reason: str, is_method: bool) -> str:
     if policy is None:
         return "unclassified"
     return policy.status
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol documented exclusions
+# ---------------------------------------------------------------------------
+# A reason may be a global GAP (to be closed by generalizing the generator)
+# yet be deliberately skipped for a handful of low-value symbols (internal
+# machinery, opaque callbacks, output buffers with unknown size).  Such
+# symbols are enumerated here, keyed "Module:ClassName" (class skip) or
+# "Module:ClassName::methodName" (method skip), so the module gate stays
+# honest: every remaining skip is either globally accepted or explicitly
+# listed in this central registry.
+
+SYMBOL_EXCEPTIONS: dict[str, SkipPolicy] = {
+    "Standard:Standard_MMgrRoot": SkipPolicy(
+        "accepted",
+        "Standard_MMgrRoot is the pure abstract allocator interface. No "
+        "instance can exist and it exposes no usable surface; the concrete "
+        "allocators (Standard_MMgrOpt, Standard_MMgrTBB, ...) are wrapped "
+        "individually."),
+    "Standard:Standard::StackTrace": SkipPolicy(
+        "accepted",
+        "Writes a backtrace into a caller-provided char* buffer of unknown "
+        "capacity; a generic output-buffer conversion cannot size it safely."),
+    "Standard:Standard_ArrayStreamBuffer::xsgetn": SkipPolicy(
+        "accepted",
+        "Low-level std::streambuf read-into-buffer override (char* output "
+        "with std::streamsize); not part of the user-facing API."),
+    "Standard:Standard_CLocaleSentry::GetCLocale": SkipPolicy(
+        "accepted",
+        "Returns the opaque libc clocale_t (struct pointer typedef); no "
+        "portable GDScript meaning."),
+    "Standard:Standard_ErrorHandler::Label": SkipPolicy(
+        "accepted",
+        "Exposes the internal setjmp()/longjmp() jmp_buf; OCCT-internal "
+        "exception plumbing, meaningless from GDScript."),
+    "Standard:Standard_ErrorHandler::Error": SkipPolicy(
+        "accepted",
+        "Returns the internal SignalException variant state read by the "
+        "setjmp/longjmp mechanism; the diagnostics surface is covered by the "
+        "exception wrappers (what/GetMessageString/...)."),
+    "Standard:Standard_GUID::ToCString": SkipPolicy(
+        "accepted",
+        "Fills a caller-provided char* buffer; a generic output-buffer "
+        "conversion cannot size it safely. Use the String form of the GUID "
+        "instead (ToCString result is always 36 chars)."),
+    "Standard:Standard_GUID::ToExtString": SkipPolicy(
+        "accepted",
+        "Fills a caller-provided char16_t* buffer; see ToCString note."),
+    "Standard:Standard_MMgrOpt::SetCallBackFunction": SkipPolicy(
+        "accepted",
+        "Registers a C function-pointer callback (TPCallBackFunc); callbacks "
+        "do not cross the FFI."),
+    "Standard:Standard_OutOfMemory::SetMessageString": SkipPolicy(
+        "accepted",
+        "Exception-class instance method with no diagnostics mapping; covered "
+        "by the global exception-diagnostic exclusion."),
+    "Standard:Standard_Transient::This": SkipPolicy(
+        "accepted",
+        "Returns a raw self pointer for C++-side refcount handling; the "
+        "GDScript object already IS the instance."),
+    "Standard:Standard_Type::Register": SkipPolicy(
+        "accepted",
+        "OCCT-internal type registration (std::type_info + handle); managed "
+        "by the runtime, not user code."),
+}
+
+
+def symbol_exception(key: str) -> SkipPolicy | None:
+    """Per-symbol skip policy for 'Module:ClassName[:methodName]', or None."""
+    return SYMBOL_EXCEPTIONS.get(key)

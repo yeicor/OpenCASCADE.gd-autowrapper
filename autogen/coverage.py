@@ -15,9 +15,9 @@ from dataclasses import asdict, dataclass, field
 
 from . import typemap as tm
 from .codegen import (build_context, group_overloads, _default_ctor,
-                      _method_decl_signature, _params_decl)
+                      _method_decl_signature, _method_skip_reason, _params_decl)
 from .model import ClassDecl, MethodDecl, MethodKind, ModuleDecl
-from .policy import classify_reason
+from .policy import classify_reason, symbol_exception
 
 
 @dataclass
@@ -86,7 +86,7 @@ def finalize_skips(modules: list[ModuleDecl],
                     continue
                 if _method_decl_signature(cls, m, ctx) is None:
                     m.skip = True
-                    m.skip_reason = "unmappable type"
+                    m.skip_reason = _method_skip_reason(cls, m, ctx)
                 if m.skip:
                     entries.append(SkipEntry(
                         module=module.name, target=_method_label(m),
@@ -94,6 +94,12 @@ def finalize_skips(modules: list[ModuleDecl],
                         signature=", ".join(p.type.spelling for p in m.parameters)))
     for e in entries:
         e.status = classify_reason(e.reason, is_method=bool(e.where))
+        key = f"{e.module}:{e.where or e.target}"
+        if e.where:
+            key += "::" + e.target.split("(")[0]
+        ex = symbol_exception(key)
+        if ex is not None:
+            e.status = ex.status
     return entries
 
 
@@ -134,6 +140,7 @@ def _synth_failures() -> list[str]:
 
 
 def compute_all(modules: list[ModuleDecl], missing: set[str] | None = None,
+                illformed: set[str] | None = None,
                 synthesized: list[ClassDecl] | None = None) -> tuple[list[ModuleCoverage],
                                                                      list[SkipEntry],
                                                                      dict]:
@@ -158,6 +165,9 @@ def compute_all(modules: list[ModuleDecl], missing: set[str] | None = None,
     if missing:
         from .audit import apply_missing
         apply_missing(modules, missing)
+    if illformed:
+        from .audit import apply_illformed
+        apply_illformed(modules, illformed)
     entries = finalize_skips(modules, ctx)
     table = compute(modules, ctx)
 

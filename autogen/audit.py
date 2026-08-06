@@ -20,12 +20,13 @@ The audit catches those at generation time instead:
 
 from __future__ import annotations
 
+import heapq
 import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
-
 from .model import MethodKind, OCCTType
 from .occt import OCCTInstall, include_closure
 from . import typemap as tm
@@ -94,6 +95,12 @@ def symbol_for_method(cls, method) -> str:
     return symbol
 
 
+def _method_display_name(cls, method) -> str:
+    if method.operator_type is not None:
+        return f"{cls.name}::operator{_operator_spelling(method.operator_type.value)}"
+    return f"{cls.name}::{method.name}"
+
+
 def _probe_line(cls, method, index: int) -> str:
     params = ", ".join(render_source_type(p.type) for p in method.parameters)
     ret_is_void = (method.return_type is None
@@ -127,7 +134,14 @@ def _type_headers(t: OCCTType, ctx: tm.TypeContext) -> list[str]:
 
 
 def probe_headers(classes, ctx: tm.TypeContext, install: OCCTInstall) -> list[Path]:
-    """OCCT headers the probe TU needs, include-closure ordered (deps first)."""
+    """OCCT headers the probe TU needs, include-closure ordered (deps first).
+
+    The BFS closure only orders headers linked by ``#include``; several OCCT
+    headers are not self-contained and rely on a type being declared by an
+    earlier include (e.g. ``GeomFill_SimpleBound.hxx`` uses ``Adaptor3d_Curve``
+    without including its header).  ``_hygiene_order`` closes that gap so the
+    probe compiles deterministically regardless of set iteration order.
+    """
     names: set[str] = set()
     for cls in classes:
         if cls.header_file:
@@ -147,7 +161,62 @@ def probe_headers(classes, ctx: tm.TypeContext, install: OCCTInstall) -> list[Pa
             names.update(_type_headers(f.type, ctx))
     paths = [install.include_dir / n for n in names
              if (install.include_dir / n).exists()]
-    return include_closure(paths, install, include_self=True)
+    return _hygiene_order(include_closure(paths, install, include_self=True),
+                          ctx)
+
+
+_CLASSNAME_RE_CACHE: dict[int, re.Pattern] = {}
+
+
+def _hygiene_order(closure: list[Path], ctx: tm.TypeContext) -> list[Path]:
+    """Deterministically reorder ``closure`` so each header comes after the
+    declaring header of every OCCT class name it references."""
+    idx = {h.name: i for i, h in enumerate(closure)}
+    class_idx: dict[str, int] = {}
+    for cls, hdr in ctx.occt_headers.items():
+        j = idx.get(hdr)
+        if j is not None:
+            class_idx[cls] = j
+    if not class_idx:
+        return closure
+    size = len(class_idx)
+    rx = _CLASSNAME_RE_CACHE.get(size)
+    if rx is None:
+        names = sorted(class_idx)
+        rx = re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, names)))
+        _CLASSNAME_RE_CACHE[size] = rx
+
+    deps: list[set[int]] = [set() for _ in closure]
+    for i, h in enumerate(closure):
+        try:
+            text = h.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for cls in rx.findall(text):
+            j = class_idx[cls]
+            if j != i:
+                deps[i].add(j)
+
+    heap = [i for i, d in enumerate(deps) if not d]
+    heapq.heapify(heap)
+    emitted = [False] * len(closure)
+    out: list[Path] = []
+    while heap:
+        i = heapq.heappop(heap)
+        if emitted[i]:
+            continue
+        emitted[i] = True
+        out.append(closure[i])
+        for k in range(len(closure)):
+            if not emitted[k] and i in deps[k]:
+                deps[k].discard(i)
+                if not deps[k]:
+                    heapq.heappush(heap, k)
+    if len(out) != len(closure):
+        for i in range(len(closure)):
+            if not emitted[i]:
+                out.append(closure[i])
+    return out
 
 
 def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str:
@@ -169,7 +238,7 @@ def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str
             if method.skip or method.is_deleted or method.is_pure_virtual \
                     or method.is_variadic:
                 continue
-            lines.append(f"    // {cls.name}::{method.name}")
+            lines.append(f"    // {_method_display_name(cls, method)}")
             lines.append(f"    {_probe_line(cls, method, index)}")
             index += 1
     if not lines:
@@ -255,15 +324,28 @@ def _gcc_args(args: list[str]) -> list[str]:
     return out
 
 
+def _write_lines(path: Path, lines: list[str]) -> None:
+    """Write findings as one-per-line, or an empty file when there are none.
+
+    A bare trailing newline (``"\n"``) would make ``test -s`` treat the file
+    as non-empty, so an empty result must produce a zero-byte file.
+    """
+    path.write_text("" if not lines else "\n".join(sorted(lines)) + "\n")
+
+
 def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
               project_root: Path | None, install: OCCTInstall,
               args: list[str], occt_classes: set[str],
-              compiler: str = "g++", nm_tool: str = "nm") -> list[str]:
+              compiler: str = "g++", nm_tool: str = "nm",
+              illformed_path: Path | None = None) -> list[str]:
     """Compile the probe, diff undefined vs library-defined symbols.
 
     Returns the sorted list of missing member symbols (also written to
-    `out_path`).  Raises if the tools/libs are unavailable (caller decides how
-    to degrade) or if the probe fails to compile (a generation bug).
+    `out_path`).  When the probe fails to compile, the offending members are
+    extracted from the compiler diagnostics and written to `illformed_path`
+    (default: ``<work_dir>/illformed.txt`` as ``Class::method`` lines) so
+    pass-2 regeneration can skip them; the returned list is then empty.
+    Raises if the tools/libs are unavailable (caller decides how to degrade).
     """
     if shutil.which(compiler) is None or shutil.which(nm_tool) is None:
         raise FileNotFoundError(
@@ -273,13 +355,31 @@ def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
         raise FileNotFoundError("no OCCT library directory found for symbol audit")
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    if illformed_path is None:
+        illformed_path = work_dir / "illformed.txt"
+    # Both outputs are refreshed on every run so a stale file from a previous
+    # invocation (e.g. a probe that has since been fixed) cannot leak into
+    # pass-2 regeneration.
+    out_path.write_text("")
+    illformed_path.write_text("")
     obj = work_dir / (probe_path.stem + ".o")
     cmd = [compiler, "-std=gnu++17", "-fPIC", "-w", "-c",
            str(probe_path), "-o", str(obj), *_gcc_args(args)]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError("symbol audit probe failed to compile:\n"
-                           + res.stderr[-4000:])
+        # A generated method whose body does not compile (e.g. a synthesized
+        # NCollection_Vec3<unsigned long>::cwiseAbs instantiating an ambiguous
+        # std::abs) aborts the probe.  Map each failing probe line back to its
+        # "// Class::method" comment and skip exactly those methods in pass 2.
+        illformed = _extract_illformed(res.stderr, probe_path)
+        if not illformed:
+            print("symbol audit : probe failed; no methods mapped to errors"
+                  f" (tried {probe_path.name}:NN) -- using pass-1 output",
+                  file=sys.stderr)
+            print(res.stderr[-2000:], file=sys.stderr, end="")
+            raise RuntimeError("symbol audit probe failed to compile")
+        _write_lines(illformed_path, sorted(illformed))
+        return []
 
     defined = _defined_symbols(lib_dir, nm_tool)
     missing: set[str] = set()
@@ -291,8 +391,68 @@ def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
             continue
         if name not in defined:
             missing.add(name)
-    out_path.write_text("\n".join(sorted(missing)) + "\n")
+    _write_lines(out_path, sorted(missing))
     return sorted(missing)
+
+
+def _extract_illformed(stderr: str, probe_path: Path) -> set[str]:
+    """Class::method names of probe lines rejected by the compiler.
+
+    Every probe line is preceded by a ``// Class::method`` comment; GCC/Clang
+    diagnostics reference the offending ``ocg_sym_*`` line by file:line, so the
+    nearest preceding comment names the method whose instantiation failed.
+    """
+    probe = probe_path.read_text().splitlines()
+    line_index: dict[int, str] = {}
+    last_comment = ""
+    for no, text in enumerate(probe, start=1):
+        line = text.strip()
+        if line.startswith("// ") and "::" in line:
+            last_comment = line[3:].strip()
+        elif "ocg_sym_" in line:
+            line_index[no] = last_comment
+    out: set[str] = set()
+    for m in re.finditer(rf"{re.escape(probe_path.name)}:(\d+):", stderr):
+        target = line_index.get(int(m.group(1)), "")
+        if target:
+            out.add(target)
+    return out
+
+
+def load_illformed(path: Path) -> set[str]:
+    """Read an ill-formed-methods file (one ``Class::method`` per line)."""
+    illformed: set[str] = set()
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        illformed.add(line)
+    return illformed
+
+
+def apply_illformed(modules, illformed: set[str]) -> int:
+    """Skip every generated method whose instantiation does not compile.
+
+    These are OCCT template members that are ill-formed for the substituted
+    arguments (e.g. ``NCollection_Vec3<unsigned long>::cwiseAbs`` calling an
+    ambiguous ``std::abs``); the API itself is unusable there, so the method
+    is dropped exactly as if it were unmappable.
+    """
+    skipped = 0
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip:
+                continue
+            for method in cls.all_methods:
+                if method.kind == MethodKind.CONSTRUCTOR or method.skip:
+                    continue
+                if f"{cls.name}::{method.name}" in illformed:
+                    method.skip = True
+                    method.skip_reason = ("ill-formed instantiation "
+                                          "(OCCT member does not compile for "
+                                          "the substituted template args)")
+                    skipped += 1
+    return skipped
 
 
 # ABI-tagged std templates demangle with the `__cxx11` inline namespace and
