@@ -453,6 +453,16 @@ def _cpp_pointer_return(t: OCCTType, ctx: TypeContext) -> RetConv | None:
     if b == "char16_t" and t.pointee_is_const:
         return RetConv(cpp_type="String", gd_type="STRING",
                        body="return ::godot::String::utf16({call});")
+    if b == "TCollection_AsciiString":
+        return RetConv(cpp_type="String", gd_type="STRING",
+                       body="auto result = {call};\n"
+                            '        if (!result) { return ""; }\n'
+                            "        return ::godot::String::utf8(result->ToCString());")
+    if b == "TCollection_ExtendedString":
+        return RetConv(cpp_type="String", gd_type="STRING",
+                       body="auto result = {call};\n"
+                            '        if (!result) { return ""; }\n'
+                            "        return ::godot::String::utf16(result->ToExtString());")
     return None
 
 

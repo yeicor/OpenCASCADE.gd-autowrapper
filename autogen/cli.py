@@ -199,7 +199,8 @@ def cmd_generate_all(args: argparse.Namespace) -> int:
         from .audit import load_illformed
         illformed = load_illformed(Path(args.illformed))
     generate_all(modules, Path(args.out), probe_out=args.probe_out,
-                 missing=missing, illformed=illformed)
+                 missing=missing, illformed=illformed,
+                 module_filter=args.module_filter)
     print(f"wrote          : {args.out} ({len(modules)} modules)"
           + (f" ({len(missing)} missing symbols skipped)" if missing else "")
           + (f" ({len(illformed)} ill-formed methods skipped)" if illformed else ""))
@@ -369,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
     p_all.add_argument("--synth-cache", type=Path,
                        default=SUBMODULE_DIR / "out" / "synth" / "specs.json",
                        help="reuse/cache synthesized specializations (fast reruns)")
+    p_all.add_argument("--module-filter", default=None,
+                       help="rewrap only this module's classes "
+                            "(full context still built; skips enums/module.h)")
     p_all.set_defaults(func=cmd_generate_all)
 
     p_audit = sub.add_parser(

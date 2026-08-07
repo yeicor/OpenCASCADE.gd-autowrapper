@@ -1244,7 +1244,8 @@ def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
 def generate_all(modules: list[ModuleDecl], out_dir: Path,
                  probe_out: Path | None = None,
                  missing: set[str] | None = None,
-                 illformed: set[str] | None = None) -> list[Path]:
+                 illformed: set[str] | None = None,
+                 module_filter: str | None = None) -> list[Path]:
     """Generate all wrapper files for modules (in include-DAG order) into out_dir.
 
     `missing` (see autogen.audit) marks every generated method whose OCCT symbol
@@ -1252,6 +1253,11 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
     marks methods whose instantiation does not compile for the substituted
     template arguments.  When `probe_out` is set, a symbol-audit probe TU is
     also written there after all skip decisions are final.
+
+    `module_filter` restricts *writing* to one module's classes (all modules are
+    still loaded so the cross-module context stays complete); used by the dev
+    loop to rewrap just the module under work without rescanning.  In filtered
+    mode the enums/module.h files and the global stale-file cleanup are skipped.
     """
     ctx = build_context(modules)
     if missing:
@@ -1274,6 +1280,8 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
         return p
 
     for module in modules:
+        if module_filter is not None and module.name != module_filter:
+            continue
         for cls in module.classes:
             if cls.skip:
                 continue
@@ -1281,6 +1289,9 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
             write(f"{cls.wrapper_name}.hpp", generate_class_hpp(cls, ctx))
             write(f"{cls.wrapper_name}.cpp", generate_class_cpp(cls, ctx))
             wrappers.append(cls)
+
+    if module_filter is not None:
+        return written
 
     write("OcgEnums.hpp", generate_enums_hpp(modules))
     write("OcgEnums.cpp", generate_enums_cpp(modules))
