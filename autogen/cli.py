@@ -139,11 +139,12 @@ def _load_or_synthesize(modules, cache: Path | None):
     if cache and cache.exists():
         from .ir import load_module, dump_module
         from .synthesize import (filter_noncopyable, filter_undeclarable,
-                                 upgrade_transitive)
+                                 filter_unwrappable, upgrade_transitive)
         from .occt import find_occt_install
         synth = load_module(cache)
         if synth.name == "NCollection" and synth.classes:
             install = find_occt_install(PROJECT_ROOT)
+            synth.classes = filter_unwrappable(synth.classes, modules, install)
             synth.classes = filter_undeclarable(
                 filter_noncopyable(synth.classes, modules), install, modules)
             before = len(synth.classes)
@@ -166,7 +167,6 @@ def _load_or_synthesize(modules, cache: Path | None):
             # set (e.g. a per-module coverage run) would otherwise silently
             # shrink a full-project cache, so never overwrite one that loads.
             from .ir import dump_module
-            from .synthesize import SYNTHESIZABLE_TEMPLATES
             synth_mod = ModuleDecl(name="NCollection", classes=classes)
             cache.parent.mkdir(parents=True, exist_ok=True)
             cache.write_text(json.dumps(
@@ -248,12 +248,12 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 
 def cmd_synth_check(args: argparse.Namespace) -> int:
-    from .synthesize import REPRESENTATIVE_SPECS, synth_check
-    failures = synth_check(verbose=not args.quiet)
+    from .synthesize import synth_check
+    failures, count = synth_check(verbose=not args.quiet)
     if failures:
         print(f"synth-check    : {failures} specialization(s) failed")
         return 1
-    print(f"synth-check    : {len(REPRESENTATIVE_SPECS)} specialization(s) OK")
+    print(f"synth-check    : {count} specialization(s) OK")
     return 0
 
 

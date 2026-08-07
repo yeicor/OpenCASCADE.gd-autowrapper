@@ -7,6 +7,7 @@ The generator consumes these models to produce godot-cpp wrapper code.
 from __future__ import annotations
 
 import enum
+import hashlib
 from dataclasses import dataclass, field
 
 
@@ -248,6 +249,11 @@ def _sanitize_identifier(s: str) -> str:
     return s
 
 
+# Longest wrapper name that still leaves room for the ".hpp"/".cpp" suffix
+# under the 255-byte filesystem limit.
+_WRAPPER_NAME_MAX = 200
+
+
 def occt_name_to_wrapper(occt_name: str, module_name: str) -> str:
     """Convert an OCCT class name to a wrapper name with Ocg prefix.
 
@@ -262,7 +268,14 @@ def occt_name_to_wrapper(occt_name: str, module_name: str) -> str:
     clean = _sanitize_identifier(occt_name)
     parts = clean.replace("::", "_").split("_")
     camel = "".join(p[:1].upper() + p[1:] if p else "" for p in parts)
-    return f"Ocg{camel}"
+    name = f"Ocg{camel}"
+    # Nested template specializations (e.g. the 8-argument Extrema_GGExtPC)
+    # can produce names far beyond the 255-byte filesystem limit; truncate
+    # deterministically and disambiguate with a short hash of the full name.
+    if len(name) > _WRAPPER_NAME_MAX:
+        name = (name[:_WRAPPER_NAME_MAX]
+                + hashlib.sha256(occt_name.encode()).hexdigest()[:12])
+    return name
 
 
 def wrapper_name_for_enum(enum_name: str, parent_class: str) -> str:

@@ -20,6 +20,7 @@ The audit catches those at generation time instead:
 
 from __future__ import annotations
 
+from dataclasses import replace
 import heapq
 import os
 import re
@@ -112,12 +113,33 @@ def _method_display_name(cls, method) -> str:
     return f"{cls.name}::{method.name}"
 
 
-def _probe_line(cls, method, index: int) -> str:
-    params = ", ".join(render_source_type(p.type) for p in method.parameters)
+def _probe_type(t: OCCTType, ctx: tm.TypeContext) -> str:
+    """Source spelling of a signature type inside the probe TU's casts.
+
+    Placeholder-spelled self-specializations (``NCollection_IndexedDataMap<
+    TheKeyType, TheItemType, Hasher>&`` from an in-class member signature) are
+    substituted with the concrete class name; the 2-arg form is the same type
+    as the fully-defaulted 3-arg declaration, so the cast resolves.
+    """
+    return render_source_type(t)
+
+
+def _probe_line(cls, method, index: int, ctx: tm.TypeContext) -> str:
+    def resolve(t):
+        base = tm._self_specialization_base(t.base_name, cls.name, ctx)
+        if base is not None and base != t.base_name:
+            t = replace(t, base_name=base)
+        return t
+
+    params = ", ".join(render_source_type(resolve(p.type))
+                       for p in method.parameters)
     ret_is_void = (method.return_type is None
                    or (method.return_type.is_void
                        and not method.return_type.is_pointer))
-    ret = ("void" if ret_is_void else render_source_type(method.return_type))
+    if ret_is_void:
+        ret = "void"
+    else:
+        ret = render_source_type(resolve(method.return_type))
     if method.operator_type is not None:
         name = f"operator{_operator_spelling(method.operator_type.value)}"
     else:
@@ -290,7 +312,7 @@ def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str
                     or method.is_variadic:
                 continue
             lines.append(f"    // {_method_display_name(cls, method)}")
-            lines.append(f"    {_probe_line(cls, method, index)}")
+            lines.append(f"    {_probe_line(cls, method, index, ctx)}")
             index += 1
     if not lines:
         out.append("auto const ocg_sym_none = 0;")
@@ -497,7 +519,10 @@ def apply_illformed(modules, illformed: set[str]) -> int:
             for method in cls.all_methods:
                 if method.kind == MethodKind.CONSTRUCTOR or method.skip:
                     continue
-                if f"{cls.name}::{method.name}" in illformed:
+                # _extract_illformed records operators as ``Class::operator()``
+                # (via _method_display_name), not the raw ``Class::()``; match
+                # with the same spelling so operator methods are actually skipped.
+                if _method_display_name(cls, method) in illformed:
                     method.skip = True
                     method.skip_reason = ("ill-formed instantiation "
                                           "(OCCT member does not compile for "

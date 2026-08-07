@@ -67,7 +67,8 @@ for i in 1 2 3 4 5 6; do
         --out "$SCRIPT_DIR/../src/autowrapper" \
         --probe-out "$PROBE" \
         --missing "$ACCUM_MISSING" \
-        --illformed "$ACCUM_ILLFORMED"
+        --illformed "$ACCUM_ILLFORMED" \
+        --synth-cache "$SCRIPT_DIR/out/synth/specs.json"
 
     if ! "$PYTHON" -m autogen audit --irs out/ir/*.json \
             --probe "$PROBE" \

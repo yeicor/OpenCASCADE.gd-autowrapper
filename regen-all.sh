@@ -27,6 +27,7 @@ for i in 1 2 3 4 5 6; do
     "$PYTHON" -m autogen generate-all --irs out/ir/*.json \
         --out "$SCRIPT_DIR/../src/autowrapper" \
         --probe-out "$PROBE" \
+        --synth-cache "$SCRIPT_DIR/out/synth/specs.json" \
         --missing "$ACCUM_MISSING" \
         --illformed "$ACCUM_ILLFORMED"
 

@@ -12,7 +12,8 @@ from pathlib import Path
 
 from .model import (ClassDecl, ClassKind, MethodDecl, MethodKind, ModuleDecl,
                     OCCTType)
-from .names import get_method_unique_name, group_overloads, to_snake_case
+from .names import (_type_to_string, get_method_unique_name,
+                    group_overloads, to_snake_case)
 from . import typemap as tm
 
 # ---------------------------------------------------------------------------
@@ -114,7 +115,11 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
                     continue
                 if cls.kind == ClassKind.REF_COUNTED:
                     continue
-                if any(f.type.base_name in ctx.noncopyable for f in cls.fields):
+                # Pointer and handle members do not delete copy semantics of the
+                # enclosing class (copying the pointer/refcount is fine even when
+                # the pointee is non-copyable); only by-value members propagate.
+                if any(not f.type.is_pointer and not f.type.is_handle
+                       and f.type.base_name in ctx.noncopyable for f in cls.fields):
                     ctx.noncopyable.add(cls.name)
                     changed = True
     for module in modules:
@@ -145,7 +150,10 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
 def _default_constructible(cls: ClassDecl) -> bool:
     """A wrapper can hold `T _native` iff the class has a public default ctor
     or declares no constructors at all (implicit default ctor)."""
-    if cls.is_abstract:
+    # libclang cannot evaluate abstractness for class templates
+    # (cursor.is_abstract_record() is False for them), but the pure-virtual
+    # members are still extracted; either signal forbids value storage.
+    if cls.is_abstract or cls.has_pure_virtual:
         return False  # cannot value-initialize an abstract type
     return cls.has_public_default_ctor or not cls.has_any_ctor
 
@@ -414,6 +422,29 @@ _ITERATOR_PROTOCOL_METHODS = frozenset(
     {"begin", "end", "cbegin", "cend", "rbegin", "rend", "crbegin", "crend"})
 
 
+def _first_unmappable(cls: ClassDecl, method: MethodDecl,
+                      ctx: tm.TypeContext) -> str | None:
+    """Spelling of the first type that cannot cross the FFI, or None.
+
+    Mirrors the None return of ``_method_decl_signature`` exactly so skip
+    reasons name the actual offending type instead of a blanket label.
+    """
+    for p in method.parameters:
+        conv = tm.cpp_param(p.type, p.name, ctx, cls)
+        if conv is None:
+            return p.type.spelling
+        if conv.is_ostream:
+            continue
+    if method.return_type is None or (method.return_type.is_void
+                                      and not method.return_type.is_pointer):
+        return None
+    has_ostream = _has_ostream_param(method)
+    if tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream,
+                     cls=cls) is None:
+        return method.return_type.spelling
+    return None
+
+
 def _method_skip_reason(cls: ClassDecl, method: MethodDecl,
                         ctx: tm.TypeContext) -> str:
     """Precise reason a method's signature cannot cross the FFI.
@@ -427,6 +458,9 @@ def _method_skip_reason(cls: ClassDecl, method: MethodDecl,
         return "exception diagnostic method (no native storage)"
     if method.name in _ITERATOR_PROTOCOL_METHODS:
         return "container iterator protocol (begin/end)"
+    bad = _first_unmappable(cls, method, ctx)
+    if bad is not None:
+        return f"unmappable type: {bad}"
     return "unmappable type"
 
 
@@ -446,7 +480,7 @@ def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
         else:
             ret = "void"
     else:
-        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream)
+        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream, cls=cls)
         if rconv is None:
             return None
         ret = rconv.cpp_type
@@ -455,6 +489,7 @@ def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
 
 
 def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
+    _skip_ambiguous_ctor_calls(cls, ctx)
     cg = _cg(cls, ctx)
     base = cg.wrapper_base or "RefCounted"
     out: list[str] = []
@@ -651,7 +686,7 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
             cpp_type="String", gd_type="STRING",
             body="{call};\n        return ::godot::String::utf8(ocg_os.str().c_str());")
     else:
-        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream)
+        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream, cls=cls)
         if rconv is None:
             return None
 
@@ -834,6 +869,51 @@ def _default_ctor(ctor: MethodDecl) -> bool:
     return len(ctor.parameters) == 0
 
 
+def _skip_ambiguous_ctor_calls(cls: ClassDecl, ctx: tm.TypeContext) -> None:
+    """Skip ctor bindings whose emitted ``new T(args...)`` is ambiguous.
+
+    A call passing N args is ambiguous when another ctor of arity M > N has
+    the same first-N parameter *types* and defaulted trailing params: both are
+    viable with identical conversion sequences, and default arguments do not
+    participate in overload-resolution tie-breaking (e.g. an ``IntPolyh_Array``
+    ``(int)`` binding colliding with ``(int, int = 256)``).  The shorter
+    binding is dropped; the longest binding in a collision chain stays
+    unambiguous.
+
+    Comparison uses the canonical C++ type of each parameter, not the mapped
+    GDScript type: ``const char16_t*`` and ``const char*`` both map to
+    ``String`` but are distinct C++ types, so a ``(const char16_t*)`` ctor is
+    *not* ambiguous with a ``(const char*, bool = false)`` one.  Idempotent:
+    safe to call from both the hpp and cpp paths.
+    """
+    bound: list[tuple[MethodDecl, list[str]]] = []
+    for ctor in cls.constructors:
+        if ctor.skip or _default_ctor(ctor):
+            continue
+        types: list[str] = []
+        for p in ctor.parameters:
+            conv = tm.cpp_param(p.type, p.name, ctx, cls)
+            if conv is None or conv.is_ostream:
+                types = []
+                break
+            types.append(_type_to_string(p.type))
+        if types:
+            bound.append((ctor, types))
+    for ctor, types in bound:
+        for other, other_types in bound:
+            if other is ctor or len(other_types) <= len(types):
+                continue
+            if other_types[: len(types)] != types:
+                continue
+            if all(p.default_value is not None
+                   for p in other.parameters[len(types):]):
+                ctor.skip = True
+                ctor.skip_reason = ("ambiguous constructor call "
+                                    "(collides with a defaulted-argument "
+                                    "constructor overload)")
+                break
+
+
 _NUMERIC_DEFVAL_TYPES = {
     "bool", "char", "unsigned char", "int", "long", "long long",
     "unsigned long", "unsigned long long", "char16_t", "float", "double",
@@ -979,6 +1059,7 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
 
 
 def generate_class_cpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
+    _skip_ambiguous_ctor_calls(cls, ctx)
     cg = _cg(cls, ctx)
     out: list[str] = []
     out.append(f"// Auto-generated wrapper for {cls.name} -- DO NOT EDIT")
@@ -1144,7 +1225,8 @@ def _primitive_wrapper_names_used(modules: list[ModuleDecl],
                 continue
             for method in cls.all_methods:
                 for p in method.parameters:
-                    if p.type.is_ref and not p.type.is_const:
+                    if (p.type.is_ref and not p.type.is_const) \
+                            or (p.type.is_pointer and not p.type.pointee_is_const):
                         if p.type.base_name in tm.PRIMITIVE_WRAPPER_MAP:
                             keys.add(p.type.base_name)
     return keys

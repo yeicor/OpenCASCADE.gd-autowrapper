@@ -249,6 +249,63 @@ def _container_iterator_param(t: OCCTType, name: str, cls,
                      prelude=prelude, call_expr=it)
 
 
+def _self_specialization_base(base_name: str, cls_name: str,
+                              ctx: TypeContext) -> str | None:
+    """Concrete class name if `base_name` is the enclosing class's own
+    specialization spelled with in-class template parameter names (e.g.
+    ``NCollection_IndexedDataMap<TheKeyType, TheItemType, Hasher>`` against the
+    class ``NCollection_IndexedDataMap<K, V>``); else None.
+
+    Only the SAME specialization qualifies: every top-level arg must be a bare
+    identifier that is no known OCCT type (a param like
+    ``Append(const NCollection_List<TopoDS_Shape>&)`` shares the template head
+    but is the ITEM type, not the self type).
+    """
+    m = _TEMPLATE_RE.match(base_name)
+    cm = _TEMPLATE_RE.match(cls_name)
+    if not m or not cm or m.group(1) != cm.group(1):
+        return None
+    args = _split_template_args(m.group(2))
+    if len(args) < len(_split_template_args(cm.group(2))):
+        return None
+    for arg in args:
+        if re.match(r"^[A-Za-z_]\w*$", arg) \
+                and arg not in ctx.wrapped \
+                and arg not in ctx.occt_classes \
+                and arg not in PRIMITIVE_MAP:
+            continue
+        return None
+    return cls_name
+
+
+def _self_specialization_param(t: OCCTType, name: str, cls,
+                               ctx: TypeContext) -> ParamConv | None:
+    """Map a parameter spelled with the enclosing template's placeholder names
+    (e.g. ``Exchange(NCollection_IndexedDataMap<TheKeyType, TheItemType,
+    Hasher>&)``) to the wrapper's own class.
+
+    In-class signatures render the self type with the template parameter names
+    (TheKeyType/TheItemType/Hasher), so ``_wrapped_key`` cannot match them; the
+    parameter is the same specialization as ``*this``, so it is passed as a
+    ``Ref`` to the enclosing wrapper's own storage.
+    """
+    if not (t.is_ref or t.is_pointer):
+        return None
+    if _self_specialization_base(t.base_name, cls.name, ctx) is None:
+        return None
+    w = cls.wrapper_name
+    if w in ctx.handles:
+        call = f"*{name}->_handle"
+    elif w in ctx.unique_ptr:
+        call = f"*{name}->_native"
+    elif w in ctx.inherited_value:
+        call = f"{name}->_native_ref()"
+    else:
+        call = f"{name}->_native"
+    return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
+                     call_expr=call)
+
+
 def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
               cls=None) -> ParamConv | None:
     name = safe_param_name(name)
@@ -256,6 +313,9 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
     stream = stream_kind(t) if t.is_ref else None
     if cls is not None:
         conv = _container_iterator_param(t, name, cls, ctx)
+        if conv is not None:
+            return conv
+        conv = _self_specialization_param(t, name, cls, ctx)
         if conv is not None:
             return conv
     if t.is_ref and stream == "out":
@@ -288,7 +348,8 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
         cpp, gd = PRIMITIVE_MAP[t.base_name]
         return ParamConv(cpp_type=cpp, gd_type=gd, name=name,
                          call_expr=_rw(move, name))
-    if t.is_handle and t.handle_inner in ctx.wrapped:
+    if t.is_handle and t.handle_inner in ctx.wrapped \
+            and ctx.wrapped[t.handle_inner] in ctx.handles:
         w = ctx.wrapped[t.handle_inner]
         return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
                          call_expr=_rw(move, f"{name}->_handle"))
@@ -315,6 +376,16 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
     if t.base_name == "std::string" or t.base_name.startswith("std::basic_string<char>"):
         return ParamConv(cpp_type="String", gd_type="STRING", name=name,
                          call_expr=f"std::string({name}.utf8().get_data())")
+    if t.is_ref and (t.base_name == "std::string_view"
+                     or t.base_name.startswith("std::basic_string_view<")):
+        # std::string_view is a non-owning view of a string the caller still
+        # owns, so a Godot String can back it directly for the call.
+        if t.base_name.startswith("std::basic_string_view<char16_t>"):
+            call = f"std::u16string_view({name}.utf16())"
+        else:
+            call = f"std::string_view({name}.utf8().get_data())"
+        return ParamConv(cpp_type="String", gd_type="STRING", name=name,
+                         call_expr=call)
     return None
 
 
@@ -330,7 +401,8 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
     if b in ("char16_t",) and t.pointee_is_const:
         return ParamConv(cpp_type="String", gd_type="STRING", name=name,
                          call_expr=f"{name}.utf16()")
-    if t.is_handle and t.handle_inner in ctx.wrapped:
+    if t.is_handle and t.handle_inner in ctx.wrapped \
+            and ctx.wrapped[t.handle_inner] in ctx.handles:
         # handle<T>* — pointer to a handle, not to the pointee (e.g. the
         # NCollection_Array1/Array2 ctor taking `const T* theBegin` with
         # T = handle<...>).  Pass the address of the wrapper's stored handle.
@@ -353,6 +425,14 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
                 call = f"&{name}->{native}"
             return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
                              call_expr=call)
+    if not t.pointee_is_const and b in PRIMITIVE_WRAPPER_MAP:
+        # Non-const scalar pointer = out-parameter (e.g. `int* theCount`).
+        # Pass the address of the box's native storage so OCCT writes the
+        # result back into the caller's box in place — the same semantics as
+        # non-const reference parameters.
+        wrapper = PRIMITIVE_WRAPPER_MAP[b]
+        return ParamConv(cpp_type=f"Ref<{wrapper[0]}>", gd_type=wrapper[1],
+                         name=name, call_expr=f"&{name}->_native")
     return None
 
 
@@ -367,7 +447,8 @@ def _enum_param(t: OCCTType, name: str, ctx: TypeContext, move: bool = False) ->
                      call_expr=f"static_cast<{t.base_name}>({_rw(move, name)})")
 
 
-def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False) -> RetConv | None:
+def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False,
+               cls=None) -> RetConv | None:
     """Map a return type; has_ostream: method consumes a Standard_OStream&."""
     if has_ostream and (stream_kind(t) is not None or
                         (t.base_name == "void" and not t.is_pointer)):
@@ -376,6 +457,15 @@ def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False) -> RetC
         # conversion, so surface the text that would have been written.
         return RetConv(cpp_type="String", gd_type="STRING",
                        body="{call};\n        return ::godot::String::utf8(ocg_os.str().c_str());")
+    if cls is not None and t.is_ref:
+        self_base = _self_specialization_base(t.base_name, cls.name, ctx)
+        if self_base is not None:
+            # `Container& Assign(const Container&)`-style chaining returns the
+            # very object the method was called on; surface that identity as a
+            # Ref to the enclosing wrapper itself instead of a copy.
+            w = cls.wrapper_name
+            return RetConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT",
+                           body="{call};\n        return Ref<" + w + ">(this);")
     if t.base_name == "void" and not t.is_pointer:
         return RetConv(cpp_type="void", gd_type="NIL", body="{call};")
     if t.is_pointer:
@@ -400,10 +490,24 @@ def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False) -> RetC
                        body="return ::godot::String::utf8({call}.c_str());")
     if t.is_handle and t.handle_inner in ctx.wrapped:
         w = ctx.wrapped[t.handle_inner]
-        sync = f"\n        wrapper->_sync_base_storage();" if w in ctx.sync_bases else ""
+        if w in ctx.handles:
+            sync = f"\n        wrapper->_sync_base_storage();" if w in ctx.sync_bases else ""
+            body = ("auto result = {call};\n"
+                    "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
+                    "        wrapper->_handle = result;" + sync + "\n"
+                    "        return wrapper;")
+            return RetConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", body=body)
+        # handle<T> return whose inner type's wrapper stores the value natively
+        # (e.g. Graphic3d_BvhCStructureSetTrsfPers::BVH returning
+        # handle<BVH_Tree<double, 3>>): the parser flags `is_handle` from the
+        # spelling, but the wrapper has no `_handle`; copy the pointee out.
+        key = t.handle_inner
+        if key in ctx.noncopyable:
+            return None
+        native = "_native_ref()" if w in ctx.inherited_value else "_native"
         body = ("auto result = {call};\n"
                 "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
-                "        wrapper->_handle = result;" + sync + "\n"
+                "        wrapper->" + native + " = *result;\n"
                 "        return wrapper;")
         return RetConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", body=body)
     key = _wrapped_key(t.base_name, ctx)
@@ -463,6 +567,47 @@ def _cpp_pointer_return(t: OCCTType, ctx: TypeContext) -> RetConv | None:
                        body="auto result = {call};\n"
                             '        if (!result) { return ""; }\n'
                             "        return ::godot::String::utf16(result->ToExtString());")
+    # Raw V* (pointer to one wrapped value, e.g. map Seek/ChangeSeek/Bound or
+    # Vec2::GetData): transfer a copy of the pointee; a null pointee (absent
+    # key) surfaces as an empty object/zero value.
+    key = _wrapped_key(b, ctx)
+    if key is not None and key not in ctx.noncopyable:
+        w = ctx.wrapped[key]
+        if w in ctx.handles:
+            # Two spellings of a ref-counted pointee cross here:
+            #   * is_handle:  `handle<T>*`, a pointer to a stored handle (e.g.
+            #     DataMap<K, handle<T>>::Seek/Bound) -> deref the pointer.
+            #   * plain class: the `handle<T>`/`const handle<T>&` spelling is
+            #     stripped by the parser (e.g. InteractiveContext()), so
+            #     `result` is already a handle (or a raw T*, which
+            #     handle::operator=(const T*) also accepts) -> assign directly.
+            sync = f"\n        wrapper->_sync_base_storage();" if w in ctx.sync_bases else ""
+            deref = "*" if t.is_handle else ""
+            body = ("auto result = {call};\n"
+                    '        if (!result) { return Ref<' + w + '>(); }\n'
+                    "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
+                    "        wrapper->_handle = " + deref + "result;" + sync + "\n"
+                    "        return wrapper;")
+        elif w in ctx.unique_ptr:
+            body = ("auto result = {call};\n"
+                    '        if (!result) { return Ref<' + w + '>(); }\n'
+                    "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
+                    "        wrapper->_native = std::make_unique<" + _occt_qual(key) + ">(*result);\n"
+                    "        return wrapper;")
+        else:
+            native = "_native_ref()" if w in ctx.inherited_value else "_native"
+            body = ("auto result = {call};\n"
+                    '        if (!result) { return Ref<' + w + '>(); }\n'
+                    "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
+                    "        wrapper->" + native + " = *result;\n"
+                    "        return wrapper;")
+        return RetConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", body=body)
+    if b in PRIMITIVE_MAP:
+        cpp, gd = PRIMITIVE_MAP[b]
+        body = ("auto result = {call};\n"
+                "        if (!result) { return " + cpp + "(); }\n"
+                "        return *result;")
+        return RetConv(cpp_type=cpp, gd_type=gd, body=body)
     return None
 
 
