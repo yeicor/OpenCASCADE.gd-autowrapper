@@ -869,10 +869,27 @@ def _defval_suffix(cls: ClassDecl, method: MethodDecl, ctx: tm.TypeContext) -> s
             break
         if p.type.is_enum or p.type.base_name not in _NUMERIC_DEFVAL_TYPES:
             break
-        parts.append(f"DEFVAL({_qualify_default(cls, p.default_value)})")
+        parts.append(f"DEFVAL({_clean_numeric_default(
+            _qualify_default(cls, p.default_value))})")
     if not parts:
         return ""
     return ", " + ", ".join(reversed(parts))
+
+
+def _clean_numeric_default(dflt: str) -> str:
+    """Strip a functional-cast type from a numeric default.
+
+    Substituted template defaults read e.g. ``unsigned long(0)`` (from ``T()``
+    with ``T`` a multi-word primitive); ``DEFVAL(unsigned long(0))`` does not
+    parse, so unwrap the inner literal.  ``true``/``false``/plain literals pass
+    through untouched.
+    """
+    if dflt.isidentifier():
+        return dflt
+    m = re.match(r"^[A-Za-z_]\w*(?: [A-Za-z_]\w*)*\((.*)\)$", dflt, re.S)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return dflt
 
 
 def _bind_arg_names(method: MethodDecl, ctx: tm.TypeContext,

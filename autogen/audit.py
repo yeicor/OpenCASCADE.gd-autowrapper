@@ -36,6 +36,17 @@ _OPERATOR_SPELLING = {
     "unary_minus": "-", "unary_plus": "+", "*deref": "*", "call": "()",
 }
 
+# Header pairs whose relative order matters but is invisible to ``_hygiene_order``
+# (the referenced name is a template / namespace, not a registered class).  Each
+# entry forces ``header`` to be included *after* every ``must_follow`` header.
+_HEADER_PRECEDENCE: dict[str, frozenset[str]] = {
+    # Circular include: NCollection_PackedMap.hxx includes NCollection_PackedMapAlgo.hxx
+    # at line ~870, and NCollection_PackedMapAlgo.hxx re-includes NCollection_PackedMap.hxx.
+    # If Algo is included first, PackedMap's member-template bodies reference the
+    # ``NCollection_PackedMapAlgo`` namespace that the guarded inner include skipped.
+    "NCollection_PackedMapAlgo.hxx": frozenset({"NCollection_PackedMap.hxx"}),
+}
+
 
 def _operator_spelling(op: str) -> str:
     return _OPERATOR_SPELLING.get(op, op)
@@ -181,7 +192,7 @@ def _hygiene_order(closure: list[Path], ctx: tm.TypeContext) -> list[Path]:
     idx = {h.name: i for i, h in enumerate(closure)}
     class_idx: dict[str, int] = {}
     for cls, hdr in ctx.occt_headers.items():
-        j = idx.get(hdr)
+        j = idx.get(Path(hdr).name) if hdr else None
         if j is not None:
             class_idx[cls] = j
     if not class_idx:
@@ -203,6 +214,14 @@ def _hygiene_order(closure: list[Path], ctx: tm.TypeContext) -> list[Path]:
             j = class_idx[cls]
             if j != i:
                 deps[i].add(j)
+    for name, must_follow in _HEADER_PRECEDENCE.items():
+        i = idx.get(name)
+        if i is None:
+            continue
+        for pre in must_follow:
+            j = idx.get(pre)
+            if j is not None and j != i:
+                deps[i].add(j)
 
     heap = [i for i, d in enumerate(deps) if not d]
     heapq.heapify(heap)
@@ -220,8 +239,33 @@ def _hygiene_order(closure: list[Path], ctx: tm.TypeContext) -> list[Path]:
                 if not deps[k]:
                     heapq.heappush(heap, k)
     if len(out) != len(closure):
-        for i in range(len(closure)):
-            if not emitted[i]:
+        rest = [i for i in range(len(closure)) if not emitted[i]]
+        rest_set = set(rest)
+        pred: dict[int, set[int]] = {i: set() for i in rest}
+        for name, must_follow in _HEADER_PRECEDENCE.items():
+            i = idx.get(name)
+            if i is None or i not in rest_set:
+                continue
+            for pre in must_follow:
+                j = idx.get(pre)
+                if j is not None and j in rest_set and j != i:
+                    pred[i].add(j)
+        heap2 = [i for i in rest if not pred[i]]
+        heapq.heapify(heap2)
+        emitted2: set[int] = set()
+        while heap2:
+            i = heapq.heappop(heap2)
+            if i in emitted2:
+                continue
+            emitted2.add(i)
+            out.append(closure[i])
+            for k in rest:
+                if k not in emitted2 and i in pred[k]:
+                    pred[k].discard(i)
+                    if not pred[k]:
+                        heapq.heappush(heap2, k)
+        for i in rest:
+            if i not in emitted2:
                 out.append(closure[i])
     return out
 

@@ -165,6 +165,99 @@ _SPEC_RE = re.compile(r"^([A-Za-z_]\w*)<(.*)>$")
 
 _OCG_RE = re.compile(r"\bOcg[A-Za-z_][A-Za-z0-9_]*\b")
 
+# Class-template parameter names that can survive into a synthesized signature
+# when a nested template argument was not substituted (e.g. an IndexedDataMap
+# method naming ``NCollection_IndexedDataMap<TheKeyType, TheItemType, Hasher>``).
+# Such spellings are not concrete types and must never be synthesized.
+_PLACEHOLDER_ARGS = frozenset({"TheKeyType", "TheItemType", "TheKey", "TheItem",
+                               "Hasher"})
+
+
+def _has_placeholder_args(key: str) -> bool:
+    m = _SPEC_RE.match(key)
+    return bool(m and any(a in _PLACEHOLDER_ARGS for a in _split_args(m.group(2))))
+
+
+def _arg_prefix_covered(key: str, known: set[str]) -> bool:
+    """True if `key` names the same type as a known spec with fewer args.
+
+    OCCT spells defaulted trailing template parameters in some signatures, so
+    ``NCollection_Map<K, NCollection_DefaultHasher<K>>`` is the same type as an
+    already-known ``NCollection_Map<K>``.  Synthesizing both would emit two
+    wrapper classes for one OCCT type.
+    """
+    m = _SPEC_RE.match(key)
+    if not m:
+        return True
+    tname, args = m.group(1), _split_args(m.group(2))
+    for k in known:
+        km = _SPEC_RE.match(k)
+        if not km or km.group(1) != tname:
+            continue
+        ka = _split_args(km.group(2))
+        if len(ka) <= len(args) and ka == args[:len(ka)]:
+            return True
+    return False
+
+
+def _transitive_extend(classes: list[object], known: set[str], install: Path,
+                       modules: list[ModuleDecl],
+                       header_map: dict[str, str],
+                       noncopyable: set[str]) -> list[object]:
+    """Grow a synthesized-spec list to a transitive fixpoint.
+
+    Specializations reachable only through *other synthesized* classes (e.g.
+    ``HSequence<T>::ChangeArray1`` naming ``NCollection_Array1<T>``) never
+    appear in the scanned IR, so a single collection pass misses them.  Re-scan
+    the synthesized classes' signatures until no new nameable spec appears.
+    """
+    while True:
+        module = ModuleDecl(name="NCollection", classes=classes)
+        fresh = {k for k in _collect_template_specs([module])
+                 if k not in known and not _arg_prefix_covered(k, known)
+                 and not _has_placeholder_args(k)}
+        if not fresh:
+            return classes
+        specs = {k: v for k, v in _collect_template_specs([module]).items()
+                 if k in fresh}
+        undeclarable = _undeclarable_specs(specs, install, modules) if specs else set()
+        for key in sorted(fresh):
+            if key in undeclarable:
+                print(f"synth          : SKIP {key} (template arg not publicly "
+                      "nameable)", file=__import__("sys").stderr)
+                known.add(key)
+                continue
+            header, args = specs[key]
+            if _specialization_broken(key, noncopyable):
+                print(f"synth          : SKIP {key} (non-copyable template arg)",
+                      file=__import__("sys").stderr)
+                known.add(key)
+                continue
+            try:
+                cls = synth_template_spec(header, key.split("<", 1)[0], args,
+                                          install=install, header_map=header_map)
+                cls.name = key
+                classes.append(cls)
+            except Exception as e:  # noqa: BLE001
+                print(f"synth          : SKIP {key}: {e}",
+                      file=__import__("sys").stderr)
+            known.add(key)
+    return classes
+
+
+def upgrade_transitive(classes: list[object], modules: list[ModuleDecl],
+                       install: Path) -> list[object]:
+    """Add transitively-reachable specializations to a cached spec list.
+
+    Idempotent: after a cache has been upgraded once, a later load finds no
+    new specs and returns the classes unchanged (cheap pure-Python scan).
+    """
+    known = {getattr(c, "name", "") for c in classes}
+    known |= set(_collect_template_specs(modules))
+    return _transitive_extend(classes, known, install, modules,
+                              _build_header_map(modules),
+                              _noncopyable_classes(modules))
+
 
 def _collect_template_specs(modules: list[ModuleDecl]) -> dict[str, tuple[str, list[str]]]:
     """Distinct class-template specializations used in OCCT signatures.
@@ -360,6 +453,8 @@ def synthesize_all(modules: list[ModuleDecl]) -> list[object]:
         except Exception as e:  # noqa: BLE001
             failures.append(f"{key}: {e}")
             print(f"synth          : SKIP {key}: {e}", flush=True)
+    out = _transitive_extend(out, set(specs), install, modules, header_map,
+                             noncopyable)
     synthesize_all.last_failures = failures
     return out
 

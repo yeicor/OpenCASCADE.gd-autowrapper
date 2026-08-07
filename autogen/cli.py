@@ -137,16 +137,26 @@ def _load_or_synthesize(modules, cache: Path | None):
     """
     from .model import ModuleDecl
     if cache and cache.exists():
-        from .ir import load_module
-        from .synthesize import filter_noncopyable, filter_undeclarable
+        from .ir import load_module, dump_module
+        from .synthesize import (filter_noncopyable, filter_undeclarable,
+                                 upgrade_transitive)
         from .occt import find_occt_install
         synth = load_module(cache)
         if synth.name == "NCollection" and synth.classes:
+            install = find_occt_install(PROJECT_ROOT)
             synth.classes = filter_undeclarable(
-                filter_noncopyable(synth.classes, modules),
-                find_occt_install(PROJECT_ROOT), modules)
+                filter_noncopyable(synth.classes, modules), install, modules)
+            before = len(synth.classes)
+            synth.classes = upgrade_transitive(synth.classes, modules, install)
             print(f"synth          : loaded {len(synth.classes)}"
                   f" specialization(s) from {cache}")
+            if len(synth.classes) > before:
+                # Extend a stale cache with the newly-synthesized transitive
+                # specializations so later runs stay fast.
+                cache.write_text(json.dumps(
+                    dump_module(synth), indent=1, default=_json_default))
+                print(f"synth          : upgraded {len(synth.classes) - before}"
+                      f" transitive specialization(s) in {cache}")
             return synth.classes, True
     try:
         from .synthesize import synthesize_all
