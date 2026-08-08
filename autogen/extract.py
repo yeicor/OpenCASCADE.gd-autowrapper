@@ -86,6 +86,8 @@ def classify_operator(name: str) -> tuple[OperatorType | None, str]:
         return COMPOUND_OPERATOR_TYPES[op], op
     if op in UNARY_OPERATOR_TYPES:
         return UNARY_OPERATOR_TYPES[op], f"unary_{op}"
+    if op in ("++", "--"):
+        return (OperatorType.INCREMENT if op == "++" else OperatorType.DECREMENT), op
     if op == "()":
         return OperatorType.CALL, "()"
     return None, ""

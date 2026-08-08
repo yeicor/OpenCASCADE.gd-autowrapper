@@ -20,7 +20,22 @@ OPERATOR_NAME_MAP = {
     "%": "modulo", "^": "cross",
     "+=": "add_assign", "-=": "subtract_assign",
     "*=": "multiply_assign", "/=": "divide_assign", "^=": "cross_assign",
+    "++": "increment", "--": "decrement",
     "=": "assign",
+    # Unrecognized operators fall through classify_operator (extract.py) and
+    # reach codegen as plain methods named "operator<tok>"; those raw names
+    # would produce invalid member declarations (e.g. `operator++_g`), so map
+    # the spellings the extractor could not classify (cached IR included).
+    "operator++": "increment", "operator--": "decrement",
+    "operator!": "logical_not", "operator~": "complement",
+    "operator&=": "and_assign", "operator|=": "or_assign",
+    "operator->": "dereference", "operator&&": "logical_and",
+    "operator||": "logical_or", "operator<<": "left_shift",
+    "operator>>": "right_shift", "operator<<=": "left_shift_assign",
+    "operator>>=": "right_shift_assign", "operator^=": "xor_assign",
+    "operator!=": "not_equal", "operator==": "equal",
+    "operator<": "less", "operator>": "greater",
+    "operator<=": "less_equal", "operator>=": "greater_equal",
     "unary_minus": "negate", "unary_plus": "plus",
     "*deref": "dereference", "()": "call",
 }
@@ -53,6 +68,13 @@ _CPP_KEYWORDS = {
     "volatile", "wchar_t", "while", "xor", "xor_eq",
 }
 
+# godot-cpp RefCounted's refcount API is invoked through the wrapper pointer
+# by Ref<>/instance binding (`reference->init_ref()`, `reference->reference()`);
+# a generated wrapper method of the same name (e.g. CDM_Document::Reference)
+# would hide the base member and break the FFI refcount.  Reserve the whole
+# contract (unreference/get_reference_count for the same reason).
+_REFCOUNT_RESERVED = {"reference", "unreference", "init_ref", "get_reference_count"}
+
 
 def to_snake_case(name: str) -> str:
     """Convert a CamelCase/PascalCase identifier to snake_case (idempotent)."""
@@ -63,7 +85,7 @@ def to_snake_case(name: str) -> str:
 def safe_gd_name(name: str) -> str:
     """snake_case a name, guarding C++ keywords and GDCLASS-injected statics."""
     s = to_snake_case(name)
-    if s in _CPP_KEYWORDS or s in _GDCLASS_RESERVED:
+    if s in _CPP_KEYWORDS or s in _GDCLASS_RESERVED or s in _REFCOUNT_RESERVED:
         s += "_"
     return s
 

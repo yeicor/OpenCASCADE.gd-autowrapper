@@ -140,6 +140,15 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
                 ctx.handles.add(cls.wrapper_name)
             elif not _default_constructible(cls):
                 ctx.unique_ptr.add(cls.wrapper_name)
+            # Mirror _cg()'s "none" storage: EXCEPTION wrappers and pure-static
+            # utility classes hold no native object, so they cannot appear as a
+            # method parameter or return (the typemap drops such methods).
+            if cls.kind == ClassKind.EXCEPTION or (
+                    cls.static_methods and not cls.methods and not cls.operators
+                    and not cls.fields and not cls.has_any_public_ctor):
+                ctx.no_storage.add(cls.wrapper_name)
+            if not cls.returnable:
+                ctx.no_return.add(cls.wrapper_name)
     for module in modules:
         for enum in module.enums:
             if enum.is_public:
@@ -149,7 +158,14 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
 
 def _default_constructible(cls: ClassDecl) -> bool:
     """A wrapper can hold `T _native` iff the class has a public default ctor
-    or declares no constructors at all (implicit default ctor)."""
+    or declares no constructors at all (implicit default ctor).
+
+    `cls.default_constructible` overrides the heuristic when the symbol audit
+    proved `T()` ill-formed (the probe compiled `(void)T();` and the compiler
+    rejected it); such classes must fall back to unique_ptr storage.
+    """
+    if cls.default_constructible is not None:
+        return cls.default_constructible
     # libclang cannot evaluate abstractness for class templates
     # (cursor.is_abstract_record() is False for them), but the pure-virtual
     # members are still extracted; either signal forbids value storage.
@@ -368,7 +384,7 @@ def _nested_enum_hpp_lines(cls: ClassDecl) -> list[str]:
 def _field_accessor_decls(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
     lines: list[str] = []
     for f in cls.fields:
-        if not f.is_public:
+        if not f.is_public or f.skip:
             continue
         snake = to_snake_case(f.name)
         gret = tm.cpp_return(f.type, ctx)
@@ -923,7 +939,7 @@ def _field_accessor_bodies(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
         target = "_native_ref()" if cg.inherited_native else "_native"
         get_guard_tmpl, set_guard = None, None
     for f in cls.fields:
-        if not f.is_public:
+        if not f.is_public or f.skip:
             continue
         snake = to_snake_case(f.name)
         gret = tm.cpp_return(f.type, ctx)
@@ -1102,7 +1118,7 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
                 f'{", " + args if args else ""}), '
                 f"&{cls.wrapper_name}::{unique}{defv});")
     for f in cls.fields:
-        if not f.is_public:
+        if not f.is_public or f.skip:
             continue
         snake = to_snake_case(f.name)
         gret = tm.cpp_return(f.type, ctx)
@@ -1652,13 +1668,17 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
     loop to rewrap just the module under work without rescanning.  In filtered
     mode the enums/module.h files and the global stale-file cleanup are skipped.
     """
-    ctx = build_context(modules)
+    # Skip decisions (missing symbols / ill-formed instantiations) mutate the
+    # classes (e.g. pinning default_constructible / has_public_default_ctor),
+    # so they must land BEFORE build_context: the storage of every wrapper (and
+    # the typemap's unique_ptr/handle sets) is derived from those flags.
     if missing:
         from .audit import apply_missing
         apply_missing(modules, missing)
     if illformed:
         from .audit import apply_illformed
         apply_illformed(modules, illformed)
+    ctx = build_context(modules)
     wrappers: list[ClassDecl] = []
     written: list[Path] = []
     out_dir.mkdir(parents=True, exist_ok=True)

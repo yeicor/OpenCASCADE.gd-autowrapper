@@ -100,6 +100,8 @@ class TypeContext:
         self.occt_headers: dict[str, str] = {}  # occt class name -> header basename
         self.unique_ptr: set[str] = set()       # wrapper names with unique_ptr storage
         self.handles: set[str] = set()          # wrapper names with handle storage
+        self.no_storage: set[str] = set()       # wrapper names with "none" storage (no native/handle)
+        self.no_return: set[str] = set()        # wrapper names whose copy ops are ill-formed (unreturnable)
         self.noncopyable: set[str] = set()      # occt names that cannot be copied
         self.inherited_value: set[str] = set()  # wrapper names sharing base storage via _native_ref()
 
@@ -434,6 +436,12 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
     key = _wrapped_key(t.base_name, ctx)
     if key is not None:
         w = ctx.wrapped[key]
+        if w in ctx.no_storage:
+            return None  # exception / pure-static wrapper holds no native object
+        if w in ctx.no_return and not t.is_ref and not t.is_rvalue_ref:
+            # By-value params are passed as a copy of the wrapper's native;
+            # an implicitly non-copyable type cannot cross that way.
+            return None
         if w in ctx.handles:
             call = f"*{name}->_handle"
         elif w in ctx.unique_ptr:
@@ -512,6 +520,8 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
             # (null GDScript refs pass nullptr).  Mutations through the pointer are
             # visible on the caller's object, matching OCCT in/out semantics.
             w = ctx.wrapped[key]
+            if w in ctx.no_storage:
+                return None  # exception / pure-static wrapper holds no native object
             if w in ctx.handles:
                 call = f"{name}->_handle.get()"
             elif w in ctx.unique_ptr:
@@ -628,6 +638,8 @@ def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
                        body="return ::godot::String::utf8({call}.c_str());")
     if t.is_handle and t.handle_inner in ctx.wrapped:
         w = ctx.wrapped[t.handle_inner]
+        if w in ctx.no_storage:
+            return None  # exception wrapper holds no native object to wrap
         if w in ctx.handles:
             sync = f"\n        wrapper->_sync_base_storage();" if w in ctx.sync_bases else ""
             body = ("auto result = {call};\n"
@@ -640,7 +652,7 @@ def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
         # handle<BVH_Tree<double, 3>>): the parser flags `is_handle` from the
         # spelling, but the wrapper has no `_handle`; copy the pointee out.
         key = t.handle_inner
-        if key in ctx.noncopyable:
+        if key in ctx.noncopyable or w in ctx.no_return:
             return None
         native = "_native_ref()" if w in ctx.inherited_value else "_native"
         body = ("auto result = {call};\n"
@@ -651,7 +663,9 @@ def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
     key = _wrapped_key(t.base_name, ctx)
     if key is not None:
         w = ctx.wrapped[key]
-        if key in ctx.noncopyable:
+        if w in ctx.no_storage:
+            return None  # exception / pure-static wrapper holds no native object
+        if key in ctx.noncopyable or w in ctx.no_return:
             # The value type cannot be copied/assigned (e.g. holds a
             # std::unique_ptr member); a reference to a callee-owned object
             # cannot be transferred safely, and by-value returns cannot be

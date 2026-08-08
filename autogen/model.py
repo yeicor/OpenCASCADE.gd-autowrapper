@@ -52,6 +52,8 @@ class OperatorType(enum.Enum):
     UNARY_PLUS = "unary_plus"
     DEREFERENCE = "*deref"
     CALL = "call"
+    INCREMENT = "++"
+    DECREMENT = "--"
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +187,8 @@ class FieldDecl:
     doc: DocBlock = field(default_factory=DocBlock)
     is_public: bool = True
     is_const: bool = False          # True for `const` data members (read-only)
+    skip: bool = False              # True if the field's accessors cannot be generated
+    skip_reason: str = ""           # why (e.g. field type is not copyable)
 
 
 @dataclass
@@ -217,6 +221,15 @@ class ClassDecl:
     has_operator_new_delete: bool = False  # class declares operator new/delete (custom allocation)
     has_operator_new: bool = False         # class declares an operator new (any form)
     has_plain_operator_new: bool = False   # class declares operator new(size_t)
+    # None = derive from has_public_default_ctor/has_any_ctor (implicit default
+    # ctor).  False = the audit probe proved `T()` is ill-formed (e.g. a base
+    # suppresses it); forces unique_ptr storage, never native `_native()`.
+    default_constructible: bool | None = None
+    # False = the audit probe proved the type is not copy-assignable (native
+    # storage) or not copy-constructible (unique_ptr storage) as emitted by the
+    # value/reference-return wrappers, e.g. implicitly deleted copy semantics
+    # the extractor cannot see.  Methods returning it are dropped.
+    returnable: bool = True
     skip: bool = False                 # True if the class cannot be wrapped
     skip_reason: str = ""
 

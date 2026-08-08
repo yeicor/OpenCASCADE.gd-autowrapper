@@ -124,6 +124,26 @@ def _probe_type(t: OCCTType, ctx: tm.TypeContext) -> str:
     return render_source_type(t)
 
 
+def _field_probe_line(cls, f, index: int) -> str:
+    """Probe the generated ``_ocg_field_get_/set_`` accessors of a public data
+    member: the getter copy-constructs the field value and the setter assigns
+    it, so a member type with implicitly deleted copy semantics (e.g. a class
+    holding ``std::atomic`` through a template) makes the accessors ill-formed.
+    ``std::declval`` cannot be *called* in an evaluated context, so the lambda
+    body reaches a reference through ``ocg_field_probe_ref`` (a never-executed
+    inline helper that dereferences a null pointer, making the copy/assign
+    expressions compile or fail here).  Emitted as a function definition (like
+    the ctor probes) since expression statements are invalid at namespace
+    scope; the ``ocg_field_`` function name carries the diagnostic marker."""
+    assign = (f"ocg_field_probe_ref<_C>().{f.name} = "
+              f"ocg_field_probe_ref<const _T>(); "
+              if not f.is_const else "")
+    head = f"void ocg_field_{index:05d}() {{ (void)[] {{ using _C = ::{cls.name}; "
+    tail = f"using _T = std::remove_reference<decltype(std::declval<_C&>().{f.name})>::type; "
+    body = f"_T _v = ocg_field_probe_ref<const _C>().{f.name}; {assign}"
+    return head + tail + body + "}(); }"
+
+
 def _probe_line(cls, method, index: int, ctx: tm.TypeContext) -> str:
     def resolve(t):
         base = tm._self_specialization_base(t.base_name, cls.name, ctx)
@@ -269,6 +289,30 @@ def _default_ctor_probe_line(cls, ctx, index: int) -> str:
         return (f"void ocg_dctor_{index:05d}() "
                 f"{{ (void)::{cls.name}(); }}")
     return ""
+
+
+def _copy_probe_line(cls, ctx, index: int) -> str:
+    """Probe the copy operation a wrapped value/reference return emits (native
+    wrappers copy-assign into ``_native``; unique_ptr wrappers copy-construct
+    via make_unique).  A rejection means the OCCT type is implicitly
+    non-copyable (copy semantics deleted through members/bases the extractor
+    cannot see), so methods returning it cannot be bound.
+
+    The operation is wrapped in a *template* helper: when it is ill-formed the
+    instantiation happens inside an OCCT template member (e.g. a
+    ``NCollection_Map<Cell, Hasher>::operator=`` inlined in a class body), and
+    a bare expression in this non-template function would anchor GCC's
+    "required from here" inside the OCCT header instead of at this probe line.
+    The helper template puts the probe line in the instantiation chain.
+    """
+    from .codegen import _cg
+    cg = _cg(cls, ctx)
+    if cg.storage not in ("native", "unique_ptr"):
+        return ""
+    helper = ("ocg_copy_probe_construct<_C>()" if cg.storage == "unique_ptr"
+              else "ocg_copy_probe_assign<_C>()")
+    return (f"void ocg_copy_{index:05d}() "
+            f"{{ (void)[] {{ using _C = ::{cls.name}; {helper}; }}; }}")
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +463,26 @@ def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str
     ]
     out.extend(f"#include <{h.name}>" for h in headers)
     out.append("")
+    out.append("#include <utility>   // std::declval (field-accessor probes)")
+    out.append("#include <type_traits>  // std::remove_reference (field probes)")
+    out.append("")
+    out.append("// Compile-time-only reference into a hypothetical instance; the")
+    out.append("// field probes copy/assign through it without ever constructing.")
+    out.append("template <typename T> inline T& ocg_field_probe_ref() noexcept {")
+    out.append("    T* p = nullptr;")
+    out.append("    return *p;")
+    out.append("}")
+    out.append("")
+    out.append("// Template-wrapped copy probes (see _copy_probe_line): keeping the")
+    out.append("// copy operation inside a template anchors GCC's instantiation")
+    out.append("// chain at the probe line instead of inside an OCCT header.")
+    out.append("template <typename T> inline void ocg_copy_probe_assign() {")
+    out.append("    ocg_field_probe_ref<T>() = ocg_field_probe_ref<const T>();")
+    out.append("}")
+    out.append("template <typename T> inline void ocg_copy_probe_construct() {")
+    out.append("    T a(ocg_field_probe_ref<const T>()); (void)a;")
+    out.append("}")
+    out.append("")
     out.append("// One discarded address-of per generated wrapper method; overloads")
     out.append("// are disambiguated by explicit pointer casts.  The undefined symbols")
     out.append("// of this TU are the member/static symbols the wrappers will emit.")
@@ -445,6 +509,21 @@ def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str
         line = _default_ctor_probe_line(cls, ctx, index)
         if line:
             lines.append(f"    // {cls.name}::{cls.name} (default construction)")
+            lines.append(f"    {line}")
+            index += 1
+        for f in cls.fields:
+            if f.skip or not f.is_public:
+                continue
+            # Array members are mapped element-wise by the accessor (not by
+            # value copy), so a by-value copy probe would falsely reject them.
+            if f.type.spelling.rstrip().endswith("]"):
+                continue
+            lines.append(f"    // {cls.name}::{f.name} (field accessor)")
+            lines.append(f"    {_field_probe_line(cls, f, index)}")
+            index += 1
+        line = _copy_probe_line(cls, ctx, index)
+        if line and cls.returnable:
+            lines.append(f"    // {cls.name}::copy (return value)")
             lines.append(f"    {line}")
             index += 1
     if not lines:
@@ -569,7 +648,8 @@ def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
     out_path.write_text("")
     illformed_path.write_text("")
     obj = work_dir / (probe_path.stem + ".o")
-    cmd = [compiler, "-std=gnu++17", "-fPIC", "-w", "-c",
+    cmd = [compiler, "-std=gnu++17", "-fPIC", "-w",
+           "-ftemplate-backtrace-limit=0", "-c",
            str(probe_path), "-o", str(obj), *_gcc_args(args)]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
@@ -615,7 +695,8 @@ def _extract_illformed(stderr: str, probe_path: Path) -> set[str]:
         line = text.strip()
         if line.startswith("// ") and "::" in line:
             last_comment = line[3:].strip()
-        elif "ocg_sym_" in line or "ocg_ctor_" in line or "ocg_dctor_" in line:
+        elif "ocg_sym_" in line or "ocg_ctor_" in line or "ocg_dctor_" in line \
+                or "ocg_field_" in line or "ocg_copy_" in line:
             line_index[no] = last_comment
     out: set[str] = set()
     for m in re.finditer(rf"{re.escape(probe_path.name)}:(\d+):", stderr):
@@ -643,12 +724,28 @@ def apply_illformed(modules, illformed: set[str]) -> int:
     arguments (e.g. ``NCollection_Vec3<unsigned long>::cwiseAbs`` calling an
     ambiguous ``std::abs``); the API itself is unusable there, so the method
     is dropped exactly as if it were unmappable.
+
+    ``Class::Class (default construction)`` entries come from the probe of the
+    wrapper's own default constructor (``_native()`` / ``new Cls()``); a
+    rejection means ``T()`` does not exist even though the extractor could not
+    tell (libclang misses a deleted implicit default ctor, e.g. when the base
+    class suppresses it).  The class is pinned not-default-constructible so
+    codegen falls back to unique_ptr storage.
     """
     skipped = 0
     for module in modules:
         for cls in module.classes:
             if cls.skip:
                 continue
+            dctor = f"{cls.name}::{cls.name} (default construction)"
+            if dctor in illformed:
+                cls.default_constructible = False
+                cls.has_public_default_ctor = False
+                skipped += 1
+                # No `continue` here: a class can be flagged both as not
+                # default-constructible AND not returnable (the dctor label
+                # must not shadow the copy-return label, or the copy probe is
+                # re-emitted next pass and convergence never terminates).
             for method in cls.all_methods:
                 if method.skip:
                     continue
@@ -661,6 +758,27 @@ def apply_illformed(modules, illformed: set[str]) -> int:
                                           "(OCCT member does not compile for "
                                           "the substituted template args)")
                     skipped += 1
+            for f in cls.fields:
+                if f.skip:
+                    continue
+                # ``Class::field (field accessor)`` entries come from the probe
+                # of the generated get/set property accessors: a member whose
+                # type has implicitly deleted copy semantics (the getter copies
+                # it, the setter assigns it) cannot be exposed as a property.
+                label = f"{cls.name}::{f.name} (field accessor)"
+                if label in illformed:
+                    f.skip = True
+                    f.skip_reason = ("ill-formed field accessor "
+                                     "(field type is not copyable)")
+                    skipped += 1
+            # ``Class::copy (return value)`` entries come from the probe of the
+            # copy operation a wrapped return emits (copy-assign for native
+            # storage, copy-construct for unique_ptr storage).  A rejection
+            # means the OCCT type is implicitly non-copyable through members or
+            # bases; value/reference returns of it cannot be bound.
+            if f"{cls.name}::copy (return value)" in illformed:
+                cls.returnable = False
+                skipped += 1
     return skipped
 
 
@@ -689,7 +807,13 @@ _STD_TEMPLATE_MAP = {
 def _normalize_symbol(name: str) -> str:
     for full, short in _STD_TEMPLATE_MAP.items():
         if full in name:
-            return name.replace(full, short)
+            name = name.replace(full, short)
+    # The Itanium demangler separates nested closing brackets with a space
+    # (`handle<NCollection_HArray1<double> >`); our source spellings (and the
+    # wrapper's undefined symbols) use the adjacent `>>` form.  Normalize every
+    # nesting level so symbol matching is independent of the demangler.
+    while "> >" in name:
+        name = name.replace("> >", ">>")
     return name
 
 
@@ -717,11 +841,14 @@ def apply_missing(modules, missing: set[str]) -> int:
                 if symbol_for_method(cls, method) in missing:
                     method.skip = True
                     method.skip_reason = "missing OCCT symbol (not exported by linked libraries)"
-                    if not method.parameters:
+                    if method.kind == MethodKind.CONSTRUCTOR and not method.parameters:
                         # The wrapper's own default ctor constructs the native
                         # object (`_native()` / `_handle = new Cls()`); when the
                         # OCCT default ctor is absent from the libs, fall back to
                         # no-default-construction (unique_ptr / null handle).
+                        # NB: only a zero-arg CONSTRUCTOR means this -- a missing
+                        # zero-arg regular method (e.g. an unexported accessor)
+                        # must not demote the whole class to unique_ptr storage.
                         cls.has_public_default_ctor = False
                     skipped += 1
     return skipped

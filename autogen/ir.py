@@ -97,6 +97,8 @@ def _class(d: dict) -> M.ClassDecl:
         has_operator_new_delete=d.get("has_operator_new_delete", False),
         has_operator_new=d.get("has_operator_new", False),
         has_plain_operator_new=d.get("has_plain_operator_new", False),
+        default_constructible=d.get("default_constructible", None),
+        returnable=d.get("returnable", True),
         skip=d.get("skip", False),
         skip_reason=d.get("skip_reason", ""),
     )
@@ -202,6 +204,8 @@ def _class_out(c: M.ClassDecl) -> dict:
         "has_operator_new_delete": c.has_operator_new_delete,
         "has_operator_new": c.has_operator_new,
         "has_plain_operator_new": c.has_plain_operator_new,
+        "default_constructible": c.default_constructible,
+        "returnable": c.returnable,
         "skip": c.skip,
         "skip_reason": c.skip_reason,
     }

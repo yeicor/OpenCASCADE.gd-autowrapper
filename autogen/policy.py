@@ -138,6 +138,14 @@ def classify_reason(reason: str, is_method: bool) -> str:
     table = METHOD_SKIP_POLICIES if is_method else CLASS_SKIP_POLICIES
     policy = table.get(reason)
     if policy is None:
+        # The typemap emits the offending type inline ("unmappable type:
+        # TopoDS_Shape &") so the audit stays self-documenting; the policy key
+        # is the shared prefix, so normalize before the exact-match lookup.
+        for prefix, key in (("unmappable type", "unmappable type"),):
+            if reason == prefix or reason.startswith(prefix + ": "):
+                policy = table.get(key)
+                break
+    if policy is None:
         return "unclassified"
     return policy.status
 
