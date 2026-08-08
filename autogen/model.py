@@ -215,6 +215,8 @@ class ClassDecl:
     is_abstract: bool = False              # cursor.is_abstract() (includes inherited pure virtuals)
     has_copy_assignment: bool = True   # False if copy assignment operator is deleted
     has_operator_new_delete: bool = False  # class declares operator new/delete (custom allocation)
+    has_operator_new: bool = False         # class declares an operator new (any form)
+    has_plain_operator_new: bool = False   # class declares operator new(size_t)
     skip: bool = False                 # True if the class cannot be wrapped
     skip_reason: str = ""
 

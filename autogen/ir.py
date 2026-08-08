@@ -95,6 +95,8 @@ def _class(d: dict) -> M.ClassDecl:
         is_abstract=d.get("is_abstract", False),
         has_copy_assignment=d.get("has_copy_assignment", True),
         has_operator_new_delete=d.get("has_operator_new_delete", False),
+        has_operator_new=d.get("has_operator_new", False),
+        has_plain_operator_new=d.get("has_plain_operator_new", False),
         skip=d.get("skip", False),
         skip_reason=d.get("skip_reason", ""),
     )
@@ -198,6 +200,8 @@ def _class_out(c: M.ClassDecl) -> dict:
         "is_abstract": c.is_abstract,
         "has_copy_assignment": c.has_copy_assignment,
         "has_operator_new_delete": c.has_operator_new_delete,
+        "has_operator_new": c.has_operator_new,
+        "has_plain_operator_new": c.has_plain_operator_new,
         "skip": c.skip,
         "skip_reason": c.skip_reason,
     }

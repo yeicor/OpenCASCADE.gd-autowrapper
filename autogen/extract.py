@@ -499,6 +499,12 @@ def _extract_class(cursor: Cursor, header: str,
             if child.spelling in ("operator new", "operator delete",
                                   "operator new[]", "operator delete[]"):
                 cls.has_operator_new_delete = True
+            if child.spelling == "operator new":
+                cls.has_operator_new = True
+                params = _params(child)
+                if len(params) == 1 and params[0].type.canonical_spelling in (
+                        "unsigned long", "unsigned long long", "size_t", "unsigned int"):
+                    cls.has_plain_operator_new = True
             method = _extract_method(child, name)
             if method:
                 if method.kind == MethodKind.STATIC_METHOD:

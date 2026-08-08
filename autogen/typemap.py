@@ -46,8 +46,22 @@ PRIMITIVE_WRAPPER_MAP: dict[str, tuple[str, str]] = {
     "double": ("OcgStandardReal", "FLOAT"),
     "float": ("OcgStandardShortReal", "FLOAT"),
     "unsigned long": ("OcgStandardULongInteger", "INT"),
+    "unsigned int": ("OcgStandardUInteger", "INT"),
     "TCollection_AsciiString": ("OcgTCollectionAsciiString", "STRING"),
     "TCollection_ExtendedString": ("OcgTCollectionExtendedString", "STRING"),
+}
+
+# Const raw pointers to these canonical primitives denote input arrays (the
+# callee reads an element sequence; the caller owns the buffer).  They cross
+# the FFI as Godot's packed arrays, passed with zero copy through ptr() so the
+# element type must match the packed array exactly.
+ARRAY_POINTER_MAP: dict[str, tuple[str, str]] = {
+    "unsigned char": ("PackedByteArray", "PACKED_BYTE_ARRAY"),
+    "int": ("PackedInt32Array", "PACKED_INT32_ARRAY"),
+    "long": ("PackedInt64Array", "PACKED_INT64_ARRAY"),
+    "long long": ("PackedInt64Array", "PACKED_INT64_ARRAY"),
+    "float": ("PackedFloat32Array", "PACKED_FLOAT32_ARRAY"),
+    "double": ("PackedFloat64Array", "PACKED_FLOAT64_ARRAY"),
 }
 
 
@@ -229,16 +243,17 @@ def _is_own_iterator_type(t: OCCTType, cls) -> bool:
 
 
 def _container_iterator_param(t: OCCTType, name: str, cls,
-                              ctx: TypeContext) -> ParamConv | None:
+                              ctx: TypeContext, is_ctor: bool = False) -> ParamConv | None:
     """Map a `{Container}::Iterator&` in-parameter to an int position.
 
     OCCT sequence/list/map methods address elements by an opaque iterator that
     can only be obtained by walking from the front.  GDScript cannot build one,
     so the wrapper takes a 0-based position and walks the iterator there.  Only
     the current class's own iterator type is recognized (container-internal
-    iterators of *other* types stay unmappable).
+    iterators of *other* types stay unmappable).  Ctors never take their own
+    iterator, so the mapping is method-only.
     """
-    if t.is_pointer or not _is_own_iterator_type(t, cls):
+    if is_ctor or t.is_pointer or not _is_own_iterator_type(t, cls):
         return None
     it = f"ocg_it_{name}"
     idx = f"ocg_idx_{name}"
@@ -279,7 +294,7 @@ def _self_specialization_base(base_name: str, cls_name: str,
 
 
 def _self_specialization_param(t: OCCTType, name: str, cls,
-                               ctx: TypeContext) -> ParamConv | None:
+                               ctx: TypeContext, is_ctor: bool = False) -> ParamConv | None:
     """Map a parameter spelled with the enclosing template's placeholder names
     (e.g. ``Exchange(NCollection_IndexedDataMap<TheKeyType, TheItemType,
     Hasher>&)``) to the wrapper's own class.
@@ -287,8 +302,13 @@ def _self_specialization_param(t: OCCTType, name: str, cls,
     In-class signatures render the self type with the template parameter names
     (TheKeyType/TheItemType/Hasher), so ``_wrapped_key`` cannot match them; the
     parameter is the same specialization as ``*this``, so it is passed as a
-    ``Ref`` to the enclosing wrapper's own storage.
+    ``Ref`` to the enclosing wrapper's own storage.  A ctor taking a move-only
+    self by rvalue ref is skipped: the generated call passes the source as an
+    lvalue (which would fall back to a deleted copy ctor on non-copyable
+    classes); copyable self params and copy ctors are unaffected.
     """
+    if is_ctor and t.is_rvalue_ref and cls.name in ctx.noncopyable:
+        return None
     if not (t.is_ref or t.is_pointer):
         return None
     if _self_specialization_base(t.base_name, cls.name, ctx) is None:
@@ -306,30 +326,80 @@ def _self_specialization_param(t: OCCTType, name: str, cls,
                      call_expr=call)
 
 
+def base_list_iterator_list_wrapper(t: OCCTType, cls,
+                                    ctx: TypeContext) -> str | None:
+    """Wrapper name of the owning list for a TListIterator `const BaseList&` ctor.
+
+    Shared by `_base_list_iterator_ctor_param` and the codegen forward-decl
+    collector so the iterator wrapper can name its owning NCollection_List<X>.
+    """
+    if cls is None or not t.is_ref or t.base_name != "NCollection_BaseList":
+        return None
+    m = _TEMPLATE_RE.match(cls.name)
+    if not m or m.group(1) != "NCollection_TListIterator":
+        return None
+    args = _split_template_args(m.group(2))
+    if len(args) != 1:
+        return None
+    key = f"NCollection_List<{args[0]}>"
+    if key not in ctx.wrapped:
+        return None
+    return ctx.wrapped[key]
+
+
+def _base_list_iterator_ctor_param(t: OCCTType, name: str, cls,
+                                   ctx: TypeContext) -> ParamConv | None:
+    """Map the `const NCollection_BaseList&` ctor param of a TListIterator.
+
+    ``NCollection_TListIterator<X>`` binds to its owning list in its ctor, but
+    ``NCollection_BaseList`` has no public constructors so it is never wrapped.
+    GDScript constructs the iterator from the wrapped ``NCollection_List<X>``
+    instead; the list's native storage upcasts to the base ref the ctor wants.
+    """
+    w = base_list_iterator_list_wrapper(t, cls, ctx)
+    if w is None:
+        return None
+    native = "_native_ref()" if w in ctx.inherited_value else "_native"
+    return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
+                     call_expr=f"{name}->{native}")
+
+
 def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
-              cls=None) -> ParamConv | None:
+              cls=None, is_ctor: bool = False) -> ParamConv | None:
     name = safe_param_name(name)
     move = t.is_rvalue_ref
     stream = stream_kind(t) if t.is_ref else None
     if cls is not None:
-        conv = _container_iterator_param(t, name, cls, ctx)
+        conv = _container_iterator_param(t, name, cls, ctx, is_ctor)
         if conv is not None:
             return conv
-        conv = _self_specialization_param(t, name, cls, ctx)
+        conv = _self_specialization_param(t, name, cls, ctx, is_ctor)
+        if conv is not None:
+            return conv
+        conv = _base_list_iterator_ctor_param(t, name, cls, ctx)
         if conv is not None:
             return conv
     if t.is_ref and stream == "out":
-        return ParamConv(cpp_type="", gd_type="", name=name,
-                         prelude="std::ostringstream ocg_os;",
-                         call_expr="ocg_os", is_ostream=True)
+        # A Standard_OStream&/std::ostream& sink becomes a Godot Callable that
+        # receives the text OCCT writes.  The shared OcgCallableOStream shim
+        # wraps it in a std::ostream; the accumulated text is also surfaced as
+        # the wrapper's String return for Print/Dump-style methods (flush runs
+        # before the return).
+        return ParamConv(cpp_type="Callable", gd_type="CALLABLE", name=name,
+                         prelude=f"occt_gd::OcgCallableOStream ocg_os({name});",
+                         call_expr="ocg_os.stream()",
+                         is_ostream=True)
     if t.is_ref and stream == "ss":
         return ParamConv(cpp_type="String", gd_type="STRING", name=name,
                          prelude=f"std::stringstream ocg_ss({name}.utf8().get_data());",
                          call_expr="ocg_ss")
     if t.is_ref and stream == "in":
-        return ParamConv(cpp_type="String", gd_type="STRING", name=name,
-                         prelude=f"std::istringstream ocg_is({name}.utf8().get_data());",
-                         call_expr="ocg_is")
+        # A Standard_IStream&/std::istream& source becomes a Godot Callable
+        # that OCCT pulls String chunks from as it reads (see the
+        # OcgCallableIStream shim).
+        return ParamConv(cpp_type="Callable", gd_type="CALLABLE", name=name,
+                         prelude=f"occt_gd::OcgCallableIStream ocg_is({name});",
+                         call_expr="ocg_is.stream()")
     if t.is_ref and not t.is_const:
         # Non-const reference = in/out parameter.  Primitives and strings use
         # the small box classes; wrapped OCCT value classes fall through to the
@@ -341,6 +411,14 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
             return ParamConv(cpp_type=f"Ref<{wrapper[0]}>", gd_type=wrapper[1],
                              name=name, call_expr=_rw(move, f"{name}->_native"))
         if t.base_name in PRIMITIVE_MAP or t.is_enum:
+            if t.is_rvalue_ref:
+                # rvalue-ref: the callee takes ownership of a temporary, so a
+                # by-value argument (moved in) is a sound, minimal binding.
+                if t.base_name in PRIMITIVE_MAP:
+                    cpp, gd = PRIMITIVE_MAP[t.base_name]
+                    return ParamConv(cpp_type=cpp, gd_type=gd, name=name,
+                                     call_expr=_rw(move, name))
+                return _enum_param(t, name, ctx, move=move)
             return None  # no box class -> cannot bind a by-value param to a T&
     if t.is_pointer:
         return _cpp_pointer_param(t, name, ctx)
@@ -391,6 +469,18 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
 
 def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | None:
     b = t.base_name
+    skind = stream_kind(t)
+    if skind == "out" and not t.pointee_is_const:
+        # Standard_OStream* / std::ostream* sink (e.g.
+        # FastSewing::GetStatuses) — same Callable shim as the ref form.
+        return ParamConv(cpp_type="Callable", gd_type="CALLABLE", name=name,
+                         prelude=f"occt_gd::OcgCallableOStream ocg_os({name});",
+                         call_expr="&ocg_os.stream()",
+                         is_ostream=True)
+    if skind == "in":
+        return ParamConv(cpp_type="Callable", gd_type="CALLABLE", name=name,
+                         prelude=f"occt_gd::OcgCallableIStream ocg_is({name});",
+                         call_expr="&ocg_is.stream()")
     if b == "void":
         cast = "const void*" if t.pointee_is_const else "void*"
         return ParamConv(cpp_type="uint64_t", gd_type="INT", name=name,
@@ -401,6 +491,12 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
     if b in ("char16_t",) and t.pointee_is_const:
         return ParamConv(cpp_type="String", gd_type="STRING", name=name,
                          call_expr=f"{name}.utf16()")
+    if t.pointee_is_const and b in ARRAY_POINTER_MAP:
+        # const T* input array -> typed packed array, passed zero-copy via
+        # ptr().  Only element-exact matches are bound (see ARRAY_POINTER_MAP).
+        pa, gd = ARRAY_POINTER_MAP[b]
+        return ParamConv(cpp_type=pa, gd_type=gd, name=name,
+                         call_expr=f"{name}.ptr()")
     if t.is_handle and t.handle_inner in ctx.wrapped \
             and ctx.wrapped[t.handle_inner] in ctx.handles:
         # handle<T>* — pointer to a handle, not to the pointee (e.g. the
@@ -450,13 +546,55 @@ def _enum_param(t: OCCTType, name: str, ctx: TypeContext, move: bool = False) ->
 def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False,
                cls=None) -> RetConv | None:
     """Map a return type; has_ostream: method consumes a Standard_OStream&."""
+    rc = _cpp_return_core(t, ctx, has_ostream, cls)
+    if rc is None:
+        return None
+    if has_ostream and not (
+            stream_kind(t) is not None or
+            (t.base_name == "void" and not t.is_pointer)):
+        # A non-stream return alongside an out-stream sink (e.g.
+        # StlAPI_Writer::Write -> bool): flush the Callable shim before
+        # returning so the sink receives everything OCCT wrote.
+        rc = RetConv(cpp_type=rc.cpp_type, gd_type=rc.gd_type,
+                     body=_with_ostream_flush(rc.body))
+    return rc
+
+
+def _with_ostream_flush(body: str) -> str:
+    """Insert ``ocg_os.stream().flush();`` between the OCCT call and the return.
+
+    ``body`` is a return-body template containing the ``{call}`` placeholder.
+    For ``return <expr>;`` bodies the expression is evaluated into a temp first
+    so the OCCT call runs exactly once; otherwise the flush is placed after
+    the ``{call};`` statement (multi-line wrapped-class return bodies).
+    """
+    stripped = body.lstrip()
+    if stripped.startswith("return "):
+        return ("auto ocg_result = {call};\n"
+                "        ocg_os.stream().flush();\n"
+                "        return ocg_result;")
+    return re.sub(r"\{call\};", "{call};\n        ocg_os.stream().flush();",
+                  body, count=1)
+
+
+def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
+                     cls=None) -> RetConv | None:
     if has_ostream and (stream_kind(t) is not None or
                         (t.base_name == "void" and not t.is_pointer)):
         # Print/Dump(Standard_OStream&) -> Standard_OStream& or void: the
         # stream argument was captured into ocg_os by the parameter
-        # conversion, so surface the text that would have been written.
+        # conversion, so surface the text that would have been written (the
+        # text is captured before the flush delivers it to the Callable sink).
         return RetConv(cpp_type="String", gd_type="STRING",
-                       body="{call};\n        return ::godot::String::utf8(ocg_os.str().c_str());")
+                       body="{call};\n"
+                            "        ::godot::String ocg_text = ::godot::String::utf8(ocg_os.str().c_str());\n"
+                            "        ocg_os.stream().flush();\n"
+                            "        return ocg_text;")
+    if t.is_ref and stream_kind(t) == "ss":
+        # Accessor returning a stringstream by reference (e.g.
+        # Message_AttributeStream::Stream): surface its contents as a String.
+        return RetConv(cpp_type="String", gd_type="STRING",
+                       body="return ::godot::String::utf8({call}.str().c_str());")
     if cls is not None and t.is_ref:
         self_base = _self_specialization_base(t.base_name, cls.name, ctx)
         if self_base is not None:

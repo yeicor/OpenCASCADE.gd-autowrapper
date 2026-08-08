@@ -73,6 +73,30 @@ def _has_custom_alloc(cls: ClassDecl, by_name: dict[str, ClassDecl],
     return False
 
 
+def _is_allocator_managed(cls: ClassDecl, by_name: dict[str, ClassDecl],
+                          seen: set[str]) -> bool:
+    """True if constructing `new Cls()` resolves to an allocator-tagged
+    operator new instead of the plain `operator new(size_t)`.
+
+    DEFINE_INC_ALLOC / DEFINE_NCOLLECTION_ALLOC declare only
+    `operator new(size_t, const NCollection_BaseAllocator&)`-style overloads,
+    which hide the plain form, so a handle-allocating `new Cls()` is a compile
+    error.  If the class itself declares any operator new, base overloads are
+    hidden and only its own forms matter; otherwise the nearest base declaration
+    applies.
+    """
+    if cls.name in seen:
+        return False
+    seen.add(cls.name)
+    if cls.has_operator_new:
+        return not cls.has_plain_operator_new
+    for base in cls.base_classes:
+        b = by_name.get(base)
+        if b is not None and _is_allocator_managed(b, by_name, seen):
+            return True
+    return False
+
+
 def _skip_reason(cls: ClassDecl, by_name: dict[str, ClassDecl]) -> str:
     """Legacy class-level skip rules; "" means the class is wrapped.
 
@@ -111,6 +135,11 @@ def _skip_reason(cls: ClassDecl, by_name: dict[str, ClassDecl]) -> str:
         elif (not cls.has_public_default_ctor and cls.has_any_ctor
               and _has_custom_alloc(cls, by_name, set())):
             return "custom allocation (operator new/delete)"
+    elif _is_allocator_managed(cls, by_name, set()):
+        # Ref-counted classes construct via `new Cls(...)`, which needs the
+        # plain `operator new(size_t)`; allocator-tagged-only classes
+        # (DEFINE_INC_ALLOC/DEFINE_NCOLLECTION_ALLOC) cannot be handle-built.
+        return "custom allocation (operator new/delete)"
     for base in cls.base_classes:
         if base.startswith("TopoDS_T") and base != "TopoDS_TShape":
             return "internal TopoDS shape implementation"

@@ -28,7 +28,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from .model import MethodKind, OCCTType
+from .model import ClassKind, MethodKind, OCCTType
 from .occt import OCCTInstall, include_closure
 from . import typemap as tm
 
@@ -151,6 +151,124 @@ def _probe_line(cls, method, index: int, ctx: tm.TypeContext) -> str:
         const = " const" if method.is_const else ""
         cast = f"static_cast<{ret} (::{cls.name}::*)({params}){const}>({target})"
     return f"auto const ocg_sym_{index:05d} = {cast};"
+
+
+# Constructor probes
+# ------------------
+# Constructors cannot be named by a member pointer, so the probe references
+# their symbols with `new ::Cls(args)` inside a non-static function.  The
+# construction expression emits the same complete-object (C1) symbol the
+# wrapper's `new Cls(...)` / `make_unique<Cls>(...)` will reference, and an
+# external-linkage function cannot be optimized away.  Arguments are only
+# default-constructed for types that are certain to compile (primitives,
+# enums, handles, and wrapped default-constructible value classes); a ctor
+# with any other parameter type is left unprobed rather than risk a false
+# ill-formed flag that would wrongly drop a wrappable ctor.
+
+_PRIMITIVE_BASES = frozenset({
+    "int", "unsigned int", "long", "unsigned long", "long long",
+    "unsigned long long", "short", "unsigned short", "signed char",
+    "unsigned char", "char", "wchar_t", "bool", "float", "double",
+    "size_t", "void", "unsigned char",
+})
+
+
+def _default_constructible_set(classes) -> set[str]:
+    """Wrapped value classes a probe can default-construct as a value."""
+    from .codegen import _default_constructible
+    out: set[str] = set()
+    for cls in classes:
+        if cls.kind in (ClassKind.REF_COUNTED, ClassKind.EXCEPTION):
+            continue
+        if _default_constructible(cls):
+            out.add(cls.name)
+    return out
+
+
+def _probe_ctor_arg(t: OCCTType, dc_set: set[str]) -> str | None:
+    """A discardable value expression of type `t`, or None if constructing one
+    for the probe is not known-safe.
+
+    Arguments are cast to the exact declared parameter type so overload
+    resolution is never ambiguous (a bare ``nullptr`` or ``0`` would be an
+    ambiguous match when a class overloads on pointer/arithmetic types)."""
+    if t.is_handle:
+        if t.is_pointer:
+            return f"static_cast<opencascade::handle<{t.handle_inner}>*>(nullptr)"
+        return f"occ::handle<{t.handle_inner}>()"
+    if t.is_pointer:
+        const = "const " if t.pointee_is_const else ""
+        return f"static_cast<{const}{t.base_name}*>(nullptr)"
+    if t.is_ref:
+        if not t.is_const:
+            return None
+        return _probe_ctor_arg(replace(t, is_ref=False, is_rvalue_ref=False,
+                                       is_const=False), dc_set)
+    if t.is_enum:
+        return f"static_cast<{t.base_name}>(0)"
+    base = t.base_name
+    if base == "bool":
+        return f"static_cast<{base}>(false)"
+    if base in ("char", "signed char", "unsigned char", "wchar_t"):
+        return f"static_cast<{base}>('\\0')"
+    if base in _PRIMITIVE_BASES:
+        return f"static_cast<{base}>(0)"
+    if base in dc_set:
+        return f"{base}()"
+    return None
+
+
+def _ctor_probe_line(cls, ctor, index: int, dc_set: set[str], ctx) -> str:
+    """Probe line referencing the native constructor symbol a wrapper ctor
+    emits; "" means the ctor is not probed."""
+    if cls.is_abstract or cls.kind == ClassKind.EXCEPTION:
+        return ""
+    from .codegen import _cg
+    cg = _cg(cls, ctx)
+    if cg.storage == "none":
+        return ""
+    args = []
+    for p in ctor.parameters:
+        arg = _probe_ctor_arg(p.type, dc_set)
+        if arg is None:
+            return ""
+        args.append(arg)
+    joined = ", ".join(args)
+    if cg.storage == "handle":
+        # `new Cls(args)` also covers unique_ptr storage (make_unique is new
+        # underneath) and references the same C1 symbol + class operator new.
+        return (f"::{cls.name}* ocg_ctor_{index:05d}() "
+                f"{{ return new ::{cls.name}({joined}); }}")
+    # native / inherited-native wrappers placement-construct (or copy-assign a
+    # temporary); a discarded prvalue references the same C1 ctor symbol without
+    # pulling in `operator new`, which the wrapper never calls.  A named local
+    # would trigger most-vexing-parse (``Cls tmp(gp_Pnt());`` is a function
+    # declaration), so construct a discarded temporary in an expression.
+    return (f"void ocg_ctor_{index:05d}() "
+            f"{{ (void)::{cls.name}({joined}); }}")
+
+
+def _default_ctor_probe_line(cls, ctx, index: int) -> str:
+    """Probe line for the native default-construction a wrapper's own default
+    constructor emits (``_native()`` or ``_handle = new Cls()``).
+
+    The default ctor itself is never bound as a factory (see
+    ``_default_ctor``), so it is invisible to the ctor probes above; yet a
+    value/handle-stored wrapper references its symbol from the member init.
+    """
+    if cls.kind == ClassKind.EXCEPTION:
+        return ""
+    from .codegen import _cg
+    cg = _cg(cls, ctx)
+    if cg.storage == "handle":
+        if not (cls.has_public_default_ctor and not cls.is_abstract):
+            return ""
+        return (f"::{cls.name}* ocg_dctor_{index:05d}() "
+                f"{{ return new ::{cls.name}(); }}")
+    if cg.storage == "native" and not cg.inherited_native:
+        return (f"void ocg_dctor_{index:05d}() "
+                f"{{ (void)::{cls.name}(); }}")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +424,7 @@ def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str
     out.append("// of this TU are the member/static symbols the wrappers will emit.")
     lines: list[str] = []
     index = 0
+    dc_set = _default_constructible_set(classes)
     for cls in classes:
         for method in (cls.methods + cls.operators + cls.static_methods):
             if method.skip or method.is_deleted or method.is_pure_virtual \
@@ -313,6 +432,20 @@ def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str
                 continue
             lines.append(f"    // {_method_display_name(cls, method)}")
             lines.append(f"    {_probe_line(cls, method, index, ctx)}")
+            index += 1
+        for ctor in cls.constructors:
+            if ctor.skip or ctor.is_deleted or ctor.is_pure_virtual:
+                continue
+            line = _ctor_probe_line(cls, ctor, index, dc_set, ctx)
+            if not line:
+                continue
+            lines.append(f"    // {_method_display_name(cls, ctor)}")
+            lines.append(f"    {line}")
+            index += 1
+        line = _default_ctor_probe_line(cls, ctx, index)
+        if line:
+            lines.append(f"    // {cls.name}::{cls.name} (default construction)")
+            lines.append(f"    {line}")
             index += 1
     if not lines:
         out.append("auto const ocg_sym_none = 0;")
@@ -482,7 +615,7 @@ def _extract_illformed(stderr: str, probe_path: Path) -> set[str]:
         line = text.strip()
         if line.startswith("// ") and "::" in line:
             last_comment = line[3:].strip()
-        elif "ocg_sym_" in line:
+        elif "ocg_sym_" in line or "ocg_ctor_" in line or "ocg_dctor_" in line:
             line_index[no] = last_comment
     out: set[str] = set()
     for m in re.finditer(rf"{re.escape(probe_path.name)}:(\d+):", stderr):
@@ -517,7 +650,7 @@ def apply_illformed(modules, illformed: set[str]) -> int:
             if cls.skip:
                 continue
             for method in cls.all_methods:
-                if method.kind == MethodKind.CONSTRUCTOR or method.skip:
+                if method.skip:
                     continue
                 # _extract_illformed records operators as ``Class::operator()``
                 # (via _method_display_name), not the raw ``Class::()``; match
@@ -534,6 +667,9 @@ def apply_illformed(modules, illformed: set[str]) -> int:
 # ABI-tagged std templates demangle with the `__cxx11` inline namespace and
 # the full default template arguments; the IR's `std::basic_*<char>` short
 # forms are mapped back so pass-2 symbol matching is independent of libstdc++.
+# libstdc++'s demangler also prints the standard typedefs (`std::ostream`,
+# `std::string`) where the IR keeps the underlying `std::basic_*<char>` form;
+# both spellings must collapse onto the same symbol name.
 _STD_TEMPLATE_MAP = {
     "std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >": "std::basic_string<char>",
     "std::basic_string<char, std::char_traits<char>, std::allocator<char> >": "std::basic_string<char>",
@@ -543,6 +679,10 @@ _STD_TEMPLATE_MAP = {
     "std::basic_ostream<char, std::char_traits<char> >": "std::basic_ostream<char>",
     "std::__cxx11::basic_istream<char, std::char_traits<char> >": "std::basic_istream<char>",
     "std::basic_istream<char, std::char_traits<char> >": "std::basic_istream<char>",
+    "std::ostream": "std::basic_ostream<char>",
+    "std::istream": "std::basic_istream<char>",
+    "std::string": "std::basic_string<char>",
+    "std::stringstream": "std::basic_stringstream<char>",
 }
 
 
@@ -572,10 +712,16 @@ def apply_missing(modules, missing: set[str]) -> int:
             if cls.skip:
                 continue
             for method in cls.all_methods:
-                if method.kind == MethodKind.CONSTRUCTOR or method.skip:
+                if method.skip:
                     continue
                 if symbol_for_method(cls, method) in missing:
                     method.skip = True
                     method.skip_reason = "missing OCCT symbol (not exported by linked libraries)"
+                    if not method.parameters:
+                        # The wrapper's own default ctor constructs the native
+                        # object (`_native()` / `_handle = new Cls()`); when the
+                        # OCCT default ctor is absent from the libs, fall back to
+                        # no-default-construction (unique_ptr / null handle).
+                        cls.has_public_default_ctor = False
                     skipped += 1
     return skipped

@@ -204,14 +204,12 @@ def _occt_qual(cls: ClassDecl) -> str:
 
 
 def _params_decl(method: MethodDecl, ctx: tm.TypeContext,
-                 cls=None) -> str | None:
+                 cls=None, is_ctor: bool = False) -> str | None:
     parts = []
     for p in method.parameters:
-        conv = tm.cpp_param(p.type, p.name, ctx, cls)
+        conv = tm.cpp_param(p.type, p.name, ctx, cls, is_ctor)
         if conv is None:
             return None
-        if conv.is_ostream:
-            continue
         parts.append(f"{conv.cpp_type} {conv.name}")
     return ", ".join(parts)
 
@@ -227,6 +225,17 @@ def _has_ostream_param(method: MethodDecl) -> bool:
 def _uses_streams(cls: ClassDecl) -> bool:
     return any(tm.stream_kind(p.type) is not None
                for m in cls.all_methods for p in m.parameters)
+
+
+def _uses_fstream(cls: ClassDecl) -> bool:
+    """Class has a custom file-I/O body that opens its own std::fstream."""
+    for m in cls.all_methods:
+        if cls.name == "BRepTools" and m.name in ("Read", "Write"):
+            for p in m.parameters:
+                if p.type.base_name == "char" and p.type.is_pointer \
+                        and p.type.pointee_is_const:
+                    return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +301,9 @@ def _referenced_wrappers(cls: ClassDecl, ctx: tm.TypeContext) -> set[str]:
     for method in cls.all_methods:
         for p in method.parameters:
             w = _type_wrapper(p.type, ctx)
+            if w:
+                names.add(w)
+            w = tm.base_list_iterator_list_wrapper(p.type, cls, ctx)
             if w:
                 names.add(w)
         if method.return_type is not None:
@@ -433,8 +445,6 @@ def _first_unmappable(cls: ClassDecl, method: MethodDecl,
         conv = tm.cpp_param(p.type, p.name, ctx, cls)
         if conv is None:
             return p.type.spelling
-        if conv.is_ostream:
-            continue
     if method.return_type is None or (method.return_type.is_void
                                       and not method.return_type.is_pointer):
         return None
@@ -518,6 +528,8 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         out.append("#include <memory>")
     if _uses_primitive_wrappers(cls, ctx):
         out.append('#include "OcgPrimitiveWrappers.hpp"')
+    if _uses_streams(cls):
+        out.append('#include "OcgCallableStreams.hpp"')
     if _uses_enums(cls, ctx):
         out.append('#include "OcgEnums.hpp"')
     out.append("")
@@ -574,7 +586,7 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
             continue
         if ctor.skip:
             continue
-        params = _params_decl(ctor, ctx)
+        params = _params_decl(ctor, ctx, cls, is_ctor=True)
         if params is None:
             ctor.skip = True
             ctor.skip_reason = "unmappable type"
@@ -649,12 +661,90 @@ def _occt_call(cls: ClassDecl, method: MethodDecl, args: str,
     return f"_native.{method.name}({args})"
 
 
+def _custom_method_body(cls: ClassDecl, method: MethodDecl,
+                        ctx: tm.TypeContext) -> str | None:
+    """Hand-written bodies for signatures the generic FFI cannot express.
+
+    BRepTools' file-based Read/Write overloads take a ``const char*`` path and
+    open their own std::fstream; TopTools_ShapeSet then runs an
+    imbue(std::locale::classic())/restore dance on that stream.  Because
+    Godot's binary interposes its own std::locale symbols, that dance drains
+    Godot's global locale's reference count and eventually frees it through the
+    wrong allocator.  We open the fstream ourselves, move it onto the classic
+    locale (leaking the replaced locale so its reference is never dropped) and
+    use the stream overload instead, so OCCT's locale dance stays inside a
+    single, consistent libstdc++ universe (see OcgCallableStreams.hpp).
+    """
+    if cls.name == "Standard_Dump" and method.name == "AddValuesSeparator":
+        # OCCT's AddValuesSeparator only writes ", " when tellp() > 0, i.e.
+        # when called mid-stream between already-dumped values.  The wrapper
+        # hands it a fresh OcgCallableOStream every call (the sink Callable is
+        # the only durable state), so that check would never trigger and the
+        # API would always return an empty string.  Write the separator
+        # unconditionally instead.
+        params = _params_decl(method, ctx, cls)
+        if params is None:
+            return None
+        return f"""String {cls.wrapper_name}::add_values_separator({params}) {{
+    try {{
+        OCC_CATCH_SIGNALS
+        occt_gd::OcgCallableOStream ocg_os(theOStream);
+        ocg_os.stream() << ", ";
+        ::godot::String ocg_text = ::godot::String::utf8(ocg_os.str().c_str());
+        ocg_os.stream().flush();
+        return ocg_text;
+    }} OCCT_GUARD_CATCH({{}});
+}}"""
+    if cls.name != "BRepTools" or method.name not in ("Read", "Write"):
+        return None
+    file_param = next((p for p in method.parameters
+                       if p.type.base_name == "char" and p.type.is_pointer
+                       and p.type.pointee_is_const), None)
+    if file_param is None:
+        return None
+    unique = _unique(method)
+    params = _params_decl(method, ctx, cls)
+    if params is None:
+        return None
+    arg_exprs = []
+    for p in method.parameters:
+        if p is file_param:
+            arg_exprs.append("ocg_fs")
+            continue
+        conv = tm.cpp_param(p.type, p.name, ctx, cls)
+        if conv is None:
+            return None
+        if conv.prelude:
+            return None
+        arg_exprs.append(conv.call_expr)
+    call = _occt_call(cls, method, ", ".join(arg_exprs), ctx)
+    stype = "std::ifstream" if method.name == "Read" else "std::ofstream"
+    const_suffix = " const" if method.is_const else ""
+    body_lines = [
+        f"        {stype} ocg_fs({file_param.name}.utf8().get_data());",
+        "        if (!ocg_fs)",
+        "            return false;",
+        "        new std::locale(ocg_fs.imbue(std::locale::classic()));",
+        f"        {call};",
+        "        return ocg_fs.good();",
+    ]
+    return f"""bool {cls.wrapper_name}::{unique}({params}){const_suffix} {{
+    try {{
+        OCC_CATCH_SIGNALS
+{chr(10).join(body_lines)}
+    }} OCCT_GUARD_CATCH({{}});
+}}"""
+
+
 def _method_body(cls: ClassDecl, method: MethodDecl,
                  ctx: tm.TypeContext) -> str | None:
     unique = _unique(method)
     params = _params_decl(method, ctx, cls)
     if params is None:
         return None
+    custom = _custom_method_body(cls, method, ctx)
+    if custom is not None:
+        return custom
     if cls.kind == ClassKind.EXCEPTION:
         kind = _exception_method_kind(cls, method)
         if kind is None:
@@ -681,10 +771,6 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
 
     if ret_is_void and not has_ostream:
         rconv = tm.RetConv(cpp_type="void", body="{call};")
-    elif ret_is_void and has_ostream:
-        rconv = tm.RetConv(
-            cpp_type="String", gd_type="STRING",
-            body="{call};\n        return ::godot::String::utf8(ocg_os.str().c_str());")
     else:
         rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream, cls=cls)
         if rconv is None:
@@ -719,13 +805,13 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
 
 def _ctor_body(cls: ClassDecl, ctor: MethodDecl, ctx: tm.TypeContext) -> str:
     unique = _unique(ctor)
-    params = _params_decl(ctor, ctx, cls)
+    params = _params_decl(ctor, ctx, cls, is_ctor=True)
     if params is None:
         return ""  # unmappable param; caller marks skip
     preludes: list[str] = []
     arg_exprs: list[str] = []
     for p in ctor.parameters:
-        conv = tm.cpp_param(p.type, p.name, ctx, cls)
+        conv = tm.cpp_param(p.type, p.name, ctx, cls, is_ctor=True)
         if conv is None:
             return ""
         if conv.prelude:
@@ -893,7 +979,7 @@ def _skip_ambiguous_ctor_calls(cls: ClassDecl, ctx: tm.TypeContext) -> None:
         types: list[str] = []
         for p in ctor.parameters:
             conv = tm.cpp_param(p.type, p.name, ctx, cls)
-            if conv is None or conv.is_ostream:
+            if conv is None:
                 types = []
                 break
             types.append(_type_to_string(p.type))
@@ -940,11 +1026,15 @@ def _defval_suffix(cls: ClassDecl, method: MethodDecl, ctx: tm.TypeContext) -> s
     """DEFVAL(...) clauses for trailing parameters that carry C++ defaults.
 
     Only defaults that are expressible as a godot-cpp `Variant` (numeric
-    primitives) are emitted; object/enum/string defaults cannot be forwarded
-    through `DEFVAL`, so the clause is dropped at the first such parameter.
+    primitives, or the synthetic ``Callable()`` sink for out-stream params) are
+    emitted; object/enum/string defaults cannot be forwarded through `DEFVAL`,
+    so the clause is dropped at the first such parameter.
     """
     parts = []
     for p in reversed(method.parameters):
+        if tm.stream_kind(p.type) == "out":
+            parts.append("DEFVAL(Callable())")
+            continue
         if p.default_value is None:
             break
         if p.type.is_enum or p.type.base_name not in _NUMERIC_DEFVAL_TYPES:
@@ -974,13 +1064,11 @@ def _clean_numeric_default(dflt: str) -> str:
 
 def _bind_arg_names(method: MethodDecl, ctx: tm.TypeContext,
                     cls=None) -> str:
-    """D_METHOD argument names; absorbed ostream params are not exposed."""
+    """D_METHOD argument names; callable stream params are exposed by name."""
     names = []
     for p in method.parameters:
         conv = tm.cpp_param(p.type, p.name, ctx, cls)
         if conv is None:
-            continue
-        if conv.is_ostream:
             continue
         names.append(f'"{p.name}"')
     return ", ".join(names)
@@ -1072,6 +1160,9 @@ def generate_class_cpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     if _uses_streams(cls):
         out.append("")
         out.append("#include <sstream>")
+    if _uses_fstream(cls):
+        out.append("")
+        out.append("#include <fstream>")
     out.append("")
     out.append("#include <godot_cpp/core/error_macros.hpp>")
     out.append("")
@@ -1205,6 +1296,9 @@ _PRIMITIVE_WRAPPERS: dict[str, tuple[str, str, str, str, str]] = {
     "unsigned long": ("OcgStandardULongInteger", "uint64_t", "INT",
                       "uint64_t get_value() const { return _native; }",
                       "void set_value(uint64_t v) { _native = v; }"),
+    "unsigned int": ("OcgStandardUInteger", "uint32_t", "INT",
+                     "uint32_t get_value() const { return _native; }",
+                     "void set_value(uint32_t v) { _native = v; }"),
     "TCollection_AsciiString": (
         "OcgTCollectionAsciiString", "TCollection_AsciiString", "STRING",
         "::godot::String get_value() const { return ::godot::String::utf8(_native.ToCString()); }",
@@ -1271,6 +1365,205 @@ def generate_primitive_wrappers(keys: set[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# OcgCallableStreams.hpp
+# ---------------------------------------------------------------------------
+
+def generate_callable_streams_hpp() -> str:
+    """Stream <-> Godot Callable trampolines used by every wrapper.
+
+    OCCT methods that consume a ``Standard_OStream&``/``std::ostream&`` (or
+    the pointer/`istream` spellings) are exposed to GDScript as Callables.
+    ``OcgCallableOStream`` adapts a sink Callable to the ``std::ostream`` OCCT
+    writes to; ``OcgCallableIStream`` adapts a source Callable to the
+    ``std::istream`` OCCT reads from.  The shims are header-only so wrapper
+    TUs pick them up via ``#include "OcgCallableStreams.hpp"`` and no extra
+    link-time object is needed.
+    """
+    return """// Auto-generated Callable <-> std::stream trampolines -- DO NOT EDIT
+//
+// OCCT methods that write to / read from a std::ostream& / std::istream& (and
+// the OCCT typedefs Standard_OStream / Standard_IStream) are exposed to
+// GDScript as Godot Callables.  These two small shims adapt a Callable to the
+// std::stream interface OCCT uses:
+//
+//   * OcgCallableOStream (sink): OCCT writes text into the shim's ostream;
+//     the accumulated text is forwarded to the Callable, which receives a
+//     single String argument, when the stream is flushed.  The generated
+//     wrappers always flush before returning (and after capturing the text
+//     for Print/Dump-style String returns), so a sink with an invalid
+//     Callable simply discards the output.
+//
+//   * OcgCallableIStream (source): OCCT reads text from the shim's istream;
+//     whenever the input area is exhausted the shim calls the Callable (with
+//     no arguments) to fetch the next chunk, given back as a String.  An
+//     empty String signals end of input, and an invalid Callable yields an
+//     empty (EOF) stream.
+//
+// LOCALE NOTE: Godot's binary embeds its own copy of libstdc++ and exports
+// std::locale symbols, so wrapper code can end up touching TWO different
+// libstdc++ copies at once:
+//
+//   * Versioned symbol references in this .so (e.g. std::locale's copy
+//     constructor, destructor and std::locale::classic(), resolved as
+//     `_ZNSt6locale*@GLIBCXX_3.4`) bind to the SYSTEM libstdc++.
+//   * basic_ios::init's inline `std::locale()` calls the interposed
+//     `locale::_S_global()` from GODOT's embedded copy, handing the stream a
+//     locale object whose _Impl belongs to Godot's libstdc++.
+//
+// The two copies disagree on reference-count bookkeeping, so every stream
+// construction net-drains one reference from that shared _Impl (verified:
+// the same _Impl's count walks 3 -> 2 -> 1 across successive shims even
+// while a permanent "pin" reference is held).  When the count reaches zero,
+// system libstdc++ destroys the _Impl through Godot's copy and the free
+// fails ("free(): invalid size").  Both shims therefore:
+//
+//   * force the stream onto the classic locale at construction (OCCT's
+//     imbue(classic())/restore dance then stays inside the system universe),
+//   * deliberately increment the drained _Impl's reference count once per
+//     construction (see OcgPinInterposedLocale) so the drain can never reach
+//     zero -- a bare one-time pin is NOT enough because the drain is
+//     per-construction, not per-_Impl.
+//
+// The pin does not allocate: it bumps std::locale::_Impl's first member
+// (_M_references, an _Atomic_word) with the same primitive libstdc++ uses.
+// std::locale is layout-compatible with a single _Impl* and _Impl begins
+// with _M_references in every libstdc++ ABI; the bump itself is what keeps
+// the _Impl alive, and no owning object is required to be destroyed.
+#pragma once
+
+#include <godot_cpp/variant/callable.hpp>
+#include <godot_cpp/variant/string.hpp>
+
+#include <istream>
+#include <locale>
+#include <ostream>
+#include <streambuf>
+#include <string>
+
+namespace occt_gd {
+
+// One phantom reference on the locale that basic_ios::init handed this stream
+// (the interposed Godot-global _Impl).  Nothing ever releases it, so that
+// _Impl's reference count can never reach zero regardless of how the two
+// libstdc++ copies mismatch their bookkeeping; the object leaks exactly once
+// and is never freed through the wrong allocator.
+inline void OcgPinInterposedLocale(const std::locale &p_replaced) {
+    const void *const impl = *(const void *const *)&p_replaced;
+    __atomic_fetch_add(static_cast<int *>(const_cast<void *>(impl)), 1, __ATOMIC_ACQ_REL);
+}
+
+class OcgCallableOStream final : public std::ostream {
+public:
+    explicit OcgCallableOStream(const ::godot::Callable &p_sink)
+        : std::ostream(&myBuffer), myBuffer(p_sink) {
+        OcgPinInterposedLocale(imbue(std::locale::classic()));
+    }
+
+    // The std::ostream OCCT writes into.
+    std::ostream &stream() { return *this; }
+
+    // The text written so far; valid until the next flush delivers it to the
+    // sink Callable (wrapper code captures this before flushing for the
+    // Print/Dump-style String-return sugar).
+    const std::string &str() const { return myBuffer.myText; }
+
+private:
+    class CallableBuffer : public std::streambuf {
+    public:
+        explicit CallableBuffer(const ::godot::Callable &p_sink) : mySink(p_sink) {}
+
+        std::string myText;
+
+        void deliver() {
+            if (myText.empty() || !mySink.is_valid()) {
+                return;
+            }
+            mySink.call(::godot::String::utf8(myText.c_str()));
+            myText.clear();
+        }
+
+    protected:
+        int_type overflow(int_type ch) override {
+            if (!traits_type::eq_int_type(ch, traits_type::eof())) {
+                myText.push_back(traits_type::to_char_type(ch));
+            }
+            return ch;
+        }
+
+        std::streamsize xsputn(const char *pData, std::streamsize pCount) override {
+            myText.append(pData, static_cast<std::size_t>(pCount));
+            return pCount;
+        }
+
+        // std::ostream::flush() (the wrapper's pre-return flush) lands here.
+        int sync() override {
+            deliver();
+            return 0;
+        }
+
+    private:
+        ::godot::Callable mySink;
+    };
+
+    CallableBuffer myBuffer;
+};
+
+class OcgCallableIStream final : public std::istream {
+public:
+    explicit OcgCallableIStream(const ::godot::Callable &p_source)
+        : std::istream(&myBuffer), myBuffer(p_source) {
+        OcgPinInterposedLocale(imbue(std::locale::classic()));
+    }
+
+    // The std::istream OCCT reads from.
+    std::istream &stream() { return *this; }
+
+private:
+    class CallableSource : public std::streambuf {
+    public:
+        explicit CallableSource(const ::godot::Callable &p_source) : mySource(p_source) {}
+
+    protected:
+        int_type underflow() override {
+            if (myDone) {
+                return traits_type::eof();
+            }
+            if (gptr() < egptr()) {
+                return traits_type::to_int_type(*gptr());
+            }
+            if (!mySource.is_valid()) {
+                myDone = true;
+                return traits_type::eof();
+            }
+            ::godot::String next = mySource.call();
+            if (next.is_empty()) {
+                myDone = true;
+                return traits_type::eof();
+            }
+            myChunk = std::string(next.utf8().get_data());
+            if (myChunk.empty()) {
+                myDone = true;
+                return traits_type::eof();
+            }
+            char *begin = myChunk.data();
+            setg(begin, begin, begin + myChunk.size());
+            return traits_type::to_int_type(*begin);
+        }
+
+    private:
+        ::godot::Callable mySource;
+        std::string myChunk;
+        bool myDone = false;
+    };
+
+    CallableSource myBuffer;
+};
+
+} // namespace occt_gd
+"""
+
+
+# ---------------------------------------------------------------------------
 # module.h
 # ---------------------------------------------------------------------------
 
@@ -1306,6 +1599,7 @@ def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
     out.append("#include <godot_cpp/godot.hpp>")
     out.append("")
     out.append('#include "OcgEnums.hpp"')
+    out.append('#include "OcgCallableStreams.hpp"')
     for w in sorted({c.wrapper_name for c in wrappers}):
         out.append(f'#include "{w}.hpp"')
     out.append("")
@@ -1396,6 +1690,7 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
     write("OcgEnums.cpp", generate_enums_cpp(modules))
     keys = _primitive_wrapper_names_used(modules, ctx)
     write("OcgPrimitiveWrappers.hpp", generate_primitive_wrappers(keys))
+    write("OcgCallableStreams.hpp", generate_callable_streams_hpp())
     write("module.h", generate_module_h(module, wrappers, keys))
 
     # Remove any wrapper files that are no longer generated (e.g. classes that
