@@ -1090,6 +1090,90 @@ def _bind_arg_names(method: MethodDecl, ctx: tm.TypeContext,
     return ", ".join(names)
 
 
+def _property_getter_candidates(cls: ClassDecl) -> list[MethodDecl]:
+    """Zero-arg const instance getters eligible to become Godot properties.
+
+    Restricted to non-overloaded methods whose stable GDScript name equals their
+    plain snake_case name: a name that needed a keyword/reserved guard stays
+    bound-only (the property would expose e.g. ``reference_`` for
+    CDM_Document::Reference).  Overloaded getters are excluded because their
+    unique name carries a signature hash and is not a stable property name.
+    """
+    out: list[MethodDecl] = []
+    for m in cls.methods:
+        if m.skip or m.is_static or m.is_overload:
+            continue
+        if m.kind != MethodKind.METHOD or not m.is_const:
+            continue
+        if len(m.parameters) != 0:
+            continue
+        if get_method_unique_name(m) != to_snake_case(m.name):
+            continue
+        out.append(m)
+    return out
+
+
+def _method_property_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
+    """add_property lines synthesised from OCCT getter/setter method pairs.
+
+    Only hierarchy roots (no wrapped OCCT base) qualify: an accessor overridden
+    in a derived class would otherwise re-register the base's property name in
+    ClassDB.  BUILDER/EXCEPTION wrappers are excluded (one-shot construction
+    state machines / diagnostics-only).
+
+    A const zero-arg getter paired with a one-arg ``set_<name>`` whose Godot
+    type matches the getter's return becomes a read-write property; unpaired
+    getters become read-only.  ``GetX``/``SetX`` pairs (setter ``set_x``) match
+    the ``x`` getter via the ``get_``-stripped stem.  Property names are deduped
+    against field-derived properties and each other.
+    """
+    cg = _cg(cls, ctx)
+    if cg.wrapper_base is not None or cg.storage == "none":
+        return []
+    if cls.kind in (ClassKind.BUILDER, ClassKind.EXCEPTION):
+        return []
+    candidates = _property_getter_candidates(cls)
+    if not candidates:
+        return []
+    methods = [m for m in cls.methods if not m.skip and not m.is_static
+               and m.kind == MethodKind.METHOD]
+    by_snake: dict[str, MethodDecl] = {to_snake_case(m.name): m for m in methods}
+    field_names = {to_snake_case(f.name) for f in cls.fields
+                   if f.is_public and not f.skip}
+    prop_names: set[str] = set(field_names)
+    entries: list[tuple[str, str, str]] = []  # (name, gd_type, setter_method)
+    for getter in candidates:
+        rconv = tm.cpp_return(getter.return_type, ctx, cls=cls)
+        if rconv is None or rconv.gd_type == "NIL":
+            continue
+        name = to_snake_case(getter.name)
+        if name in prop_names:
+            continue
+        prop_names.add(name)
+        setter: MethodDecl | None = None
+        stems = (name,) if not name.startswith("get_") else (name, name[4:])
+        for stem in stems:
+            cand = by_snake.get(f"set_{stem}")
+            if cand is None or cand.is_overload or cand.is_const:
+                continue
+            if len(cand.parameters) != 1:
+                continue
+            pconv = tm.cpp_param(cand.parameters[0].type, "v", ctx, cls=cls)
+            if pconv is not None and pconv.gd_type == rconv.gd_type:
+                setter = cand
+                break
+        entries.append((name, rconv.gd_type,
+                        get_method_unique_name(setter) if setter else ""))
+    out: list[str] = []
+    for name, gd, setter in entries:
+        out.append(
+            f'    ClassDB::add_property(get_class_static(), '
+            f'PropertyInfo(Variant::{gd}, "{name}", PROPERTY_HINT_NONE, "", '
+            f'PROPERTY_USAGE_DEFAULT, "{cls.wrapper_name}"), '
+            f'"{setter}", "{name}");')
+    return out
+
+
 def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
     out: list[str] = []
     for ctor in cls.constructors:
@@ -1145,6 +1229,7 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
             f'PropertyInfo(Variant::{gd}, "{snake}", PROPERTY_HINT_NONE, "", '
             f'PROPERTY_USAGE_DEFAULT, "{cls.wrapper_name}"), '
             f'"_ocg_field_set_{snake}", "_ocg_field_get_{snake}");')
+    out.extend(_method_property_entries(cls, ctx))
     # Godot's ClassDB keys integer constants per class by constant NAME (the
     # enum name is not part of the key), so enumerators repeated across nested
     # enums of one OCCT class (e.g. GeomFill_Gordon::ResultStatus::NotStarted
