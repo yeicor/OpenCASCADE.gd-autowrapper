@@ -72,6 +72,11 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
                 ctx.occt_headers[cls.name] = Path(cls.header_file).name
     for module in modules:
         for cls in module.classes:
+            if cls.header_file and cls.extra_occt_includes:
+                ctx.occt_extras[Path(cls.header_file).name[:-4]] = list(
+                    cls.extra_occt_includes)
+    for module in modules:
+        for cls in module.classes:
             if not cls.skip and cls.name != module.name:
                 ctx.wrapped[cls.name] = cls.wrapper_name
     # Empty value-class type tags that derive a wrapped value class share the
@@ -371,6 +376,39 @@ def _uses_primitive_wrappers(cls: ClassDecl, ctx: tm.TypeContext) -> bool:
     return False
 
 
+def _uses_enum_boxes(cls: ClassDecl, ctx: tm.TypeContext) -> bool:
+    """Class has a non-const `Enum&` out-parameter (needs OcgEnumBox classes)."""
+    for method in cls.all_methods:
+        for p in method.parameters:
+            t = p.type
+            if t.is_ref and not t.is_const and not t.is_rvalue_ref \
+                    and t.is_enum and t.base_name in ctx.enums:
+                return True
+    return False
+
+
+def _enum_box_keys_used(modules: list[ModuleDecl],
+                        ctx: tm.TypeContext) -> dict[str, object]:
+    """Enum name -> EnumDecl for every non-const `Enum&` out-parameter used."""
+    used: dict[str, object] = {}
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip:
+                continue
+            for method in cls.all_methods:
+                for p in method.parameters:
+                    t = p.type
+                    if t.is_ref and not t.is_const and not t.is_rvalue_ref \
+                            and t.is_enum and t.base_name in ctx.enums:
+                        used[t.base_name] = ctx.enums[t.base_name]
+    return used
+
+
+def _enum_box_class_names(enum_box_decls: dict[str, object]) -> set[str]:
+    """Ocg<EnumName>Box class names for the given enum out-parameter decls."""
+    return {tm._enum_box_class_name(n) for n in enum_box_decls}
+
+
 def _uses_enums(cls: ClassDecl, ctx: tm.TypeContext) -> bool:
     for method in cls.all_methods:
         for p in method.parameters:
@@ -556,7 +594,31 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     # pre-includes before it would parse, so the wrapper must include them
     # *before* the class header (extra_occt_includes), then the referenced
     # headers.  Dedupe them out of `refs` so they are not emitted again after.
-    extras = [f"<{e}>" for e in cls.extra_occt_includes if e and f"<{e}>" != own]
+    extras = list(cls.extra_occt_includes)
+    # Referenced OCCT headers (e.g. a template element type pulled in by a
+    # synthesized specialization) may likewise be non-self-contained; hoist
+    # their scanned extra includes before every referenced header so the parse
+    # succeeds in the synth wrapper too.
+    for h in refs:
+        hdr = h.strip("<>").removesuffix(".hxx")
+        for e in ctx.occt_extras.get(hdr, []):
+            if e not in extras:
+                extras.append(e)
+    # Emit each non-self-contained header only after its own extra includes
+    # (recursively), so e.g. HLRAlgo_PolyHidingData.hxx -- which uses gp_XYZ
+    # without including it -- is preceded by gp_XYZ.hxx.
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for e in extras:
+        if e in seen:
+            continue
+        seen.add(e)
+        for dep in ctx.occt_extras.get(e.removesuffix(".hxx"), []):
+            if dep not in seen and dep != e:
+                ordered.append(dep)
+                seen.add(dep)
+        ordered.append(e)
+    extras = [f"<{e}>" for e in ordered if e and f"<{e}>" != own]
     refs = [h for h in refs if h not in extras]
     if own:
         refs = [own] + [h for h in refs if h != own]
@@ -568,7 +630,7 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         out.append("#include <memory>")
         if _uses_stdalloc(cls, ctx):
             out.append('#include "OcgMemory.hpp"')
-    if _uses_primitive_wrappers(cls, ctx):
+    if _uses_primitive_wrappers(cls, ctx) or _uses_enum_boxes(cls, ctx):
         out.append('#include "OcgPrimitiveWrappers.hpp"')
     if _uses_streams(cls):
         out.append('#include "OcgCallableStreams.hpp"')
@@ -802,6 +864,7 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
         else:
             return _exception_method_body(cls, method, kind, params)
     preludes: list[str] = []
+    postludes: list[str] = []
     arg_exprs: list[str] = []
     for p in method.parameters:
         conv = tm.cpp_param(p.type, p.name, ctx, cls)
@@ -809,6 +872,8 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
             return None
         if conv.prelude:
             preludes.append(conv.prelude)
+        if conv.postlude:
+            postludes.append(conv.postlude)
         arg_exprs.append(conv.call_expr)
     args = ", ".join(arg_exprs)
     call = _occt_call(cls, method, args, ctx)
@@ -840,7 +905,10 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
                          f"{tm.default_value(rconv.cpp_type)});\n")
 
     body_lines = [f"        {p}" for p in preludes]
-    body_lines.append(f"        {rconv.body.replace('{call}', call)}")
+    if postludes:
+        body_lines.append(f"        {_inject_postludes(rconv.body, call, postludes)}")
+    else:
+        body_lines.append(f"        {rconv.body.replace('{call}', call)}")
     catch = ("OCCT_GUARD_CATCH_VOID();" if rconv.cpp_type == "void"
              else "OCCT_GUARD_CATCH({});")
     return f"""{rconv.cpp_type} {cls.wrapper_name}::{unique}({params}){const_suffix} {{
@@ -851,12 +919,43 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
 }}"""
 
 
+def _inject_postludes(body: str, call: str, postludes: list[str]) -> str:
+    """Return `body` (a return-body template) with `postludes` run between the
+    OCCT call and its return.
+
+    Param postludes write out-parameters back into the caller's argument after
+    the call (char*& strings, T*& pointer boxes).  They must run after the
+    call but before the value is returned, so the template body is rewritten
+    into capture-then-return form when the call is not already a standalone
+    statement.
+    """
+    post = "\n        ".join(postludes)
+    stripped = body.lstrip()
+    if stripped == "{call};":
+        return f"{call};\n        {post}"
+    if stripped.startswith("return {call};"):
+        return (f"auto ocg_post_value = {call};\n"
+                f"        {post}\n"
+                "        return ocg_post_value;")
+    m = re.match(r"^(\s*)(auto(?:&)?)\s+(\w+)\s*=\s*\{call\};", body, re.S)
+    if m:
+        return (f"{m.group(2)} {m.group(3)} = {call};\n"
+                f"        {post}"
+                f"{body[m.end():]}")
+    # Any other shape embeds {call} inside the returned value: capture it into
+    # ocg_post_value, run the postludes, then evaluate the body against it.
+    return (f"auto ocg_post_value = {call};\n"
+            f"        {post}\n"
+            f"        {body.replace('{call}', 'ocg_post_value').lstrip()}")
+
+
 def _ctor_body(cls: ClassDecl, ctor: MethodDecl, ctx: tm.TypeContext) -> str:
     unique = _unique(ctor)
     params = _params_decl(ctor, ctx, cls, is_ctor=True)
     if params is None:
         return ""  # unmappable param; caller marks skip
     preludes: list[str] = []
+    postludes: list[str] = []
     arg_exprs: list[str] = []
     for p in ctor.parameters:
         conv = tm.cpp_param(p.type, p.name, ctx, cls, is_ctor=True)
@@ -864,52 +963,61 @@ def _ctor_body(cls: ClassDecl, ctor: MethodDecl, ctx: tm.TypeContext) -> str:
             return ""
         if conv.prelude:
             preludes.append(conv.prelude)
+        if conv.postlude:
+            postludes.append(conv.postlude)
         arg_exprs.append(conv.call_expr)
     args = ", ".join(arg_exprs)
     pre = "\n".join(f"        {p}" for p in preludes) + "\n" if preludes else ""
+    post = "\n".join(f"        {p}" for p in postludes)
     cg = _cg(cls, ctx)
     if cg.storage == "unique_ptr":
         if _uses_stdalloc(cls, ctx):
             new_expr = f"ref->_native.reset(occt_gd::occt_alloc_new<{_occt_qual(cls)}>({args}));"
         else:
             new_expr = f"ref->_native = std::make_unique<{_occt_qual(cls)}>({args});"
+        tail = f"\n{post}" if postludes else ""
         return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
     try {{
         OCC_CATCH_SIGNALS
         Ref<{cls.wrapper_name}> ref; ref.instantiate();
         occt_gd::clear_last_error();
-{pre}        {new_expr}
+{pre}        {new_expr}{tail}
         return ref;
     }} OCCT_GUARD_CATCH({{}});
 }}"""
     if cg.storage == "handle":
         sync = "\n        ref->_sync_base_storage();" if cg.has_sync else ""
+        tail = f"\n{post}" if postludes else ""
         return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
     try {{
         OCC_CATCH_SIGNALS
         Ref<{cls.wrapper_name}> ref; ref.instantiate();
         occt_gd::clear_last_error();
 {pre}        ref->_handle = new {_occt_qual(cls)}({args});
-{sync}
+{sync}{tail}
         return ref;
     }} OCCT_GUARD_CATCH({{}});
 }}"""
     if cg.inherited_native:
+        tail = f"\n{post}" if postludes else ""
         return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
     try {{
         OCC_CATCH_SIGNALS
         Ref<{cls.wrapper_name}> ref; ref.instantiate();
         occt_gd::clear_last_error();
 {pre}        ref->_native_ref() = {_occt_qual(cls)}({args});
+{tail}
         return ref;
     }} OCCT_GUARD_CATCH({{}});
 }}"""
+    tail = f"\n{post}" if postludes else ""
     return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
     try {{
         OCC_CATCH_SIGNALS
         Ref<{cls.wrapper_name}> ref; ref.instantiate();
         occt_gd::clear_last_error();
 {pre}        new (&ref->_native) {_occt_qual(cls)}({args});
+{tail}
         return ref;
     }} OCCT_GUARD_CATCH({{}});
 }}"""
@@ -1463,7 +1571,8 @@ def _primitive_wrapper_names_used(modules: list[ModuleDecl],
     return keys
 
 
-def generate_primitive_wrappers(keys: set[str]) -> str:
+def generate_primitive_wrappers(keys: set[str],
+                                enum_box_decls: dict[str, object]) -> str:
     out: list[str] = []
     out.append("// Auto-generated primitive wrapper classes for non-const ref output params -- DO NOT EDIT")
     out.append("#pragma once")
@@ -1475,6 +1584,11 @@ def generate_primitive_wrappers(keys: set[str]) -> str:
     for key in sorted(keys):
         if key.startswith("TCollection_"):
             out.append(f"#include <{key}.hxx>")
+    for enum_name in sorted(enum_box_decls):
+        enum_decl = enum_box_decls[enum_name]
+        header = Path(enum_decl.header_file).name if enum_decl.header_file else ""
+        if header:
+            out.append(f"#include <{header}>")
     out.append("")
     out.append("using namespace godot;")
     out.append("")
@@ -1495,6 +1609,28 @@ def generate_primitive_wrappers(keys: set[str]) -> str:
         out.append(f"        ClassDB::bind_method(D_METHOD(\"get_value\"), &{wclass}::get_value);")
         out.append(f"        ClassDB::bind_method(D_METHOD(\"set_value\", \"value\"), &{wclass}::set_value);")
         out.append(f"        ClassDB::add_property(get_class_static(), PropertyInfo(Variant::{gd}, \"value\"), \"set_value\", \"get_value\");")
+        out.append("    }")
+        out.append("};")
+        out.append("")
+    for enum_name in sorted(enum_box_decls):
+        enum_decl = enum_box_decls[enum_name]
+        box = tm._enum_box_class_name(enum_name)
+        path = tm._enum_occt_path(enum_decl)
+        out.append(f"class {box} : public RefCounted {{")
+        out.append(f"    GDCLASS({box}, RefCounted)")
+        out.append("public:")
+        out.append(f"    {path} _native;")
+        out.append("")
+        out.append(f"    {box}() : RefCounted(), _native() {{}}")
+        out.append("")
+        out.append(f"    int32_t get_value() const {{ return static_cast<int32_t>(_native); }}")
+        out.append(f"    void set_value(int32_t v) {{ _native = static_cast<{path}>(v); }}")
+        out.append("")
+        out.append("protected:")
+        out.append("    static void _bind_methods() {")
+        out.append(f"        ClassDB::bind_method(D_METHOD(\"get_value\"), &{box}::get_value);")
+        out.append(f"        ClassDB::bind_method(D_METHOD(\"set_value\", \"value\"), &{box}::set_value);")
+        out.append(f"        ClassDB::add_property(get_class_static(), PropertyInfo(Variant::INT, \"value\"), \"set_value\", \"get_value\");")
         out.append("    }")
         out.append("};")
         out.append("")
@@ -1791,7 +1927,8 @@ def _registration_order(wrappers: list[ClassDecl]) -> list[str]:
 
 
 def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
-                      primitive_keys: set[str]) -> str:
+                      primitive_keys: set[str],
+                      enum_box_names: set[str] = frozenset()) -> str:
     out: list[str] = []
     out.append("// AUTOGENERATED by OpenCASCADE.gd-autowrapper — DO NOT EDIT")
     out.append("#ifndef AUTOWRAPPER_MODULE_H")
@@ -1802,6 +1939,8 @@ def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
     out.append("")
     out.append('#include "OcgEnums.hpp"')
     out.append('#include "OcgCallableStreams.hpp"')
+    if primitive_keys or enum_box_names:
+        out.append('#include "OcgPrimitiveWrappers.hpp"')
     for w in sorted({c.wrapper_name for c in wrappers}):
         out.append(f'#include "{w}.hpp"')
     out.append("")
@@ -1817,6 +1956,8 @@ def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
         if wclass in wrapper_names:
             continue
         out.append(f"    godot::ClassDB::register_class<{wclass}>();")
+    for box in sorted(enum_box_names):
+        out.append(f"    godot::ClassDB::register_class<{box}>();")
     out.append("    godot::ClassDB::register_class<OcgEnums>();")
     for w in _registration_order(wrappers):
         out.append(f"    godot::ClassDB::register_class<{w}>();")
@@ -1895,10 +2036,12 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
     write("OcgEnums.hpp", generate_enums_hpp(modules))
     write("OcgEnums.cpp", generate_enums_cpp(modules))
     keys = _primitive_wrapper_names_used(modules, ctx)
-    write("OcgPrimitiveWrappers.hpp", generate_primitive_wrappers(keys))
+    enum_boxes = _enum_box_keys_used(modules, ctx)
+    write("OcgPrimitiveWrappers.hpp", generate_primitive_wrappers(keys, enum_boxes))
     write("OcgCallableStreams.hpp", generate_callable_streams_hpp())
     write("OcgMemory.hpp", generate_occt_memory_hpp())
-    write("module.h", generate_module_h(module, wrappers, keys))
+    write("module.h", generate_module_h(module, wrappers, keys,
+                                        _enum_box_class_names(enum_boxes)))
 
     # Remove any wrapper files that are no longer generated (e.g. classes that
     # became skippable since the last run).
@@ -1908,13 +2051,12 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
             stale.unlink()
 
     if probe_out:
-        from .audit import generate_probe_tu
+        from .audit import write_probe_parts
         from .occt import find_occt_install
         project_root = Path(__file__).resolve().parent.parent.parent
         probe = Path(probe_out)
         probe.parent.mkdir(parents=True, exist_ok=True)
-        probe.write_text(generate_probe_tu(modules, ctx,
-                                           find_occt_install(project_root)))
+        write_probe_parts(probe, modules, ctx, find_occt_install(project_root))
     return written
 
 

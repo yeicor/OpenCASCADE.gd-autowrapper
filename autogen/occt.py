@@ -502,8 +502,11 @@ def include_closure(headers: list[Path], install: OCCTInstall,
             order.append(h)
     # de-dup preserving order
     result: list[Path] = []
+    seen_result: set[str] = set()
     for h in order:
-        if h.name not in {r.name for r in result}:
+        n = h.name
+        if n not in seen_result:
+            seen_result.add(n)
             result.append(h)
     return result
 

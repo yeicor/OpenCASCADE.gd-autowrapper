@@ -701,20 +701,16 @@ _abstract_memo: tuple[frozenset[str], set[str]] | None = None
 
 def _unwrappable_specs(specs: dict[str, tuple[str, list[str]]], install: Path,
                        modules: list[ModuleDecl] | None = None) -> set[str]:
-    """Spec keys that can never compile as value wrappers.
+    """Spec keys that can never compile as a wrapper.
 
-    Two classes of specialization can never compile as a wrapper: abstract
-    specializations (pure virtual members) and value-stored ones without a
-    public default constructor.  Abstract ones are dropped regardless of
-    storage because codegen's abstract-constructor skipping relies on
-    ``cls.is_abstract``, which libclang cannot evaluate for class templates
-    (they must be detected here, ahead of codegen).  ``Standard_Transient``-
-    derived specs never need a default constructor (handle storage constructs
-    nothing up front), so only non-Transient specs are subject to the
-    default-constructibility requirement.  Detect everything in one batch TU
-    via ``std::is_abstract`` / ``std::is_default_constructible`` /
-    ``std::is_base_of`` so the (failed) static_assert surfaces as a
-    per-line diagnostic.
+    Only abstract specializations are unwrappable: codegen's abstract-
+    constructor skipping relies on ``cls.is_abstract``, which libclang cannot
+    evaluate for class templates (they must be detected here, ahead of
+    codegen).  Specializations without a public default constructor are *not*
+    unwrappable -- codegen falls back to unique_ptr storage with factory
+    constructors (the same path used for scanned value classes like
+    math_VectorBase<double>).  Detect in one batch TU via ``std::is_abstract``
+    so a (failed) static_assert surfaces as a per-line diagnostic.
     """
     global _abstract_memo
     key_set = frozenset(specs)
@@ -737,10 +733,7 @@ def _unwrappable_specs(specs: dict[str, tuple[str, list[str]]], install: Path,
     lines.append("namespace ocg_abstract {")
     key_lines: dict[str, int] = {}
     for i, key in enumerate(sorted(specs)):
-        lines.append(f"static_assert("
-                     f"!std::is_abstract<{key}>::value"
-                     f" && (std::is_base_of<Standard_Transient, {key}>::value"
-                     f" || std::is_default_constructible<{key}>::value), "
+        lines.append(f"static_assert(!std::is_abstract<{key}>::value, "
                      f"\"abstract:{i}\");")
         key_lines[key] = len(lines)
     lines.append("}")

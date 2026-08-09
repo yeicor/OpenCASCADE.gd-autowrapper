@@ -130,6 +130,18 @@ def make_type(cursor_type: "Type") -> OCCTType:
     except Exception:
         pointee_is_const = "const" in can_spelling
 
+    # For a reference/pointer to a raw pointer (e.g. `const char*&`, `T**`),
+    # record whether the pointed-to type of the inner pointer is const.  The
+    # typemap needs this to tell `const char*&` from `char*&`: both canonicalize
+    # to a non-const reference whose pointee is the (unqualified) pointer type.
+    pointee_pointee_is_const = False
+    if (is_ref or is_pointer) and pointee.kind == TypeKind.POINTER:
+        try:
+            pointee_pointee_is_const = bool(
+                pointee.get_pointee().is_const_qualified())
+        except Exception:
+            pointee_pointee_is_const = "const" in pointee.spelling
+
     core = _strip_qualifiers(pointee.spelling)
     if is_pointer:
         core = core.rstrip("*").rstrip()
@@ -147,6 +159,15 @@ def make_type(cursor_type: "Type") -> OCCTType:
     else:
         base_name = core
         targs = _template_args(pointee)
+        if targs and base_name.endswith("<>"):
+            # libclang canonicalizes a typedef'd template specialization to a
+            # bare `Root<>` (empty angle brackets) even though the template
+            # arguments exist on the type (e.g. `math_Vector` ->
+            # `math_VectorBase<double>` canonicalized as `math_VectorBase<>`).
+            # Rebuild the name so the specialization is recognizable to the
+            # synthesis / typemap machinery instead of being dropped as an
+            # empty-arg spec.
+            base_name = f"{base_name[:-2]}<{', '.join(targs)}>"
 
     # Enum detection from the canonical kind of the (pointee) type.
     is_enum = False
@@ -167,6 +188,7 @@ def make_type(cursor_type: "Type") -> OCCTType:
         handle_inner=handle_inner,
         is_transient_descendant=is_handle,  # handles always wrap transient objects
         pointee_is_const=pointee_is_const,
+        pointee_pointee_is_const=pointee_pointee_is_const,
         is_enum=is_enum,
         template_args=targs,
     )

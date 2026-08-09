@@ -98,6 +98,7 @@ class TypeContext:
         self.sync_bases: set[str] = set()       # wrapper names that have _sync_base_storage
         self.enums: dict[str, object] = {}      # enum name -> EnumDecl
         self.occt_headers: dict[str, str] = {}  # occt class name -> header basename
+        self.occt_extras: dict[str, list[str]] = {}  # header basename -> extra includes it needs (but doesn't include itself)
         self.unique_ptr: set[str] = set()       # wrapper names with unique_ptr storage
         self.stdalloc: set[str] = set()         # unique_ptr wrappers heap-built on Standard::Allocate
         self.handles: set[str] = set()          # wrapper names with handle storage
@@ -155,11 +156,23 @@ def _wrapped_key(base_name: str, ctx: TypeContext) -> str | None:
     trailing template parameters (e.g. ``NCollection_DataMap<K,V,H>`` against
     the wrapped ``NCollection_DataMap<K,V>``), so fall back to the wrapped
     specialization whose arguments form a strict prefix of the spelled ones.
+
+    Results are cached per-context (``ctx.wrapped`` is populated once during
+    build_context and never mutated afterwards).
     """
+    cache = getattr(ctx, "_wrapped_key_cache", None)
+    if cache is None:
+        cache = ctx._wrapped_key_cache = {}
+    try:
+        return cache[base_name]
+    except KeyError:
+        pass
     if base_name in ctx.wrapped:
+        cache[base_name] = base_name
         return base_name
     m = _TEMPLATE_RE.match(base_name)
     if not m:
+        cache[base_name] = None
         return None
     tname = m.group(1)
     args = _split_template_args(m.group(2))
@@ -169,7 +182,9 @@ def _wrapped_key(base_name: str, ctx: TypeContext) -> str | None:
             continue
         kargs = _split_template_args(km.group(2))
         if len(kargs) < len(args) and kargs == args[: len(kargs)]:
+            cache[base_name] = key
             return key
+    cache[base_name] = None
     return None
 
 
@@ -409,6 +424,17 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
         # shared wrapped-class conversion below, which passes the wrapper's
         # native storage by reference so OCCT mutates the caller's object in
         # place (exact in/out semantics, no copying).
+        if _char_pptr_kind(t) is not None:
+            # char*& / const char*& (and Standard_PCharacter&) out-string:
+            # the callee stores a string (via the pointer or through it); cross
+            # as a String with a prelude/postlude write-back.
+            return _string_out_param(t, name)
+        if t.base_name.rstrip().endswith("*"):
+            # Non-const T*& (pointer to a wrapped value written by the callee)
+            # -> the wrapped T acts as the in/out box (see _ptr_ref_out_param).
+            ptr = _ptr_ref_out_param(t, name, ctx)
+            if ptr is not None:
+                return ptr
         wrapper = PRIMITIVE_WRAPPER_MAP.get(t.base_name)
         if wrapper is not None:
             return ParamConv(cpp_type=f"Ref<{wrapper[0]}>", gd_type=wrapper[1],
@@ -422,6 +448,12 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
                     return ParamConv(cpp_type=cpp, gd_type=gd, name=name,
                                      call_expr=_rw(move, name))
                 return _enum_param(t, name, ctx, move=move)
+            if t.is_enum:
+                # Non-const enum& out-parameter -> small OcgEnumBox; OCCT
+                # writes the result into the box's native storage in place.
+                box = _enum_box_param(t, name, ctx)
+                if box is not None:
+                    return box
             return None  # no box class -> cannot bind a by-value param to a T&
     if t.is_pointer:
         return _cpp_pointer_param(t, name, ctx)
@@ -497,6 +529,11 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
     if b in ("char", "char8_t") and t.pointee_is_const:
         return ParamConv(cpp_type="String", gd_type="STRING", name=name,
                          call_expr=f"{name}.utf8().get_data()")
+    if b in ("char", "char8_t") and not t.pointee_is_const:
+        # Non-const char* output buffer (e.g. Standard::StackTrace, GUID
+        # ToCString): cross as a String, passing a mutable buffer and reading
+        # the NUL-terminated result back after the call.
+        return _string_out_param(t, name)
     if b in ("char16_t",) and t.pointee_is_const:
         return ParamConv(cpp_type="String", gd_type="STRING", name=name,
                          call_expr=f"{name}.utf16()")
@@ -552,6 +589,120 @@ def _enum_param(t: OCCTType, name: str, ctx: TypeContext, move: bool = False) ->
     # Any other enum crosses the FFI as an int, cast back to its own type.
     return ParamConv(cpp_type="int32_t", gd_type="INT", name=name,
                      call_expr=f"static_cast<{t.base_name}>({_rw(move, name)})")
+
+
+def _enum_box_class_name(enum_name: str) -> str:
+    """RefCounted box class for a non-const `Enum&` out-parameter."""
+    return "Ocg" + re.sub(r"[^A-Za-z0-9]", "_", enum_name) + "Box"
+
+
+def _enum_box_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | None:
+    """Map a non-const `Enum&` out-parameter to its small box class.
+
+    OCCT writes the result into the caller's enum variable; the box exposes it
+    as an int `value` property (OcgEnumBoxes live in OcgPrimitiveWrappers.hpp,
+    emitted by codegen alongside the primitive boxes).
+    """
+    enum_decl = ctx.enums.get(t.base_name)
+    if enum_decl is None:
+        return None
+    box = _enum_box_class_name(t.base_name)
+    return ParamConv(cpp_type=f"Ref<{box}>", gd_type="INT", name=name,
+                     call_expr=f"{name}->_native")
+
+
+def _char_pptr_kind(t: OCCTType) -> str | None:
+    """Classify a char pointer-by-ref / output buffer, or None.
+
+    `char*&`/`Standard_PCharacter&` -> "mut" (callee may write through the
+    buffer); `const char*&` -> "const" (callee only re-points it); plain
+    non-const `char*` output buffers -> "mut".
+    """
+    if t.is_enum:
+        return None
+    if t.is_ref and not t.is_rvalue_ref:
+        core = t.base_name.rstrip()
+        if not core.endswith("*"):
+            return None
+        if core[:-1].rstrip() not in ("char", "char8_t"):
+            return None
+        return "const" if t.pointee_pointee_is_const else "mut"
+    if t.is_pointer and not t.pointee_is_const \
+            and t.base_name in ("char", "char8_t"):
+        return "mut"
+    return None
+
+
+def _string_out_param(t: OCCTType, name: str) -> ParamConv:
+    """Map a `char*` output string (by pointer or by reference) to a String.
+
+    The callee stores a C string either by re-pointing a `char*&`/`const
+    char*&` at its own storage, or by writing into a caller buffer (`char*`).
+    Both cross as a String with a prelude that stages the buffer and a postlude
+    that reads the NUL-terminated result back into the argument.
+    """
+    kind = _char_pptr_kind(t)
+    if kind == "const":
+        cs = f"ocg_cs_{name}"
+        p = f"ocg_p_{name}"
+        return ParamConv(
+            cpp_type="String", gd_type="STRING", name=name,
+            prelude=(f"::godot::CharString {cs}({name}.utf8());\n"
+                     f"        const char* {p} = {cs}.get_data();"),
+            call_expr=p,
+            postlude=f'{name} = ::godot::String::utf8({p} ? {p} : "");')
+    buf = f"ocg_buf_{name}"
+    prelude = (f"std::string {buf}({name}.utf8().get_data());\n"
+               f"        if ({buf}.size() < 64) {{ {buf}.resize(64); }}")
+    if t.is_ref:
+        # char*& / Standard_PCharacter&: the callee takes the pointer by
+        # reference, so an lvalue char* must be handed over (an rvalue from
+        # .data() cannot bind to char*&). OCCT writes through the pointee or
+        # re-points it; both are read back through the local pointer.
+        p = f"ocg_p_{name}"
+        return ParamConv(cpp_type="String", gd_type="STRING", name=name,
+                         prelude=prelude + f"\n        char* {p} = {buf}.data();",
+                         call_expr=p,
+                         postlude=f'{name} = ::godot::String::utf8({p} ? {p} : "");')
+    return ParamConv(cpp_type="String", gd_type="STRING", name=name,
+                     prelude=prelude, call_expr=f"{buf}.data()",
+                     postlude=f"{name} = ::godot::String::utf8({buf}.data());")
+
+
+def _ptr_ref_out_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | None:
+    """Map a non-const `T*&` out-parameter to the wrapped T as an in/out box.
+
+    OCCT writes a pointer to a value it produced (e.g. ``BOPAlgo_Tools::
+    PerformCommonBlocks(BOPDS_DS*&)``).  The caller passes a wrapper of T as
+    the box; a postlude copies the pointee into the wrapper's storage.
+    """
+    core = t.base_name.rstrip()
+    if not core.endswith("*"):
+        return None
+    pointee = core[:-1].rstrip()
+    key = _wrapped_key(pointee, ctx)
+    if key is None or key in ctx.noncopyable:
+        return None
+    w = ctx.wrapped[key]
+    if w in ctx.no_storage:
+        return None
+    pvar = f"ocg_p_{name}"
+    guard = f"if ({pvar} && !{name}.is_null())"
+    if w in ctx.handles:
+        postlude = f"{guard} {{ {name}->_handle = {pvar}; }}"
+    elif w in ctx.unique_ptr:
+        if w in ctx.stdalloc:
+            postlude = (f"{guard} {{ {name}->_native.reset("
+                        f"occt_gd::occt_alloc_new<{_occt_qual(key)}>(*{pvar}))); }}")
+        else:
+            postlude = (f"{guard} {{ {name}->_native = "
+                        f"std::make_unique<{_occt_qual(key)}>(*{pvar}); }}")
+    else:
+        native = "_native_ref()" if w in ctx.inherited_value else "_native"
+        postlude = f"{guard} {{ {name}->{native} = *{pvar}; }}"
+    return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
+                     prelude=f"{_occt_qual(key)}* {pvar} = nullptr;",
+                     postlude=postlude, call_expr=pvar)
 
 
 def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False,

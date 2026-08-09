@@ -21,6 +21,7 @@ The audit catches those at generation time instead:
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 import heapq
 import os
 import re
@@ -61,6 +62,14 @@ def render_source_type(t: OCCTType) -> str:
     typedefs such as ``Poly_MeshPurpose``/``unsigned int`` compare by type.
     """
     inner = f"occ::handle<{t.handle_inner}>" if t.is_handle else t.base_name
+    # A reference/pointer to a raw pointer (e.g. `const char*&`, `T**`) stores
+    # the inner pointer in `base_name`; pointee_pointee_is_const marks a const
+    # pointee (`const char*&`), which must be spelled for the probe cast to
+    # bind the real member.
+    if t.pointee_pointee_is_const and not t.is_handle:
+        base = inner.rstrip()
+        if base.endswith("*"):
+            inner = f"const {base[:-1].rstrip()} *"
     if t.is_pointer:
         s = f"{inner}*"
         if t.pointee_is_const:
@@ -82,16 +91,35 @@ def render_nm_type(t: OCCTType) -> str:
     Top-level ``const`` on a by-value parameter is dropped (it is not part of
     the mangled function type); low-level const (``T const&``, ``char const*``)
     is kept with the ``const`` after the type.  Handles demangle under the real
-    ``opencascade::`` namespace, not the ``occ`` alias.
+    ``opencascade::`` namespace, not the ``occ`` alias.  The demangler puts no
+    space around ``*``/``&`` (``char const*&``, ``BOPDS_DS*&``), so pointer-typed
+    bases are rendered space-free to match `nm` output exactly.
     """
-    inner = f"opencascade::handle<{t.handle_inner}>" if t.is_handle else t.base_name
-    if t.is_const and (t.is_ref or t.is_pointer):
-        inner = f"{inner} const"
+    inner = _nm_base(t)
     if t.is_pointer:
         return f"{inner}*"
     if t.is_ref:
         return f"{inner}&&" if t.is_rvalue_ref else f"{inner}&"
     return inner
+
+
+def _nm_base(t: OCCTType) -> str:
+    """Space-free base of a parameter type as `nm -C` prints it.
+
+    ``base_name`` keeps a trailing space in a pointer-typed base (``char *``,
+    ``BOPDS_DS *``); the demangler instead emits ``char const*``/``BOPDS_DS*``.
+    ``pointee_pointee_is_const`` turns ``char*&`` into the const-pointee form
+    ``char const*&``.
+    """
+    if t.is_handle:
+        base = f"opencascade::handle<{t.handle_inner}>"
+    else:
+        base = re.sub(r"\s*([*&])", r"\1", t.base_name)
+    if t.pointee_pointee_is_const and base.endswith("*"):
+        base = f"{base[:-1]} const*"
+    if t.is_const and (t.is_ref or t.is_pointer):
+        base = f"{base} const"
+    return base
 
 
 def symbol_for_method(cls, method) -> str:
@@ -380,26 +408,29 @@ def probe_headers(classes, ctx: tm.TypeContext, install: OCCTInstall) -> list[Pa
                           ctx)
 
 
-_CLASSNAME_RE_CACHE: dict[int, re.Pattern] = {}
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _hygiene_order(closure: list[Path], ctx: tm.TypeContext) -> list[Path]:
     """Deterministically reorder ``closure`` so each header comes after the
     declaring header of every OCCT class name it references."""
     idx = {h.name: i for i, h in enumerate(closure)}
-    class_idx: dict[str, int] = {}
+    exact: dict[str, int] = {}
+    prefix: dict[str, list[int]] = {}
     for cls, hdr in ctx.occt_headers.items():
-        j = idx.get(Path(hdr).name) if hdr else None
-        if j is not None:
-            class_idx[cls] = j
-    if not class_idx:
+        if not hdr:
+            continue
+        j = idx.get(hdr)
+        if j is None:
+            continue
+        m = _IDENT_RE.match(cls)
+        token = m.group(0) if m else cls
+        if token == cls:
+            exact[cls] = j
+        else:
+            prefix.setdefault(token, []).append(j)
+    if not exact and not prefix:
         return closure
-    size = len(class_idx)
-    rx = _CLASSNAME_RE_CACHE.get(size)
-    if rx is None:
-        names = sorted(class_idx)
-        rx = re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, names)))
-        _CLASSNAME_RE_CACHE[size] = rx
 
     deps: list[set[int]] = [set() for _ in closure]
     for i, h in enumerate(closure):
@@ -407,10 +438,15 @@ def _hygiene_order(closure: list[Path], ctx: tm.TypeContext) -> list[Path]:
             text = h.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for cls in rx.findall(text):
-            j = class_idx[cls]
-            if j != i:
-                deps[i].add(j)
+        for tok in _IDENT_RE.findall(text):
+            j = exact.get(tok)
+            if j is not None:
+                if j != i:
+                    deps[i].add(j)
+                continue
+            for j in prefix.get(tok, ()):
+                if j != i:
+                    deps[i].add(j)
     for name, must_follow in _HEADER_PRECEDENCE.items():
         i = idx.get(name)
         if i is None:
@@ -467,41 +503,17 @@ def _hygiene_order(closure: list[Path], ctx: tm.TypeContext) -> list[Path]:
     return out
 
 
-def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str:
-    """A TU referencing every method the wrappers will emit at link time."""
-    classes = [cls for m in modules for cls in m.classes if not cls.skip]
-    headers = probe_headers(classes, ctx, install)
-    out: list[str] = [
-        "// Auto-generated symbol audit probe TU -- DO NOT EDIT",
-    ]
-    out.extend(f"#include <{h.name}>" for h in headers)
-    out.append("")
-    out.append("#include <utility>   // std::declval (field-accessor probes)")
-    out.append("#include <type_traits>  // std::remove_reference (field probes)")
-    out.append("")
-    out.append("// Compile-time-only reference into a hypothetical instance; the")
-    out.append("// field probes copy/assign through it without ever constructing.")
-    out.append("template <typename T> inline T& ocg_field_probe_ref() noexcept {")
-    out.append("    T* p = nullptr;")
-    out.append("    return *p;")
-    out.append("}")
-    out.append("")
-    out.append("// Template-wrapped copy probes (see _copy_probe_line): keeping the")
-    out.append("// copy operation inside a template anchors GCC's instantiation")
-    out.append("// chain at the probe line instead of inside an OCCT header.")
-    out.append("template <typename T> inline void ocg_copy_probe_assign() {")
-    out.append("    ocg_field_probe_ref<T>() = ocg_field_probe_ref<const T>();")
-    out.append("}")
-    out.append("template <typename T> inline void ocg_copy_probe_construct() {")
-    out.append("    T a(ocg_field_probe_ref<const T>()); (void)a;")
-    out.append("}")
-    out.append("")
-    out.append("// One discarded address-of per generated wrapper method; overloads")
-    out.append("// are disambiguated by explicit pointer casts.  The undefined symbols")
-    out.append("// of this TU are the member/static symbols the wrappers will emit.")
+def _probe_lines(classes, dc_set: set[str], ctx) -> list[str]:
+    """Probe body lines (indented, with ``// Class::method`` comments).
+
+    Shared by ``generate_probe_tu`` and the per-module chunks written by
+    ``write_probe_parts`` so the aggregate and the parts stay consistent.
+    ``dc_set`` is passed in because it must be computed over *all* wrapped
+    classes (a ctor probe may need to value-construct an argument of a type
+    that lives in another module).
+    """
     lines: list[str] = []
     index = 0
-    dc_set = _default_constructible_set(classes)
     for cls in classes:
         for method in (cls.methods + cls.operators + cls.static_methods):
             if method.skip or method.is_deleted or method.is_pure_virtual \
@@ -539,6 +551,43 @@ def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str
             lines.append(f"    // {cls.name}::copy (return value)")
             lines.append(f"    {line}")
             index += 1
+    return lines
+
+
+def _probe_preamble(headers) -> list[str]:
+    """Shared preamble lines: the header closure plus the probe helper
+    templates (ocg_field_probe_ref / ocg_copy_probe_*)."""
+    return (["// Auto-generated symbol audit probe TU -- DO NOT EDIT"]
+            + [f"#include <{h.name}>" for h in headers]
+            + ["",
+               "#include <utility>   // std::declval (field-accessor probes)",
+               "#include <type_traits>  // std::remove_reference (field probes)",
+               "",
+               "// Compile-time-only reference into a hypothetical instance; the",
+               "// field probes copy/assign through it without ever constructing.",
+               "template <typename T> inline T& ocg_field_probe_ref() noexcept {",
+               "    T* p = nullptr;",
+               "    return *p;",
+               "}",
+               "",
+               "// Template-wrapped copy probes (see _copy_probe_line): keeping the",
+               "// copy operation inside a template anchors GCC's instantiation",
+               "// chain at the probe line instead of inside an OCCT header.",
+               "template <typename T> inline void ocg_copy_probe_assign() {",
+               "    ocg_field_probe_ref<T>() = ocg_field_probe_ref<const T>();",
+               "}",
+               "template <typename T> inline void ocg_copy_probe_construct() {",
+               "    T a(ocg_field_probe_ref<const T>()); (void)a;",
+               "}",
+               ""])
+
+
+def _compose_probe(headers, lines: list[str]) -> str:
+    """Assemble a probe TU from the ordered header closure and body lines."""
+    out = _probe_preamble(headers)
+    out.append("// One discarded address-of per generated wrapper method; overloads")
+    out.append("// are disambiguated by explicit pointer casts.  The undefined symbols")
+    out.append("// of this TU are the member/static symbols the wrappers will emit.")
     if not lines:
         out.append("auto const ocg_sym_none = 0;")
     else:
@@ -546,9 +595,74 @@ def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall) -> str
     return "\n".join(out) + "\n"
 
 
+def generate_probe_tu(modules, ctx: tm.TypeContext, install: OCCTInstall,
+                      headers=None) -> str:
+    """A TU referencing every method the wrappers will emit at link time."""
+    classes = [cls for m in modules for cls in m.classes if not cls.skip]
+    if headers is None:
+        headers = probe_headers(classes, ctx, install)
+    lines = _probe_lines(classes, _default_constructible_set(classes), ctx)
+    return _compose_probe(headers, lines)
+
+
 # ---------------------------------------------------------------------------
 # nm parsing
 # ---------------------------------------------------------------------------
+
+def write_probe_parts(probe_path: Path, modules, ctx: tm.TypeContext,
+                      install: OCCTInstall,
+                      max_parts: int | None = None) -> list[Path]:
+    """Write the aggregate probe TU plus per-chunk part TUs; return the parts.
+
+    The audit compiles the parts in parallel (one g++ per part), so a probe
+    covering ~350 modules does not collapse to a single-threaded compile.  The
+    aggregate ``probe.cpp`` is still written so ``audit --probe probe.cpp`` and
+    the regen loop keep working unchanged when no parts exist.
+
+    Every part reuses the *full* header closure of the aggregate probe: a
+    signature may reference types whose headers live in another module (e.g. a
+    static class like ``IGESSolid`` used from an Interface method), so a part
+    cannot get away with only its own modules' headers.  The per-module probe
+    bodies are appended under unique namespaces, since each reuses index-local
+    symbol names (``ocg_sym_00000`` & co.).  Header parsing is thus duplicated
+    across parts, but the template-instantiation work (the dominant cost) is
+    split across them.
+    """
+    all_classes = [cls for m in modules for cls in m.classes if not cls.skip]
+    dc_set = _default_constructible_set(all_classes)
+    headers = probe_headers(all_classes, ctx, install)
+    probe_path.write_text(generate_probe_tu(modules, ctx, install, headers))
+    preamble = "\n".join(_probe_preamble(headers)) + "\n"
+    parts = max_parts or min(os.cpu_count() or 4, 16)
+    # Build one probe body per module (cheap: no per-module header closure,
+    # the shared preamble already covers every referenced header), then greedily
+    # pack modules into chunks by body size so the biggest TUs (the synthesized
+    # NCollection module) don't all land in one part.
+    per_module = [
+        (m.name, _probe_lines(
+            [cls for cls in m.classes if not cls.skip], dc_set, ctx))
+        for m in modules if any(not c.skip for c in m.classes)]
+    body_for = lambda name, lines: (  # noqa: E731
+        name, "".join(l + "\n" for l in lines))
+    sizes: list[int] = [0] * parts
+    chosen: list[list[tuple[str, str]]] = [[] for _ in range(parts)]
+    for name, lines in sorted(per_module, key=lambda kv: len(kv[1]), reverse=True):
+        i = sizes.index(min(sizes))
+        chosen[i].append(body_for(name, lines))
+        sizes[i] += sum(len(l) for l in lines)
+    out: list[Path] = []
+    for i, group in enumerate(chosen):
+        if not group:
+            continue
+        # Every module's body reuses index-local symbol names (ocg_sym_00000 &
+        # co.), so each is wrapped in a unique namespace to avoid collisions.
+        chunks = [f"namespace ocg_p{i}_m{k} {{\n{text}\n}}"
+                  for k, (_, text) in enumerate(group)]
+        part = probe_path.with_name(f"{probe_path.stem}.part{i}.cpp")
+        part.write_text(preamble + "\n".join(chunks) + "\n")
+        out.append(part)
+    return out
+
 
 def _nm_undefined(obj: Path, nm_tool: str) -> list[tuple[str, str]]:
     out = subprocess.run([nm_tool, "-u", "-C", str(obj)],
@@ -564,22 +678,37 @@ def _nm_undefined(obj: Path, nm_tool: str) -> list[tuple[str, str]]:
     return syms
 
 
-def _defined_symbols(lib_dir: Path, nm_tool: str) -> set[str]:
+def _nm_defined_one(lib: Path, nm_tool: str, dynamic: bool) -> set[str]:
+    args = [nm_tool, "-C", "--defined-only"]
+    if dynamic:
+        args.insert(1, "-D")
+    out = subprocess.run(args + [str(lib)], capture_output=True, text=True)
+    defined: set[str] = set()
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line or line.endswith(":"):
+            continue
+        m = re.match(r"^[0-9a-fA-F]{8,16}\s+([A-Za-z])\s+(.*)$", line)
+        if m:
+            defined.add(m.group(2))
+    return defined
+
+
+def _defined_symbols(lib_dir: Path, nm_tool: str,
+                     max_workers: int | None = None) -> set[str]:
     static = sorted(lib_dir.glob("*.a"))
     shared = sorted(lib_dir.glob("*.so*"))
+    libs = static or shared
+    if not libs:
+        return set()
+    # nm over ~60 libraries is pure subprocess I/O: parallelize it.
+    workers = max_workers or min(os.cpu_count() or 4, 16)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = ex.map(lambda lib: _nm_defined_one(lib, nm_tool, not static),
+                         libs)
     defined: set[str] = set()
-    for lib in static or shared:
-        args = [nm_tool, "-C", "--defined-only"]
-        if not static:
-            args.insert(1, "-D")
-        out = subprocess.run(args + [str(lib)], capture_output=True, text=True)
-        for line in out.stdout.splitlines():
-            line = line.strip()
-            if not line or line.endswith(":"):
-                continue
-            m = re.match(r"^[0-9a-fA-F]{8,16}\s+([A-Za-z])\s+(.*)$", line)
-            if m:
-                defined.add(m.group(2))
+    for part in results:
+        defined |= part
     return defined
 
 
@@ -660,36 +789,64 @@ def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
     # pass-2 regeneration.
     out_path.write_text("")
     illformed_path.write_text("")
-    obj = work_dir / (probe_path.stem + ".o")
-    cmd = [compiler, "-std=gnu++17", "-fPIC", "-w",
-           "-ftemplate-backtrace-limit=0", "-c",
-           str(probe_path), "-o", str(obj), *_gcc_args(args)]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
+
+    def compile_one(tu: Path) -> tuple[Path, subprocess.CompletedProcess]:
+        obj = work_dir / (tu.stem + ".o")
+        cmd = [compiler, "-std=gnu++17", "-fPIC", "-w",
+               "-ftemplate-backtrace-limit=0", "-c",
+               str(tu), "-o", str(obj), *_gcc_args(args)]
+        return tu, subprocess.run(cmd, capture_output=True, text=True)
+
+    # When generate-all emitted probe.partN.cpp chunks (see write_probe_parts),
+    # compile them concurrently -- each is an independent TU -- instead of one
+    # giant single-threaded compile.
+    parts = sorted(probe_path.parent.glob(f"{probe_path.stem}.part*.cpp"))
+    if parts:
+        workers = min(len(parts), os.cpu_count() or 4)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            compiled = list(ex.map(compile_one, parts))
+    else:
+        compiled = [compile_one(probe_path)]
+
+    illformed: set[str] = set()
+    failed_unmapped = False
+    for tu, res in compiled:
+        if res.returncode == 0:
+            continue
         # A generated method whose body does not compile (e.g. a synthesized
         # NCollection_Vec3<unsigned long>::cwiseAbs instantiating an ambiguous
         # std::abs) aborts the probe.  Map each failing probe line back to its
         # "// Class::method" comment and skip exactly those methods in pass 2.
-        illformed = _extract_illformed(res.stderr, probe_path)
-        if not illformed:
-            print("symbol audit : probe failed; no methods mapped to errors"
-                  f" (tried {probe_path.name}:NN) -- using pass-1 output",
+        mapped = _extract_illformed(res.stderr, tu)
+        if not mapped:
+            failed_unmapped = True
+            print(f"symbol audit : {tu.name} failed; no methods mapped to errors"
+                  f" (tried {tu.name}:NN) -- using pass-1 output",
                   file=sys.stderr)
             print(res.stderr[-2000:], file=sys.stderr, end="")
-            raise RuntimeError("symbol audit probe failed to compile")
+        else:
+            illformed |= mapped
+    if failed_unmapped:
+        raise RuntimeError("symbol audit probe failed to compile")
+    if illformed:
         _write_lines(illformed_path, sorted(illformed))
-        return []
+        # A compile failure gives no object file for nm: keep the missing set
+        # from the parts that *did* compile (below) rather than bailing out.
 
     defined = _defined_symbols(lib_dir, nm_tool)
     missing: set[str] = set()
-    for letter, name in _nm_undefined(obj, nm_tool):
-        if letter != "U":
+    for tu, res in compiled:
+        if res.returncode != 0:
             continue
-        cls = name.split("::")[0]
-        if cls not in occt_classes:
-            continue
-        if name not in defined:
-            missing.add(name)
+        obj = work_dir / (tu.stem + ".o")
+        for letter, name in _nm_undefined(obj, nm_tool):
+            if letter != "U":
+                continue
+            cls = name.split("::")[0]
+            if cls not in occt_classes:
+                continue
+            if name not in defined:
+                missing.add(name)
     _write_lines(out_path, sorted(missing))
     return sorted(missing)
 

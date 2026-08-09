@@ -89,6 +89,9 @@ class OCCTType:
     is_transient_descendant: bool = False  # Inherits from Standard_Transient
     pointee_is_const: bool = False  # For pointers: is the pointee const-qualified?
                                     # ("const void*" → True; "void* const" → False)
+    pointee_pointee_is_const: bool = False  # For ref/pointer-to-pointer: is the
+                                    # pointee a pointer and its own pointee const?
+                                    # ("const char*&" → True; "char*&" → False)
     is_enum: bool = False           # resolves to an enum type
     template_args: list[str] = field(default_factory=list)  # top-level template args (spellings)
 
