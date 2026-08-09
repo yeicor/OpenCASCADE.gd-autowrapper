@@ -176,11 +176,19 @@ def _wrapped_key(base_name: str, ctx: TypeContext) -> str | None:
         return None
     tname = m.group(1)
     args = _split_template_args(m.group(2))
-    for key in ctx.wrapped:
-        km = _TEMPLATE_RE.match(key)
-        if not km or km.group(1) != tname:
-            continue
-        kargs = _split_template_args(km.group(2))
+    by_template = getattr(ctx, "_wrapped_by_template", None)
+    if by_template is None:
+        # All wrapped keys sharing a template name (e.g. every
+        # NCollection_Array1<...>), so the prefix fallback below does not scan
+        # all ~5800 wrapped specializations for every spelled template.
+        by_template = {}
+        for key in ctx.wrapped:
+            km = _TEMPLATE_RE.match(key)
+            if km:
+                by_template.setdefault(km.group(1), []).append(key)
+        ctx._wrapped_by_template = by_template
+    for key in by_template.get(tname, ()):
+        kargs = _split_template_args(_TEMPLATE_RE.match(key).group(2))
         if len(kargs) < len(args) and kargs == args[: len(kargs)]:
             cache[base_name] = key
             return key

@@ -6,6 +6,8 @@ hash suffixes, stream absorption, guard macros, field accessors, enums).
 
 from __future__ import annotations
 
+import multiprocessing as _mp
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -1977,6 +1979,56 @@ def generate_module_h(module: ModuleDecl, wrappers: list[ClassDecl],
 # Top-level generation
 # ---------------------------------------------------------------------------
 
+_GEN_POOL_STATE: tuple | None = None
+
+
+def _gen_pool_worker_init(modules, ctx, out_dir) -> None:
+    global _GEN_POOL_STATE
+    _GEN_POOL_STATE = (modules, ctx, Path(out_dir))
+
+
+def _gen_class_worker(task: tuple[int, int]):
+    """Generate one class's wrapper files in a fork pool.
+
+    ``modules``/``ctx`` are inherited from the parent via fork (COW), so only
+    the tiny ``(module_index, class_index)`` task is pickled.  Generation
+    mutates skip flags (unmappable methods, ambiguous ctors), so the pre-fork
+    skip state is snapshotted and the changed entries returned for the parent
+    to replay on its own copies.
+    """
+    global _GEN_POOL_STATE
+    modules, ctx, out_dir = _GEN_POOL_STATE
+    mi, ci = task
+    cls = modules[mi].classes[ci]
+    before: dict[tuple[str, int], tuple[bool, str | None]] = {}
+    for groups in (("c", cls.constructors), ("m", cls.methods),
+                   ("o", cls.operators), ("s", cls.static_methods)):
+        for i, m in enumerate(groups[1]):
+            before[(groups[0], i)] = (m.skip, m.skip_reason)
+    hpp = generate_class_hpp(cls, ctx)
+    cpp = generate_class_cpp(cls, ctx)
+    written: list[Path] = []
+    for name, content in ((f"{cls.wrapper_name}.hpp", hpp),
+                          (f"{cls.wrapper_name}.cpp", cpp)):
+        p = out_dir / name
+        if not (p.exists() and p.read_text() == content):
+            p.write_text(content)
+        written.append(p)
+    mutations: list[tuple[str, int, bool, str | None]] = []
+    for groups in (("c", cls.constructors), ("m", cls.methods),
+                   ("o", cls.operators), ("s", cls.static_methods)):
+        for i, m in enumerate(groups[1]):
+            if before[(groups[0], i)] != (m.skip, m.skip_reason):
+                mutations.append((groups[0], i, m.skip, m.skip_reason))
+    return mi, ci, written, mutations
+
+
+def _generate_class_serial(cls, ctx, out_dir, write) -> None:
+    """Single-process class generation (filtered / tiny module sets)."""
+    write(f"{cls.wrapper_name}.hpp", generate_class_hpp(cls, ctx))
+    write(f"{cls.wrapper_name}.cpp", generate_class_cpp(cls, ctx))
+
+
 def generate_all(modules: list[ModuleDecl], out_dir: Path,
                  probe_out: Path | None = None,
                  missing: set[str] | None = None,
@@ -2019,19 +2071,61 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
         written.append(p)
         return p
 
-    for module in modules:
-        if module_filter is not None and module.name != module_filter:
-            continue
-        for cls in module.classes:
+    if module_filter is not None:
+        for module in modules:
+            if module.name != module_filter:
+                continue
+            for cls in module.classes:
+                if cls.skip:
+                    continue
+                group_overloads(cls)
+                write(f"{cls.wrapper_name}.hpp", generate_class_hpp(cls, ctx))
+                write(f"{cls.wrapper_name}.cpp", generate_class_cpp(cls, ctx))
+                wrappers.append(cls)
+        return written
+
+    # Generate the class wrappers across a fork pool: generation is pure
+    # Python (GIL-bound), so separate processes give real parallelism, and
+    # fork+COW lets every worker share the (large) modules/ctx inherited from
+    # this process instead of pickling them per task.  The workers replay the
+    # skip-flag mutations they made so the probe/probe-parts below see the same
+    # state a serial pass would produce.
+    tasks: list[tuple[int, int]] = []
+    for mi, module in enumerate(modules):
+        for ci, cls in enumerate(module.classes):
             if cls.skip:
                 continue
             group_overloads(cls)
-            write(f"{cls.wrapper_name}.hpp", generate_class_hpp(cls, ctx))
-            write(f"{cls.wrapper_name}.cpp", generate_class_cpp(cls, ctx))
+            tasks.append((mi, ci))
             wrappers.append(cls)
-
-    if module_filter is not None:
-        return written
+    if len(tasks) > 1:
+        workers = min(len(tasks), os.cpu_count() or 4, 16)
+        pool = _mp.get_context("fork").Pool(
+            processes=workers, initializer=_gen_pool_worker_init,
+            initargs=(modules, ctx, str(out_dir)))
+        try:
+            for mi, ci, chunk, mutations in pool.imap_unordered(
+                    _gen_class_worker, tasks):
+                written.extend(chunk)
+                cls = modules[mi].classes[ci]
+                for group, i, skip, reason in mutations:
+                    if group == "c":
+                        m = cls.constructors[i]
+                    elif group == "m":
+                        m = cls.methods[i]
+                    elif group == "o":
+                        m = cls.operators[i]
+                    else:
+                        m = cls.static_methods[i]
+                    m.skip = skip
+                    m.skip_reason = reason
+        finally:
+            pool.close()
+            pool.join()
+    else:
+        for mi, ci in tasks:
+            cls = modules[mi].classes[ci]
+            _generate_class_serial(cls, ctx, out_dir, write)
 
     write("OcgEnums.hpp", generate_enums_hpp(modules))
     write("OcgEnums.cpp", generate_enums_cpp(modules))

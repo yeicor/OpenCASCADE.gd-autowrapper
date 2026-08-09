@@ -267,13 +267,52 @@ def _template_header(root: str, header_map: dict[str, str],
 
 _template_params_memo: dict[str, list[str]] = {}
 
+_TEMPLATE_PARAMS_CACHE_PATH = Path(__file__).resolve().parents[1] \
+    / "out" / "synth" / "template_params.json"
+
+
+def _load_template_params_cache() -> None:
+    """Seed ``_template_params_memo`` from disk.
+
+    The parameter names of a class-template root are derived by parsing the
+    root's header with libclang and walking the whole TU (~1s per root, first
+    time).  Persist the result so the per-invocation ``upgrade_transitive`` /
+    placeholder checks skip the parse on later runs, like ``templates.json``.
+    """
+    global _template_params_memo
+    if _template_params_memo:
+        return
+    try:
+        _template_params_memo = {
+            k: list(v)
+            for k, v in json.loads(
+                _TEMPLATE_PARAMS_CACHE_PATH.read_text(encoding="utf-8")).items()}
+    except (OSError, ValueError):
+        _template_params_memo = {}
+
+
+def _save_template_params_cache() -> None:
+    """Persist new ``_template_params_memo`` entries (skips unchanged files)."""
+    _TEMPLATE_PARAMS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        old = json.loads(
+            _TEMPLATE_PARAMS_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}
+    if _template_params_memo != old:
+        _TEMPLATE_PARAMS_CACHE_PATH.write_text(
+            json.dumps(_template_params_memo, indent=1), encoding="utf-8")
+
 
 def _template_param_names(template_name: str, templates: dict[str, str] | None,
                           install: Path | None) -> list[str]:
     """Declared parameter names of a class template root (type + non-type).
 
-    Memoized; returns [] when the header/parse cannot be determined.
+    Memoized in-process and persisted to ``out/synth/template_params.json`` so
+    the per-run placeholder checks do not re-parse every template header;
+    returns [] when the header/parse cannot be determined.
     """
+    _load_template_params_cache()
     if template_name in _template_params_memo:
         return _template_params_memo[template_name]
     out: list[str] = []
@@ -294,6 +333,7 @@ def _template_param_names(template_name: str, templates: dict[str, str] | None,
             except Exception:  # noqa: BLE001
                 out = []
     _template_params_memo[template_name] = out
+    _save_template_params_cache()
     return out
 
 
