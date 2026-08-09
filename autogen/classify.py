@@ -125,16 +125,6 @@ def _skip_reason(cls: ClassDecl, by_name: dict[str, ClassDecl]) -> str:
             return "protected destructor"
         elif cls.has_any_nonpublic_ctor and not cls.has_any_public_ctor:
             return "no public constructors"
-        # Non-default-constructible classes are stored via unique_ptr, which
-        # needs the global operator new/delete; OCCT collection nodes instead
-        # declare placement new/delete (DEFINE_NCOLLECTION_ALLOC) that hide it,
-        # and some classes inherit it protectedly so it becomes inaccessible.
-        # A class that declares no constructors at all is implicitly
-        # default-constructible, so its implicit (public) default ctor counts
-        # (mirrors _default_constructible in codegen.py).
-        elif (not cls.has_public_default_ctor and cls.has_any_ctor
-              and _has_custom_alloc(cls, by_name, set())):
-            return "custom allocation (operator new/delete)"
     elif _is_allocator_managed(cls, by_name, set()):
         # Ref-counted classes construct via `new Cls(...)`, which needs the
         # plain `operator new(size_t)`; allocator-tagged-only classes

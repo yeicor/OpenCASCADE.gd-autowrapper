@@ -211,7 +211,15 @@ def _probe_ctor_arg(t: OCCTType, dc_set: set[str]) -> str | None:
 
     Arguments are cast to the exact declared parameter type so overload
     resolution is never ambiguous (a bare ``nullptr`` or ``0`` would be an
-    ambiguous match when a class overloads on pointer/arithmetic types)."""
+    ambiguous match when a class overloads on pointer/arithmetic types).
+
+    A non-default-constructible value type is probed through a borrowed
+    reference (``ocg_field_probe_ref``, a null dereference never executed at
+    runtime -- the probe TU is only compiled and nm'd).  That keeps the ctor's
+    C1 symbol in the undefined-symbol set even when no value of the parameter
+    type can be fabricated, closing a gap where ctors of newly-wrapped classes
+    were never audited and their missing symbols only surfaced at wrapper link
+    time."""
     if t.is_handle:
         if t.is_pointer:
             return f"static_cast<opencascade::handle<{t.handle_inner}>*>(nullptr)"
@@ -219,6 +227,8 @@ def _probe_ctor_arg(t: OCCTType, dc_set: set[str]) -> str | None:
     if t.is_pointer:
         const = "const " if t.pointee_is_const else ""
         return f"static_cast<{const}{t.base_name}*>(nullptr)"
+    if t.is_rvalue_ref:
+        return None
     if t.is_ref:
         if not t.is_const:
             return None
@@ -235,7 +245,7 @@ def _probe_ctor_arg(t: OCCTType, dc_set: set[str]) -> str | None:
         return f"static_cast<{base}>(0)"
     if base in dc_set:
         return f"{base}()"
-    return None
+    return f"ocg_field_probe_ref<const {base}>()"
 
 
 def _ctor_probe_line(cls, ctor, index: int, dc_set: set[str], ctx) -> str:
@@ -255,15 +265,18 @@ def _ctor_probe_line(cls, ctor, index: int, dc_set: set[str], ctx) -> str:
         args.append(arg)
     joined = ", ".join(args)
     if cg.storage == "handle":
-        # `new Cls(args)` also covers unique_ptr storage (make_unique is new
-        # underneath) and references the same C1 symbol + class operator new.
+        # `new Cls(args)` also covers plain unique_ptr storage (make_unique is
+        # new underneath) and references the same C1 symbol + class operator new.
         return (f"::{cls.name}* ocg_ctor_{index:05d}() "
                 f"{{ return new ::{cls.name}({joined}); }}")
-    # native / inherited-native wrappers placement-construct (or copy-assign a
-    # temporary); a discarded prvalue references the same C1 ctor symbol without
-    # pulling in `operator new`, which the wrapper never calls.  A named local
-    # would trigger most-vexing-parse (``Cls tmp(gp_Pnt());`` is a function
-    # declaration), so construct a discarded temporary in an expression.
+    if cls.wrapper_name in ctx.stdalloc:
+        # stdalloc wrappers placement-construct on Standard::Allocate memory and
+        # never call the class operator new (which allocator-tagged classes hide
+        # and protected bases make inaccessible); a discarded prvalue references
+        # the same C1 ctor symbol without pulling in operator new.
+        return (f"void ocg_ctor_{index:05d}() "
+                f"{{ (void)::{cls.name}({joined}); }}")
+    # unique_ptr storage (plain operator new); the wrapper emits make_unique.
     return (f"void ocg_ctor_{index:05d}() "
             f"{{ (void)::{cls.name}({joined}); }}")
 

@@ -99,6 +99,7 @@ class TypeContext:
         self.enums: dict[str, object] = {}      # enum name -> EnumDecl
         self.occt_headers: dict[str, str] = {}  # occt class name -> header basename
         self.unique_ptr: set[str] = set()       # wrapper names with unique_ptr storage
+        self.stdalloc: set[str] = set()         # unique_ptr wrappers heap-built on Standard::Allocate
         self.handles: set[str] = set()          # wrapper names with handle storage
         self.no_storage: set[str] = set()       # wrapper names with "none" storage (no native/handle)
         self.no_return: set[str] = set()        # wrapper names whose copy ops are ill-formed (unreturnable)
@@ -512,7 +513,7 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
         # T = handle<...>).  Pass the address of the wrapper's stored handle.
         return ParamConv(cpp_type=f"Ref<{ctx.wrapped[t.handle_inner]}>",
                          gd_type="OBJECT", name=name,
-                         call_expr=f"&{name}->_handle")
+                         call_expr=f"({name}.is_null() ? nullptr : &{name}->_handle)")
     if b in ctx.wrapped or _TEMPLATE_RE.match(b):
         key = _wrapped_key(b, ctx)
         if key is not None:
@@ -523,12 +524,12 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
             if w in ctx.no_storage:
                 return None  # exception / pure-static wrapper holds no native object
             if w in ctx.handles:
-                call = f"{name}->_handle.get()"
+                call = f"({name}.is_null() ? nullptr : {name}->_handle.get())"
             elif w in ctx.unique_ptr:
-                call = f"{name}->_native.get()"
+                call = f"({name}.is_null() ? nullptr : {name}->_native.get())"
             else:
                 native = "_native_ref()" if w in ctx.inherited_value else "_native"
-                call = f"&{name}->{native}"
+                call = f"({name}.is_null() ? nullptr : &{name}->{native})"
             return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
                              call_expr=call)
     if not t.pointee_is_const and b in PRIMITIVE_WRAPPER_MAP:
@@ -679,10 +680,15 @@ def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
                     "        return wrapper;")
         elif w in ctx.unique_ptr:
             decl = "auto& result" if t.is_ref else "auto result"
+            if w in ctx.stdalloc:
+                native_assign = (f"wrapper->_native.reset("
+                                 f"occt_gd::occt_alloc_new<{_occt_qual(key)}>(result));")
+            else:
+                native_assign = (f"wrapper->_native = "
+                                 f"std::make_unique<{_occt_qual(key)}>(result);")
             body = (decl + " = {call};\n"
                     "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
-                    "        wrapper->_native = std::make_unique<" +
-                    _occt_qual(key) + ">(result);\n"
+                    "        " + native_assign + "\n"
                     "        return wrapper;")
         else:
             decl = "auto& result" if t.is_ref else "auto result"
@@ -741,10 +747,16 @@ def _cpp_pointer_return(t: OCCTType, ctx: TypeContext) -> RetConv | None:
                     "        wrapper->_handle = " + deref + "result;" + sync + "\n"
                     "        return wrapper;")
         elif w in ctx.unique_ptr:
+            if w in ctx.stdalloc:
+                native_assign = (f"wrapper->_native.reset("
+                                 f"occt_gd::occt_alloc_new<{_occt_qual(key)}>(*result));")
+            else:
+                native_assign = (f"wrapper->_native = "
+                                 f"std::make_unique<{_occt_qual(key)}>(*result);")
             body = ("auto result = {call};\n"
                     '        if (!result) { return Ref<' + w + '>(); }\n'
                     "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
-                    "        wrapper->_native = std::make_unique<" + _occt_qual(key) + ">(*result);\n"
+                    "        " + native_assign + "\n"
                     "        return wrapper;")
         else:
             native = "_native_ref()" if w in ctx.inherited_value else "_native"

@@ -149,6 +149,23 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
                 ctx.no_storage.add(cls.wrapper_name)
             if not cls.returnable:
                 ctx.no_return.add(cls.wrapper_name)
+    # Classes whose heap storage cannot rely on the plain global operator
+    # new/delete.  A class (or an inherited base) declaring custom operator
+    # new/delete (DEFINE_STANDARD_ALLOC / DEFINE_INC_ALLOC / ...) may expose no
+    # plain `operator new(size_t)` at all (allocator-tagged forms hide it), or
+    # carry it through a protected/private base where it is inaccessible from
+    # outside.  Such unique_ptr-stored wrappers allocate the native via
+    # Standard::Allocate placement new and free it through OcgStdAllocDeleter,
+    # which never depends on the class's operator new/delete accessibility.
+    from .classify import _has_custom_alloc
+    stdalloc_by_name = {c.name: c for m in modules for c in m.classes}
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip or cls.name == module.name:
+                continue
+            if cls.wrapper_name in ctx.unique_ptr \
+                    and _has_custom_alloc(cls, stdalloc_by_name, set()):
+                ctx.stdalloc.add(cls.wrapper_name)
     for module in modules:
         for enum in module.enums:
             if enum.is_public:
@@ -172,6 +189,13 @@ def _default_constructible(cls: ClassDecl) -> bool:
     if cls.is_abstract or cls.has_pure_virtual:
         return False  # cannot value-initialize an abstract type
     return cls.has_public_default_ctor or not cls.has_any_ctor
+
+
+def _uses_stdalloc(cls: ClassDecl, ctx: tm.TypeContext) -> bool:
+    """True when the wrapper heap-builds the native on Standard::Allocate
+    memory (OcgStdAllocDeleter) because the class's own operator new/delete is
+    not usable (allocator-tagged or carried through a protected base)."""
+    return cls.wrapper_name in ctx.stdalloc
 
 
 def _cg(cls: ClassDecl, ctx: tm.TypeContext) -> CgClass:
@@ -542,6 +566,8 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         out.append(f'#include "{cg.wrapper_base}.hpp"')
     if cg.storage == "unique_ptr":
         out.append("#include <memory>")
+        if _uses_stdalloc(cls, ctx):
+            out.append('#include "OcgMemory.hpp"')
     if _uses_primitive_wrappers(cls, ctx):
         out.append('#include "OcgPrimitiveWrappers.hpp"')
     if _uses_streams(cls):
@@ -573,7 +599,11 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     if cg.storage == "handle":
         out.append(f"    opencascade::handle<{cls.name}> _handle;")
     elif cg.storage == "unique_ptr":
-        out.append(f"    std::unique_ptr<{cls.name}> _native = nullptr;")
+        if _uses_stdalloc(cls, ctx):
+            out.append(f"    std::unique_ptr<{cls.name}, "
+                       f"occt_gd::OcgStdAllocDeleter<{cls.name}>> _native = nullptr;")
+        else:
+            out.append(f"    std::unique_ptr<{cls.name}> _native = nullptr;")
     elif cg.inherited_native:
         out.append(f"    {cls.name}& _native_ref() {{ return *static_cast<{cls.name}*>(&this->_native); }}")
         out.append(f"    const {cls.name}& _native_ref() const {{ return *static_cast<const {cls.name}*>(&this->_native); }}")
@@ -667,6 +697,8 @@ def _occt_call(cls: ClassDecl, method: MethodDecl, args: str,
             return f"_handle.get()->operator{op}({args})"
         if _cg(cls, ctx).inherited_native:
             return f"_native_ref().operator{op}({args})"
+        if _cg(cls, ctx).storage == "unique_ptr":
+            return f"_native->operator{op}({args})"
         return f"_native.operator{op}({args})"
     if cls.kind == ClassKind.REF_COUNTED:
         return f"_handle.get()->{method.name}({args})"
@@ -837,12 +869,16 @@ def _ctor_body(cls: ClassDecl, ctor: MethodDecl, ctx: tm.TypeContext) -> str:
     pre = "\n".join(f"        {p}" for p in preludes) + "\n" if preludes else ""
     cg = _cg(cls, ctx)
     if cg.storage == "unique_ptr":
+        if _uses_stdalloc(cls, ctx):
+            new_expr = f"ref->_native.reset(occt_gd::occt_alloc_new<{_occt_qual(cls)}>({args}));"
+        else:
+            new_expr = f"ref->_native = std::make_unique<{_occt_qual(cls)}>({args});"
         return f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::{unique}({params}) {{
     try {{
         OCC_CATCH_SIGNALS
         Ref<{cls.wrapper_name}> ref; ref.instantiate();
         occt_gd::clear_last_error();
-{pre}        ref->_native = std::make_unique<{_occt_qual(cls)}>({args});
+{pre}        {new_expr}
         return ref;
     }} OCCT_GUARD_CATCH({{}});
 }}"""
@@ -1665,6 +1701,71 @@ private:
 
 
 # ---------------------------------------------------------------------------
+# OcgMemory.hpp
+# ---------------------------------------------------------------------------
+
+def generate_occt_memory_hpp() -> str:
+    """Standard::Allocate placement construction + deleter for unique_ptr
+    storage.
+
+    A unique_ptr-stored wrapper normally heap-builds its native with
+    ``std::make_unique<Cls>(...)``, which resolves to the class's plain
+    ``operator new(size_t)``.  That is not always available: allocator-tagged
+    classes (DEFINE_INC_ALLOC / DEFINE_NCOLLECTION_ALLOC) declare only an
+    allocator-parameterized operator new, which hides the plain form, and a
+    protected/private base carrying custom allocation hides it as well.  Such
+    classes are built on Standard::Allocate memory (placement new) and freed
+    through OcgStdAllocDeleter -- the same memory manager every
+    DEFINE_STANDARD_ALLOC operator new routes to anyway, so allocation
+    behavior is identical to a normal ``new Cls()``.
+    """
+    return """// Auto-generated OCCT memory helpers -- DO NOT EDIT
+//
+// See the wrappers using unique_ptr storage with a class whose operator
+// new/delete is not usable (allocator-tagged, or carried through a
+// protected/private base): the native object is placement-constructed on
+// Standard::Allocate memory and destroyed/freed through OcgStdAllocDeleter.
+// Every DEFINE_STANDARD_ALLOC operator new routes to Standard::Allocate too,
+// so this path is allocation-identical to a plain `new Cls()`.
+#pragma once
+
+#include <Standard.hxx>
+
+#include <cstddef>
+#include <utility>
+
+namespace occt_gd {
+
+template <typename T, typename... Args>
+T *occt_alloc_new(Args &&...args) {
+    void *p = Standard::Allocate(sizeof(T));
+    if (p == nullptr) {
+        return nullptr;
+    }
+    try {
+        return ::new (p) T(std::forward<Args>(args)...);
+    } catch (...) {
+        Standard::Free(p);
+        throw;
+    }
+}
+
+template <typename T>
+struct OcgStdAllocDeleter {
+    void operator()(T *p) const noexcept {
+        if (p == nullptr) {
+            return;
+        }
+        p->~T();
+        Standard::Free(p);
+    }
+};
+
+} // namespace occt_gd
+"""
+
+
+# ---------------------------------------------------------------------------
 # module.h
 # ---------------------------------------------------------------------------
 
@@ -1796,6 +1897,7 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
     keys = _primitive_wrapper_names_used(modules, ctx)
     write("OcgPrimitiveWrappers.hpp", generate_primitive_wrappers(keys))
     write("OcgCallableStreams.hpp", generate_callable_streams_hpp())
+    write("OcgMemory.hpp", generate_occt_memory_hpp())
     write("module.h", generate_module_h(module, wrappers, keys))
 
     # Remove any wrapper files that are no longer generated (e.g. classes that
