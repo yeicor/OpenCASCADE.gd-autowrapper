@@ -36,7 +36,12 @@ def find_resource_dir() -> str | None:
         except (OSError, subprocess.SubprocessError):
             pass
     for pattern in ("/usr/lib/clang/*", "/usr/local/lib/clang/*",
-                    "/usr/lib/llvm-*/lib/clang/*"):
+                    "/usr/lib/llvm-*/lib/clang/*",
+                    "/opt/homebrew/lib/clang/*",
+                    "/opt/homebrew/opt/llvm/lib/clang/*",
+                    "/usr/local/opt/llvm/lib/clang/*",
+                    "C:/Program Files/LLVM/lib/clang/*",
+                    "C:/Program Files (x86)/LLVM/lib/clang/*"):
         candidates.extend(sorted(glob.glob(pattern)))
     for c in candidates:
         if c and (Path(c) / "include" / "stddef.h").exists():

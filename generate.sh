@@ -13,14 +13,10 @@ cd "$SCRIPT_DIR"
 
 PYTHON="${PYTHON:-python3}"
 
-if ! "$PYTHON" -c "import clang.cindex" >/dev/null 2>&1; then
-    echo "python clang (libclang) bindings not available; cannot generate the autowrapper." >&2
-    echo "Install them with: \"$PYTHON\" -m pip install clang libclang" >&2
-    exit 1
-fi
-
 # Skip gracefully when no OCCT headers are present (the CI test/export jobs
-# only consume the prebuilt .so; the build job installs OCCT first).
+# only consume the prebuilt .so; the build job installs OCCT first).  This
+# check comes before the clang-bindings check so jobs without OCCT never need
+# the (heavy) clang toolchain installed.
 if ! "$PYTHON" -c "
 import sys
 from autogen.occt import find_occt_install
@@ -30,6 +26,12 @@ find_occt_install(PROJECT_ROOT)
     echo "No OCCT install found (install via vcpkg or set OCCT_INCLUDE_DIR)." >&2
     echo "Skipping autowrapper generation." >&2
     exit 0
+fi
+
+if ! "$PYTHON" -c "import clang.cindex" >/dev/null 2>&1; then
+    echo "python clang (libclang) bindings not available; cannot generate the autowrapper." >&2
+    echo "Install them with: \"$PYTHON\" -m pip install clang" >&2
+    exit 1
 fi
 
 # Fresh scan: out/ir/*.json is the IR produced by the local OCCT headers.
