@@ -41,6 +41,7 @@ PRIMITIVE_WRAPPER_MAP: dict[str, tuple[str, str]] = {
     "bool": ("OcgStandardBoolean", "BOOL"),
     "unsigned char": ("OcgStandardByte", "INT"),
     "char": ("OcgStandardCharacter", "INT"),
+    "char16_t": ("OcgStandardChar16", "INT"),
     "int": ("OcgStandardInteger", "INT"),
     "long": ("OcgStandardLongInteger", "INT"),
     "double": ("OcgStandardReal", "FLOAT"),
@@ -119,11 +120,16 @@ def _enum_value_expr(enum_decl, value_name: str) -> str:
 
 
 def stream_kind(t: OCCTType) -> str | None:
-    """Classify a canonical std:: stream base_name, or None."""
+    """Classify a canonical std:: stream base_name, or None.
+
+    ``Standard_OStream``/``Standard_IStream`` are OCCT's C++11 aliases for
+    ``std::ostream``/``std::istream``; libclang leaves the alias spelling in
+    place for some headers, so both names map to the same shim.
+    """
     b = t.base_name
-    if b.startswith("std::basic_ostream") or b == "std::ostream":
+    if b.startswith("std::basic_ostream") or b in ("std::ostream", "Standard_OStream"):
         return "out"
-    if b.startswith("std::basic_istream") or b == "std::istream":
+    if b.startswith("std::basic_istream") or b in ("std::istream", "Standard_IStream"):
         return "in"
     if b.startswith("std::basic_stringstream") or b == "std::stringstream":
         return "ss"
@@ -147,6 +153,30 @@ def _split_template_args(argstr: str) -> list[str]:
             start = i + 1
     args.append(argstr[start:].strip())
     return args
+
+
+def optional_inner(base_name: str) -> str | None:
+    """Inner type spelling of a ``std::optional<X>`` (or ``const X`` inner),
+    else None.  Shared by the return mapping and the codegen include collector
+    so a wrapped optional return pulls in its wrapper's header."""
+    if not base_name.startswith("std::optional<"):
+        return None
+    start = len("std::optional<")
+    depth = 0
+    for i in range(start, len(base_name)):
+        ch = base_name[i]
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            if depth == 0:
+                inner = base_name[start:i].strip()
+                break
+            depth -= 1
+    else:
+        return None
+    if inner.startswith("const "):
+        inner = inner[len("const "):].strip()
+    return inner
 
 
 def _wrapped_key(base_name: str, ctx: TypeContext) -> str | None:
@@ -443,6 +473,15 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
             ptr = _ptr_ref_out_param(t, name, ctx)
             if ptr is not None:
                 return ptr
+        if t.is_handle and t.handle_inner in ctx.wrapped \
+                and ctx.wrapped[t.handle_inner] in ctx.handles:
+            # Non-const handle<T>& out-parameter (e.g. BinTools readers filling
+            # a Handle(Geom_Curve)): OCCT assigns a new handle into the
+            # reference, so hand the wrapper's own `_handle` straight over and
+            # the caller's object updates in place.
+            w = ctx.wrapped[t.handle_inner]
+            return ParamConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", name=name,
+                             call_expr=_rw(move, f"{name}->_handle"))
         wrapper = PRIMITIVE_WRAPPER_MAP.get(t.base_name)
         if wrapper is not None:
             return ParamConv(cpp_type=f"Ref<{wrapper[0]}>", gd_type=wrapper[1],
@@ -513,6 +552,11 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
             call = f"std::string_view({name}.utf8().get_data())"
         return ParamConv(cpp_type="String", gd_type="STRING", name=name,
                          call_expr=call)
+    if t.base_name == "char32_t" or (t.is_ref and t.base_name == "char32_t"):
+        # char32_t is a single Unicode code point; surface it as an int64
+        # (GDScript's int) exactly like the underlying UTF-32 code value.
+        return ParamConv(cpp_type="int64_t", gd_type="INT", name=name,
+                         call_expr=_rw(move, f"static_cast<char32_t>({name})"))
     return None
 
 
@@ -714,9 +758,17 @@ def _ptr_ref_out_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
 
 
 def cpp_return(t: OCCTType, ctx: TypeContext, has_ostream: bool = False,
-               cls=None) -> RetConv | None:
-    """Map a return type; has_ostream: method consumes a Standard_OStream&."""
-    rc = _cpp_return_core(t, ctx, has_ostream, cls)
+               cls=None, stream_in: str | None = None) -> RetConv | None:
+    """Map a return type.
+
+    ``has_ostream``: the method consumes a Standard_OStream& (the text is
+    captured into ocg_os and surfaced as the return value).
+    ``stream_in``: the safe name of the Standard_IStream& parameter this
+    method consumed; a chainable reader returning that same stream by
+    reference (BinTools::GetReal, *Set::ReadCurve...) surfaces the Callable
+    the caller passed in.
+    """
+    rc = _cpp_return_core(t, ctx, has_ostream, cls, stream_in)
     if rc is None:
         return None
     if has_ostream and not (
@@ -748,7 +800,7 @@ def _with_ostream_flush(body: str) -> str:
 
 
 def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
-                     cls=None) -> RetConv | None:
+                     cls=None, stream_in: str | None = None) -> RetConv | None:
     if has_ostream and (stream_kind(t) is not None or
                         (t.base_name == "void" and not t.is_pointer)):
         # Print/Dump(Standard_OStream&) -> Standard_OStream& or void: the
@@ -760,6 +812,12 @@ def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
                             "        ::godot::String ocg_text = ::godot::String::utf8(ocg_os.str().c_str());\n"
                             "        ocg_os.stream().flush();\n"
                             "        return ocg_text;")
+    if t.is_ref and stream_in is not None and stream_kind(t) == "in":
+        # Chainable reader (BinTools::GetReal, BinTools_CurveSet::ReadCurve...)
+        # returning the very Standard_IStream& it consumed: the caller passed a
+        # Callable, so surface that same Callable as the return value.
+        return RetConv(cpp_type="Callable", gd_type="CALLABLE",
+                       body="{call};\n        return " + stream_in + ";")
     if t.is_ref and stream_kind(t) == "ss":
         # Accessor returning a stringstream by reference (e.g.
         # Message_AttributeStream::Stream): surface its contents as a String.
@@ -776,6 +834,9 @@ def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
                            body="{call};\n        return Ref<" + w + ">(this);")
     if t.base_name == "void" and not t.is_pointer:
         return RetConv(cpp_type="void", gd_type="NIL", body="{call};")
+    r = _cpp_optional_return(t, ctx)
+    if r is not None:
+        return r
     if t.is_pointer:
         return _cpp_pointer_return(t, ctx)
     if t.base_name in PRIMITIVE_MAP:
@@ -787,6 +848,10 @@ def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
     if t.base_name == "char16_t":
         return RetConv(cpp_type="String", gd_type="STRING",
                        body="return ::godot::String::utf16({call});")
+    if t.base_name == "char32_t":
+        # A Unicode code point (UTF-32); surface as an int64 like the value.
+        return RetConv(cpp_type="int64_t", gd_type="INT",
+                       body="return static_cast<int64_t>({call});")
     if t.base_name == "TCollection_AsciiString":
         return RetConv(cpp_type="String", gd_type="STRING",
                        body="return ::godot::String::utf8({call}.ToCString());")
@@ -940,3 +1005,60 @@ def _occt_qual(base_name: str) -> str:
 
 def default_value(cpp_type: str) -> str:
     return f"{cpp_type}()"
+
+
+def _cpp_optional_return(t: OCCTType, ctx: TypeContext) -> RetConv | None:
+    """Map a ``std::optional<T>`` return (or ``const std::optional<T>&``) to a
+    godot ``Variant`` that is null when the optional is empty.
+
+    Scalars (``std::optional<double>`` from ``Bnd_Range::Center/Min/Max``) and
+    wrapped OCCT value classes (``Bnd_Box::Center`` -> ``gp_Pnt``,
+    ``GeomGridEval_Surface::GetTransformation`` -> ``gp_Trsf``) are surfaced
+    as the boxed value; an empty optional returns an empty ``Variant``.
+    Optionals over non-wrapped types (e.g. the nested struct
+    ``Bnd_Range::Bounds``) fall through to the generic unmappable-type gap.
+    """
+    m = re.match(r"^std::optional<", t.base_name)
+    if not m:
+        return None
+    inner = optional_inner(t.base_name)
+    if inner is None:
+        return None
+    if inner in PRIMITIVE_MAP:
+        body = ("auto result = {call};\n"
+                "        return result ? ::godot::Variant(*result) "
+                ": ::godot::Variant();")
+        return RetConv(cpp_type="Variant", gd_type="NIL", body=body)
+    key = _wrapped_key(inner, ctx)
+    if key is None:
+        return None
+    w = ctx.wrapped[key]
+    if w in ctx.no_storage:
+        return None
+    if w in ctx.handles:
+        sync = f"\n        wrapper->_sync_base_storage();" if w in ctx.sync_bases else ""
+        body = ("auto result = {call};\n"
+                "        if (!result) { return ::godot::Variant(); }\n"
+                "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
+                "        wrapper->_handle = *result;" + sync + "\n"
+                "        return ::godot::Variant(wrapper);")
+    elif w in ctx.unique_ptr:
+        if w in ctx.stdalloc:
+            native_assign = (f"wrapper->_native.reset("
+                             f"occt_gd::occt_alloc_new<{_occt_qual(key)}>(*result));")
+        else:
+            native_assign = (f"wrapper->_native = "
+                             f"std::make_unique<{_occt_qual(key)}>(*result);")
+        body = ("auto result = {call};\n"
+                "        if (!result) { return ::godot::Variant(); }\n"
+                "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
+                "        " + native_assign + "\n"
+                "        return ::godot::Variant(wrapper);")
+    else:
+        native = "_native_ref()" if w in ctx.inherited_value else "_native"
+        body = ("auto result = {call};\n"
+                "        if (!result) { return ::godot::Variant(); }\n"
+                "        Ref<" + w + "> wrapper; wrapper.instantiate();\n"
+                "        wrapper->" + native + " = *result;\n"
+                "        return ::godot::Variant(wrapper);")
+    return RetConv(cpp_type="Variant", gd_type="NIL", body=body)

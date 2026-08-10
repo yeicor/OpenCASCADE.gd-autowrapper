@@ -269,6 +269,14 @@ def _has_ostream_param(method: MethodDecl) -> bool:
     return any(tm.stream_kind(p.type) == "out" for p in method.parameters)
 
 
+def _istream_param_name(method: MethodDecl) -> str | None:
+    """Safe name of the Standard_IStream& parameter, if the method consumes one."""
+    for p in method.parameters:
+        if p.type.is_ref and tm.stream_kind(p.type) == "in":
+            return tm.safe_param_name(p.name)
+    return None
+
+
 def _uses_streams(cls: ClassDecl) -> bool:
     return any(tm.stream_kind(p.type) is not None
                for m in cls.all_methods for p in m.parameters)
@@ -302,11 +310,15 @@ def _type_occt_header(t: OCCTType, ctx: tm.TypeContext) -> str | None:
 
     if t.is_handle and t.handle_inner in ctx.wrapped:
         return f"<{header_of(t.handle_inner)}>"
-    if t.base_name in ctx.wrapped:
-        return f"<{header_of(t.base_name)}>"
-    if t.base_name in ("TCollection_AsciiString", "TCollection_ExtendedString"):
-        return f"<{t.base_name}.hxx>"
-    if t.base_name == "std::string" or t.base_name.startswith("std::basic_string<char>"):
+    base = t.base_name
+    inner = tm.optional_inner(base)
+    if inner is not None:
+        base = inner
+    if base in ctx.wrapped:
+        return f"<{header_of(base)}>"
+    if base in ("TCollection_AsciiString", "TCollection_ExtendedString"):
+        return f"<{base}.hxx>"
+    if base == "std::string" or base.startswith("std::basic_string<char>"):
         return "<string>"
     return None
 
@@ -314,7 +326,11 @@ def _type_occt_header(t: OCCTType, ctx: tm.TypeContext) -> str | None:
 def _type_wrapper(t: OCCTType, ctx: tm.TypeContext) -> str | None:
     if t.is_handle and t.handle_inner in ctx.wrapped:
         return ctx.wrapped[t.handle_inner]
-    key = tm._wrapped_key(t.base_name, ctx)
+    base = t.base_name
+    inner = tm.optional_inner(base)
+    if inner is not None:
+        base = inner
+    key = tm._wrapped_key(base, ctx)
     if key is not None:
         return ctx.wrapped[key]
     return None
@@ -515,14 +531,14 @@ _ITERATOR_PROTOCOL_METHODS = frozenset(
 
 
 def _first_unmappable(cls: ClassDecl, method: MethodDecl,
-                      ctx: tm.TypeContext) -> str | None:
+                      ctx: tm.TypeContext, is_ctor: bool = False) -> str | None:
     """Spelling of the first type that cannot cross the FFI, or None.
 
     Mirrors the None return of ``_method_decl_signature`` exactly so skip
     reasons name the actual offending type instead of a blanket label.
     """
     for p in method.parameters:
-        conv = tm.cpp_param(p.type, p.name, ctx, cls)
+        conv = tm.cpp_param(p.type, p.name, ctx, cls, is_ctor=is_ctor)
         if conv is None:
             return p.type.spelling
     if method.return_type is None or (method.return_type.is_void
@@ -530,7 +546,7 @@ def _first_unmappable(cls: ClassDecl, method: MethodDecl,
         return None
     has_ostream = _has_ostream_param(method)
     if tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream,
-                     cls=cls) is None:
+                     cls=cls, stream_in=_istream_param_name(method)) is None:
         return method.return_type.spelling
     return None
 
@@ -548,7 +564,8 @@ def _method_skip_reason(cls: ClassDecl, method: MethodDecl,
         return "exception diagnostic method (no native storage)"
     if method.name in _ITERATOR_PROTOCOL_METHODS:
         return "container iterator protocol (begin/end)"
-    bad = _first_unmappable(cls, method, ctx)
+    bad = _first_unmappable(cls, method, ctx,
+                            is_ctor=method.kind == MethodKind.CONSTRUCTOR)
     if bad is not None:
         return f"unmappable type: {bad}"
     return "unmappable type"
@@ -570,7 +587,8 @@ def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
         else:
             ret = "void"
     else:
-        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream, cls=cls)
+        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream,
+                              cls=cls, stream_in=_istream_param_name(method))
         if rconv is None:
             return None
         ret = rconv.cpp_type
@@ -699,7 +717,7 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         params = _params_decl(ctor, ctx, cls, is_ctor=True)
         if params is None:
             ctor.skip = True
-            ctor.skip_reason = "unmappable type"
+            ctor.skip_reason = _method_skip_reason(cls, ctor, ctx)
             continue
         out.append(f"    static Ref<{cls.wrapper_name}> {_unique(ctor)}({params});")
         out.append("")
@@ -887,7 +905,8 @@ def _method_body(cls: ClassDecl, method: MethodDecl,
     if ret_is_void and not has_ostream:
         rconv = tm.RetConv(cpp_type="void", body="{call};")
     else:
-        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream, cls=cls)
+        rconv = tm.cpp_return(method.return_type, ctx, has_ostream=has_ostream,
+                              cls=cls, stream_in=_istream_param_name(method))
         if rconv is None:
             return None
 
@@ -1528,6 +1547,9 @@ _PRIMITIVE_WRAPPERS: dict[str, tuple[str, str, str, str, str]] = {
     "char": ("OcgStandardCharacter", "char", "INT",
              "int32_t get_value() const { return (int32_t)_native; }",
              "void set_value(int32_t v) { _native = static_cast<char>(v); }"),
+    "char16_t": ("OcgStandardChar16", "char16_t", "INT",
+                 "int32_t get_value() const { return (int32_t)_native; }",
+                 "void set_value(int32_t v) { _native = static_cast<char16_t>(v); }"),
     "int": ("OcgStandardInteger", "int32_t", "INT",
             "int32_t get_value() const { return _native; }",
             "void set_value(int32_t v) { _native = v; }"),

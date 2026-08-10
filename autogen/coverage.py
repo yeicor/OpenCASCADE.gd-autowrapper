@@ -75,7 +75,7 @@ def finalize_skips(modules: list[ModuleDecl],
                     continue
                 if _params_decl(ctor, ctx, cls, is_ctor=True) is None:
                     ctor.skip = True
-                    ctor.skip_reason = "unmappable type"
+                    ctor.skip_reason = _method_skip_reason(cls, ctor, ctx)
                 if ctor.skip:
                     entries.append(SkipEntry(
                         module=module.name, target=_method_label(ctor),
