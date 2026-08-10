@@ -15,8 +15,8 @@ PYTHON="${PYTHON:-python3}"
 
 if ! "$PYTHON" -c "import clang.cindex" >/dev/null 2>&1; then
     echo "python clang (libclang) bindings not available; cannot generate the autowrapper." >&2
-    echo "Skipping autowrapper generation." >&2
-    exit 0
+    echo "Install them with: \"$PYTHON\" -m pip install clang libclang" >&2
+    exit 1
 fi
 
 # Skip gracefully when no OCCT headers are present (the CI test/export jobs
