@@ -180,6 +180,100 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
     return ctx
 
 
+def _flatten_sources(cls: ClassDecl, by_name: dict[str, ClassDecl],
+                     ctx: tm.TypeContext,
+                     _seen: set[str] | None = None) -> list[str]:
+    """Unwrapped value-style OCCT bases of ``cls`` (transitively), nearest
+    first.  Wrapped bases are walked through (their own wrappers are unrelated
+    to the derived wrapper, so they cannot hand methods down) but are not
+    themselves sources -- only bases that have no wrapper of their own need
+    their methods flattened, because nothing else exposes them on the derived
+    wrapper.
+    """
+    if _seen is None:
+        _seen = set()
+    if cls.name in _seen:
+        return []
+    _seen.add(cls.name)
+    sources: list[str] = []
+    for base in cls.base_classes:
+        parent = by_name.get(base)
+        if parent is None:
+            continue
+        if parent.name not in ctx.wrapped and _flattenable_base(parent):
+            sources.append(base)
+        sources.extend(_flatten_sources(parent, by_name, ctx, _seen))
+    return sources
+
+
+def _flattenable_base(cls: ClassDecl) -> bool:
+    """A base whose public methods are safe to bind on every wrapped value
+    descendant.  Templates are excluded (methods may depend on substituted
+    arguments; synthesized specializations carry their own methods) and so are
+    Transient/exception bases, which manage their own wrapper hierarchies."""
+    if cls.is_template:
+        return False
+    if cls.kind in (ClassKind.REF_COUNTED, ClassKind.EXCEPTION):
+        return False
+    return True
+
+
+def _flatten_declared_names(cls: ClassDecl) -> set[str]:
+    """Every method name the class declares itself (including skipped ones, so
+    a flattened base method never collides with a GDScript method name)."""
+    return {m.name for m in cls.all_methods}
+
+
+def _copy_method(method: MethodDecl) -> MethodDecl:
+    import copy
+    return copy.deepcopy(method)
+
+
+def flatten_inherited_methods(modules: list[ModuleDecl],
+                              ctx: tm.TypeContext) -> None:
+    """Bind inherited methods onto wrappers that would otherwise miss them.
+
+    The generator binds only methods declared in each class's own header, so
+    anything a wrapper inherits from an unwrapped OCCT base is invisible from
+    GDScript -- most notably the result accessors of shape-construction
+    builders (BRepBuilderAPI_MakeShape::Shape/IsDone/Modified/Generated/
+    IsDeleted and BRepBuilderAPI_Command::IsDone/Check), which is what blocks
+    boolean ops and fillet/chamfer/offset/thicken from handing back a result.
+
+    Rather than enumerate those bases (which would miss the next class with
+    the same shape), this auto-discovers every unwrapped value-style base in
+    the whole codebase and flattens its public methods onto every wrapped
+    value descendant that does not already declare the same name, so a derived
+    override keeps its own binding.  Applied in-place before codegen and the
+    symbol probe run, so flattened methods are bound and audited exactly like
+    own-header methods.
+    """
+    by_name = {decl.name: decl for mod in modules for decl in mod.classes}
+    for module in modules:
+        for cls in module.classes:
+            if cls.skip or cls.name == module.name:
+                continue
+            if cls.kind == ClassKind.REF_COUNTED:
+                # Handle-storage wrappers mirror the OCCT hierarchy through
+                # wrapped Transient bases, so nothing is invisible to them.
+                continue
+            if cls.kind == ClassKind.EXCEPTION:
+                continue  # diagnostics-only wrappers, no native storage
+            if cls.static_methods and not cls.methods and not cls.operators \
+                    and not cls.fields and not cls.has_any_public_ctor:
+                continue  # pure-static utility class, no native storage
+            declared = _flatten_declared_names(cls)
+            for base in _flatten_sources(cls, by_name, ctx):
+                base_cls = by_name[base]
+                for method in base_cls.methods:
+                    if method.name in declared:
+                        continue
+                    if method.skip or method.is_deleted or method.is_pure_virtual:
+                        continue
+                    cls.methods.append(_copy_method(method))
+                    declared.add(method.name)
+
+
 def _default_constructible(cls: ClassDecl) -> bool:
     """A wrapper can hold `T _native` iff the class has a public default ctor
     or declares no constructors at all (implicit default ctor).
@@ -2080,6 +2174,21 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
         from .audit import apply_illformed
         apply_illformed(modules, illformed)
     ctx = build_context(modules)
+    # Inherited methods of unwrapped value-style bases (result accessors of
+    # BRepBuilderAPI_MakeShape & co) are flattened onto their wrapped value
+    # descendants before codegen and the symbol probe see them, so
+    # shape()/is_done()/modified()/... are bound and audited exactly like
+    # own-header methods.
+    flatten_inherited_methods(modules, ctx)
+    # Flattened methods were unknown to the apply_illformed above, so re-apply
+    # it now: a flattened copy can be ill-formed where the own-header probe
+    # never saw it (e.g. the 2-arg Blend_AppFunction::Set is hidden by an
+    # intermediate class's Set overloads, making the call unresolvable).  Only
+    # method/field skips and `returnable` are set here -- never ctor/storage
+    # flags -- so running it after build_context is safe.
+    if illformed:
+        from .audit import apply_illformed
+        apply_illformed(modules, illformed)
     wrappers: list[ClassDecl] = []
     written: list[Path] = []
     out_dir.mkdir(parents=True, exist_ok=True)
