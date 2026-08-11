@@ -780,6 +780,15 @@ def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
     lib_dir = _occt_lib_dir(project_root, install)
     if lib_dir is None:
         raise FileNotFoundError("no OCCT library directory found for symbol audit")
+    # The probe must be compiled with the target's data model so its undefined
+    # symbols line up with the target OCCT libraries.  A plain `-m32` (x86 on an
+    # x64 host) is honored by g++; a clang-only `--target=` (arm, android, wasm)
+    # cannot be reproduced by the host toolchain, so degrade to the generate-only
+    # path rather than emit a bogus symbol diff.
+    if any(a.startswith(("--target=", "-target")) for a in args):
+        raise FileNotFoundError(
+            "probe compile needs a cross target the host toolchain cannot "
+            "reproduce; skipping symbol audit")
 
     work_dir.mkdir(parents=True, exist_ok=True)
     if illformed_path is None:

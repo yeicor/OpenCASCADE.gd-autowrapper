@@ -27,12 +27,27 @@ echo "checking ${#CPPS[@]} translation unit(s): ${CPPS[0]##*/} ..."
 GEXT="$ROOT/vcpkg/buildtrees/gdext/x64-linux-dbg/godot-cpp"
 OCC="$ROOT/vcpkg/installed/x64-linux/include/opencascade"
 
+# Import the OCCT feature + platform defines from the vcpkg OCCT install's own
+# CMake metadata (see autogen/compile_db.py::_occt_compile_definitions) so the
+# check mirrors the exact environment that built the library.
+PYTHON="${PYTHON:-python3}"
+OCCT_DEFS=$("$PYTHON" -c "
+import sys
+sys.path.insert(0, r'$SCRIPT_DIR')
+from pathlib import Path
+from autogen.compile_db import _occt_compile_definitions, _platform_defines
+inc = Path(r'$OCC')
+defs = ['-D' + d for d in _occt_compile_definitions(inc)]
+defs += _platform_defines('x64-linux')
+print(' '.join(defs))
+")
+
 CXX="${CXX:-c++}"
 set -x
 "$CXX" -std=gnu++17 -fsyntax-only -fPIC \
-    -DDEBUG_ENABLED -DGDEXTENSION -DHAVE_FREETYPE -DHAVE_OPENGL_EXT \
-    -DHAVE_RAPIDJSON -DHAVE_XLIB -DLINUX_ENABLED -DOCC_CONVERT_SIGNALS \
-    -DOpenCASCADE_gd_EXPORTS -DTHREADS_ENABLED -DUNIX_ENABLED \
+    -DDEBUG_ENABLED -DGDEXTENSION \
+    -DOpenCASCADE_gd_EXPORTS -DTHREADS_ENABLED \
+    $OCCT_DEFS \
     -include "$ROOT/src/occt_guard.hxx" \
     -I"$ROOT/src" \
     -isystem "$ROOT/godot-cpp/include" \
