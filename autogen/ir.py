@@ -110,6 +110,7 @@ def load_module(path: Path) -> M.ModuleDecl:
         name=data.get("module", path.stem),
         classes=[_class(c) for c in data.get("classes", [])],
         enums=[_enum(e) for e in data.get("enums", [])],
+        data_model=data.get("data_model") or {},
     )
 
 
@@ -221,4 +222,5 @@ def dump_module(module: M.ModuleDecl) -> dict:
         "module": module.name,
         "classes": [_class_out(c) for c in module.classes],
         "enums": [_enum_out(e) for e in module.enums],
+        "data_model": module.data_model,
     }

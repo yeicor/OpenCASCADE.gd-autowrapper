@@ -251,6 +251,10 @@ class ModuleDecl:
     name: str                      # e.g. "gp", "TopoDS", "BRepPrimAPI"
     classes: list[ClassDecl] = field(default_factory=list)
     enums: list[EnumDecl] = field(default_factory=list)
+    # Byte sizes of the size-sensitive builtins for the parse target
+    # (compile_db.probe_data_model): keyed "long"/"unsigned long"/"pointer".
+    # Empty for IRs predating the probe; consumers fall back to LP64 (long=8).
+    data_model: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

@@ -15,9 +15,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
-from clang.cindex import CompilationDatabase
+from clang.cindex import CompilationDatabase, CursorKind, Index
 
 
 def find_resource_dir() -> str | None:
@@ -69,6 +70,44 @@ def _emscripten_sysroot() -> Path | None:
         return None
     p = Path(emsdk) / "upstream" / "emscripten" / "cache" / "sysroot"
     return p if p.is_dir() else None
+
+
+def probe_data_model(args: list[str]) -> dict[str, int]:
+    """Byte sizes of the size-sensitive builtins for the parse target.
+
+    The generated wrapper must store each canonical C type with the same width
+    the target compiler uses: LP64 hosts use an 8-byte ``long``, but ILP32
+    targets (wasm32, x86-32, armv7) and LLP64 Windows use a 4-byte ``long``
+    with the same 4/8-byte pointers.  libclang resolves ``long`` against the
+    *parse* target, so a tiny probe TU parsed with the exact scan args yields
+    the authoritative data model without encoding any arch tables here.
+
+    Returns a dict of canonical type name -> byte size (``long``,
+    ``unsigned long``, ``long long``, ``pointer``).  Empty on probe failure
+    (the caller falls back to the LP64 host defaults).
+    """
+    decls = ("long aw_long;", "unsigned long aw_ulong;",
+             "long long aw_llong;", "void* aw_ptr;")
+    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w",
+                                     delete=False) as f:
+        f.write("\n".join(decls) + "\n")
+        tmp_path = f.name
+    try:
+        tu = Index.create().parse(tmp_path, args=args + ["-x", "c++"])
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    names = {"aw_long": "long", "aw_ulong": "unsigned long",
+             "aw_llong": "long long", "aw_ptr": "pointer"}
+    sizes: dict[str, int] = {}
+    for c in tu.cursor.get_children():
+        if c.kind == CursorKind.VAR_DECL and c.spelling in names:
+            size = c.type.get_size()
+            if size > 0:
+                sizes[names[c.spelling]] = size
+    return sizes
 
 
 # OCCT feature defines used when the vcpkg install carries no CMake metadata

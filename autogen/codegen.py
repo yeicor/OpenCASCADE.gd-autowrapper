@@ -68,6 +68,12 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
     """
     ctx = tm.TypeContext(module_name="__all__")
     for module in modules:
+        if module.data_model:
+            # The parse target's data model (probed at scan time, recorded in
+            # the IR): size-sensitive wrapper storage follows it.
+            ctx.data_model = module.data_model
+            break
+    for module in modules:
         ctx.occt_classes |= {cls.name for cls in module.classes}
         for cls in module.classes:
             if cls.header_file:
@@ -103,6 +109,21 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
             if any(not _default_ctor(c) for c in cls.constructors):
                 continue
             ctx.inherited_value.add(cls.wrapper_name)
+    # Group inherited-storage concrete type tags by their base wrapper so the
+    # base class can expose generated downcast factories (cast_<tag>() and a
+    # generic cast()).  These wrap the same _native storage as the base, so a
+    # static downcast is sound for every such tag, for any hierarchy.
+    ctx.inherited_children: dict[str, list[ClassDecl]] = {}
+    for module in modules:
+        for cls in module.classes:
+            if cls.wrapper_name not in ctx.inherited_value:
+                continue
+            base_occt = next((b for b in cls.base_classes if b in ctx.wrapped), None)
+            base_wrapper = ctx.wrapped.get(base_occt) if base_occt else None
+            if base_wrapper:
+                ctx.inherited_children.setdefault(base_wrapper, []).append(cls)
+    for base_wrapper in ctx.inherited_children:
+        ctx.inherited_children[base_wrapper].sort(key=lambda c: c.wrapper_name)
     for module in modules:
         for cls in module.classes:
             if cls.skip or cls.name == module.name:
@@ -690,6 +711,94 @@ def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
     return f"{ret} {_unique(method)}({params}){const_suffix}"
 
 
+# TopAbs shape-enum names that correspond 1:1 to TopoDS_* value tags.  A
+# TopoDS_<tag> stored in an inherited-storage wrapper always reports exactly
+# this ShapeType, so the discriminator is derivable from the tag name alone.
+_TOPABS_TAG_ENUMS = {
+    "TopAbs_COMPOUND", "TopAbs_COMPSOLID", "TopAbs_SOLID", "TopAbs_SHELL",
+    "TopAbs_FACE", "TopAbs_WIRE", "TopAbs_EDGE", "TopAbs_VERTEX",
+    "TopAbs_SHAPE",
+}
+
+
+def _inherited_cast_name(child: ClassDecl) -> str:
+    """GDScript-visible downcast factory name, e.g. ``cast_vertex``."""
+    tag = child.name.rsplit("_", 1)[-1]
+    return f"cast_{tag.lower()}"
+
+
+def _inherited_cast_discriminator(child: ClassDecl) -> str | None:
+    """TopAbs_* enum value reported by this tag's ShapeType, or None."""
+    tag = child.name.rsplit("_", 1)[-1]
+    disc = f"TopAbs_{tag.upper()}"
+    return disc if disc in _TOPABS_TAG_ENUMS else None
+
+
+def _inherited_children(cls: ClassDecl, ctx: tm.TypeContext) -> list[ClassDecl]:
+    """Sorted inherited-storage children of cls's wrapper (for cast factories)."""
+    return ctx.inherited_children.get(cls.wrapper_name, [])
+
+
+def _inherited_cast_decls(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
+    """Static downcast factory declarations emitted on the base wrapper class."""
+    children = _inherited_children(cls, ctx)
+    if not children:
+        return []
+    decls = []
+    for child in children:
+        decls.append(f"    static Ref<{child.wrapper_name}> "
+                     f"{_inherited_cast_name(child)}(Ref<{cls.wrapper_name}> S);")
+    if all(_inherited_cast_discriminator(c) is not None for c in children):
+        decls.append(f"    static Ref<{cls.wrapper_name}> "
+                     f"cast(Ref<{cls.wrapper_name}> S);")
+    return decls
+
+
+def _inherited_cast_bodies(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
+    """Implementations of the downcast factories for the base wrapper class."""
+    children = _inherited_children(cls, ctx)
+    if not children:
+        return []
+    bodies: list[str] = []
+    for child in children:
+        tag = child.name.rsplit("_", 1)[-1]
+        pkg = child.name.rsplit("_", 1)[0]
+        disc = _inherited_cast_discriminator(child)
+        guard = (f"        if (S.is_null() || S->_native.IsNull()"
+                 f" || S->_native.ShapeType() != {disc}) {{") if disc else \
+                (f"        if (S.is_null() || S->_native.IsNull()) {{")
+        bodies.append(f"""Ref<{child.wrapper_name}> {cls.wrapper_name}::{_inherited_cast_name(child)}(Ref<{cls.wrapper_name}> S) {{
+    try {{
+        OCC_CATCH_SIGNALS
+{guard}
+            return Ref<{child.wrapper_name}>();
+        }}
+        Ref<{child.wrapper_name}> wrapper; wrapper.instantiate();
+        wrapper->_native_ref() = ::{pkg}::{tag}(S->_native);
+        return wrapper;
+    }} OCCT_GUARD_CATCH({{}});
+}}""")
+    if all(_inherited_cast_discriminator(c) is not None for c in children):
+        cases = "\n".join(
+            f"        case {_inherited_cast_discriminator(c)}:\n"
+            f"            return {_inherited_cast_name(c)}(S);"
+            for c in children)
+        bodies.append(f"""Ref<{cls.wrapper_name}> {cls.wrapper_name}::cast(Ref<{cls.wrapper_name}> S) {{
+    try {{
+        OCC_CATCH_SIGNALS
+        if (S.is_null() || S->_native.IsNull()) {{
+            return Ref<{cls.wrapper_name}>();
+        }}
+        switch (S->_native.ShapeType()) {{
+{cases}
+        default:
+            return S;
+        }}
+    }} OCCT_GUARD_CATCH({{}});
+}}""")
+    return bodies
+
+
 def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     _skip_ambiguous_ctor_calls(cls, ctx)
     cg = _cg(cls, ctx)
@@ -759,6 +868,11 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
                  - {cls.wrapper_name}
                  - {base} if cg.wrapper_base
                  else _referenced_wrappers(cls, ctx) - {cls.wrapper_name})
+    cast_children = _inherited_children(cls, ctx)
+    for child in cast_children:
+        if child.wrapper_name not in fwd:
+            fwd.append(child.wrapper_name)
+            fwd.sort()
     if fwd:
         out.append("// Forward declarations")
         for w in fwd:
@@ -787,6 +901,10 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
         out.append(f"    {cls.name} _native;")
     out.append("")
     out.append("    static void _bind_methods();")
+    cast_decls = _inherited_cast_decls(cls, ctx)
+    if cast_decls:
+        out.append("")
+        out.extend(cast_decls)
     out.append("")
     out.append(f"    {cls.wrapper_name}();")
     if cg.has_sync:
@@ -1460,6 +1578,16 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
                 f"    ClassDB::bind_method(D_METHOD(\"{unique}\""
                 f'{", " + args if args else ""}), '
                 f"&{cls.wrapper_name}::{unique}{defv});")
+    for child in _inherited_children(cls, ctx):
+        out.append(
+            f'    ClassDB::bind_static_method("{cls.wrapper_name}", '
+            f'D_METHOD("{_inherited_cast_name(child)}", "S"), '
+            f"&{cls.wrapper_name}::{_inherited_cast_name(child)});")
+    if (children := _inherited_children(cls, ctx)) and all(
+            _inherited_cast_discriminator(c) is not None for c in children):
+        out.append(
+            f'    ClassDB::bind_static_method("{cls.wrapper_name}", '
+            f'D_METHOD("cast", "S"), &{cls.wrapper_name}::cast);')
     for f in cls.fields:
         if not f.is_public or f.skip:
             continue
@@ -1515,8 +1643,13 @@ def generate_class_cpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
     out.append("")
     out.append(GCC_DEPRECATED)
     out.append("")
-    for w in sorted(_referenced_wrappers(cls, ctx) - {cls.wrapper_name}):
+    for w in sorted(_referenced_wrappers(cls, ctx)
+                    - {cls.wrapper_name} | {c.wrapper_name
+                                            for c in _inherited_children(cls, ctx)}):
         out.append(f'#include "{w}.hpp"')
+    for child in sorted({c.name.rsplit("_", 1)[0]
+                         for c in _inherited_children(cls, ctx)}):
+        out.append(f'#include <{child}.hxx>')
     if _uses_streams(cls):
         out.append("")
         out.append("#include <sstream>")
@@ -1555,6 +1688,7 @@ def generate_class_cpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
             continue
         out.append(body)
         out.append("")
+    out.extend(_inherited_cast_bodies(cls, ctx))
     out.extend(_field_accessor_bodies(cls, ctx))
     out.append("} // namespace godot")
     return "\n".join(out) + "\n"
@@ -1647,18 +1781,18 @@ _PRIMITIVE_WRAPPERS: dict[str, tuple[str, str, str, str, str]] = {
     "int": ("OcgStandardInteger", "int32_t", "INT",
             "int32_t get_value() const { return _native; }",
             "void set_value(int32_t v) { _native = v; }"),
-    "long": ("OcgStandardLongInteger", "int64_t", "INT",
+    "long": ("OcgStandardLongInteger", "long", "INT",
              "int64_t get_value() const { return _native; }",
-             "void set_value(int64_t v) { _native = v; }"),
+             "void set_value(int64_t v) { _native = static_cast<long>(v); }"),
     "double": ("OcgStandardReal", "double", "FLOAT",
                "double get_value() const { return _native; }",
                "void set_value(double v) { _native = v; }"),
     "float": ("OcgStandardShortReal", "float", "FLOAT",
               "float get_value() const { return _native; }",
               "void set_value(float v) { _native = v; }"),
-    "unsigned long": ("OcgStandardULongInteger", "uint64_t", "INT",
+    "unsigned long": ("OcgStandardULongInteger", "unsigned long", "INT",
                       "uint64_t get_value() const { return _native; }",
-                      "void set_value(uint64_t v) { _native = v; }"),
+                      "void set_value(uint64_t v) { _native = static_cast<unsigned long>(v); }"),
     "unsigned int": ("OcgStandardUInteger", "uint32_t", "INT",
                      "uint32_t get_value() const { return _native; }",
                      "void set_value(uint32_t v) { _native = v; }"),

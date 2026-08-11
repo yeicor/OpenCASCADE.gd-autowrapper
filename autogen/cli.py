@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .codegen import generate_all, generate_module
 from .classify import classify_module
-from .compile_db import CompileArgs, ensure_occt_args
+from .compile_db import (CompileArgs, ensure_occt_args, probe_data_model)
 from .ir import load_module
 from .occt import OCCT_MODULES, find_occt_install
 from .scanner import ModuleScanResult, scan_module, to_dict
@@ -45,8 +45,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     install = find_occt_install(PROJECT_ROOT)
     compile_args = CompileArgs(args.compile_db)
     args_list = ensure_occt_args(compile_args.args, install.include_dir)
+    data_model = probe_data_model(args_list)
     result = scan_module(args.module, install, args_list, jobs=args.jobs)
-    payload = to_dict(result)
+    payload = to_dict(result, data_model)
     payload["occt_version"] = install.version
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -68,6 +69,7 @@ def cmd_scan_all(args: argparse.Namespace) -> int:
     install = find_occt_install(PROJECT_ROOT)
     compile_args = CompileArgs(args.compile_db)
     args_list = ensure_occt_args(compile_args.args, install.include_dir)
+    data_model = probe_data_model(args_list)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +101,7 @@ def cmd_scan_all(args: argparse.Namespace) -> int:
 
     failures = {name: res.errors for name, res in results.items() if res.errors}
     for name, res in results.items():
-        payload = to_dict(res)
+        payload = to_dict(res, data_model)
         payload["occt_version"] = install.version
         (out_dir / f"{name}.json").write_text(
             json.dumps(payload, indent=1, default=_json_default))
@@ -195,6 +197,11 @@ def cmd_generate_all(args: argparse.Namespace) -> int:
     if synthesized:
         from .model import ModuleDecl
         synth_mod = ModuleDecl(name="NCollection", classes=synthesized)
+        # The specialization module carries no data_model of its own (it is
+        # synthesized API-side); inherit the parse target's from the scanned
+        # modules so its size-sensitive wrappers match the same data model.
+        if modules:
+            synth_mod.data_model = modules[0].data_model
         classify_module(synth_mod, global_by_name)
         modules.append(synth_mod)
         print(f"synth          : {len(synthesized)} specialization(s): "

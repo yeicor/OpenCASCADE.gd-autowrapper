@@ -107,6 +107,55 @@ class TypeContext:
         self.no_return: set[str] = set()        # wrapper names whose copy ops are ill-formed (unreturnable)
         self.noncopyable: set[str] = set()      # occt names that cannot be copied
         self.inherited_value: set[str] = set()  # wrapper names sharing base storage via _native_ref()
+        # Parse-target data model (byte sizes of "long"/"unsigned long"/"long
+        # long"/"pointer" from compile_db.probe_data_model).  Size-sensitive
+        # builtins are mapped against it (see long_size/primitive_entry).
+        self.data_model: dict[str, int] = {}
+
+
+def long_size(ctx: TypeContext) -> int:
+    """Byte width of ``long``/``unsigned long`` for the parse target.
+
+    8 on LP64 hosts, 4 on ILP32 targets (wasm32, x86-32, armv7) and LLP64
+    Windows.  IRs predating the probe carry no data model and fall back to the
+    LP64 host default, preserving the historic codegen output.
+    """
+    return ctx.data_model.get("long", 8)
+
+
+def primitive_entry(base_name: str, ctx: TypeContext) -> tuple[str, str]:
+    """Wrapper (cpp_type, gd_type) for a canonical primitive.
+
+    ``long``/``unsigned long`` values cross with the parse target's width
+    (LP64: 8-byte; ILP32/LLP64: 4-byte), so generated calls neither truncate
+    nor emit narrowing/widening warnings where the OCCT signature uses the
+    target's size-sensitive builtins (``Standard_Size`` = ``unsigned long``,
+    ``intptr_t`` = ``long``).  Pointer/reference storage uses the exact C
+    type names instead (see codegen's primitive boxes).
+    """
+    cpp, gd = PRIMITIVE_MAP[base_name]
+    if base_name == "long" and long_size(ctx) == 4:
+        return "int32_t", "INT"
+    if base_name == "unsigned long" and long_size(ctx) == 4:
+        return "uint32_t", "INT"
+    return cpp, gd
+
+
+def array_pointer_entry(base_name: str,
+                        ctx: TypeContext) -> tuple[str, str] | None:
+    """Wrapper packed-array type for a ``const T*`` input array, or None.
+
+    The packed array element must match the target's element exactly (it is
+    passed zero-copy through ``ptr()``).  On ILP32/LLP64 targets a ``long*``
+    is a 32-bit element sequence with no element-exact Godot packed array, so
+    ``long`` arrays stay unbound there.
+    """
+    entry = ARRAY_POINTER_MAP.get(base_name)
+    if entry is None:
+        return None
+    if base_name == "long" and long_size(ctx) != 8:
+        return None
+    return entry
 
 
 def _enum_occt_path(enum_decl) -> str:
@@ -491,7 +540,7 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
                 # rvalue-ref: the callee takes ownership of a temporary, so a
                 # by-value argument (moved in) is a sound, minimal binding.
                 if t.base_name in PRIMITIVE_MAP:
-                    cpp, gd = PRIMITIVE_MAP[t.base_name]
+                    cpp, gd = primitive_entry(t.base_name, ctx)
                     return ParamConv(cpp_type=cpp, gd_type=gd, name=name,
                                      call_expr=_rw(move, name))
                 return _enum_param(t, name, ctx, move=move)
@@ -505,7 +554,7 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
     if t.is_pointer:
         return _cpp_pointer_param(t, name, ctx)
     if t.base_name in PRIMITIVE_MAP:
-        cpp, gd = PRIMITIVE_MAP[t.base_name]
+        cpp, gd = primitive_entry(t.base_name, ctx)
         return ParamConv(cpp_type=cpp, gd_type=gd, name=name,
                          call_expr=_rw(move, name))
     if t.is_handle and t.handle_inner in ctx.wrapped \
@@ -591,8 +640,9 @@ def _cpp_pointer_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
                          call_expr=f"{name}.utf16()")
     if t.pointee_is_const and b in ARRAY_POINTER_MAP:
         # const T* input array -> typed packed array, passed zero-copy via
-        # ptr().  Only element-exact matches are bound (see ARRAY_POINTER_MAP).
-        pa, gd = ARRAY_POINTER_MAP[b]
+        # ptr().  Only element-exact matches are bound (see ARRAY_POINTER_MAP);
+        # the element width follows the parse target's data model.
+        pa, gd = array_pointer_entry(b, ctx)
         return ParamConv(cpp_type=pa, gd_type=gd, name=name,
                          call_expr=f"{name}.ptr()")
     if t.is_handle and t.handle_inner in ctx.wrapped \
@@ -840,7 +890,7 @@ def _cpp_return_core(t: OCCTType, ctx: TypeContext, has_ostream: bool,
     if t.is_pointer:
         return _cpp_pointer_return(t, ctx)
     if t.base_name in PRIMITIVE_MAP:
-        cpp, gd = PRIMITIVE_MAP[t.base_name]
+        cpp, gd = primitive_entry(t.base_name, ctx)
         return RetConv(cpp_type=cpp, gd_type=gd, body="return {call};")
     if t.base_name in ("char", "char8_t"):
         return RetConv(cpp_type="String", gd_type="STRING",
@@ -991,7 +1041,7 @@ def _cpp_pointer_return(t: OCCTType, ctx: TypeContext) -> RetConv | None:
                     "        return wrapper;")
         return RetConv(cpp_type=f"Ref<{w}>", gd_type="OBJECT", body=body)
     if b in PRIMITIVE_MAP:
-        cpp, gd = PRIMITIVE_MAP[b]
+        cpp, gd = primitive_entry(b, ctx)
         body = ("auto result = {call};\n"
                 "        if (!result) { return " + cpp + "(); }\n"
                 "        return *result;")

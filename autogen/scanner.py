@@ -243,7 +243,8 @@ def scan_module(module: str, install: OCCTInstall, args: list[str],
     return result
 
 
-def to_dict(result: ModuleScanResult) -> dict:
+def to_dict(result: ModuleScanResult,
+            data_model: dict[str, int] | None = None) -> dict:
     return {
         "module": result.module,
         "classes": [asdict(c) for c in result.classes],
@@ -253,4 +254,5 @@ def to_dict(result: ModuleScanResult) -> dict:
         "headers": result.headers,
         "attempts2": result.attempts2,
         "occt_version": "",
+        "data_model": data_model or {},
     }
