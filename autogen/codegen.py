@@ -12,8 +12,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .model import (ClassDecl, ClassKind, MethodDecl, MethodKind, ModuleDecl,
-                    OCCTType)
+from .model import (ClassDecl, ClassKind, FieldDecl, MethodDecl, MethodKind,
+                    ModuleDecl, OCCTType)
 from .names import (_type_to_string, get_method_unique_name,
                     group_overloads, to_snake_case)
 from . import typemap as tm
@@ -59,6 +59,21 @@ class CgClass:
 # ---------------------------------------------------------------------------
 # Context building
 # ---------------------------------------------------------------------------
+
+def _field_breaks_copy_semantics(f: FieldDecl, ctx: tm.TypeContext) -> bool:
+    """True if data member `f` makes the enclosing class non-copy-assignable.
+
+    Reference members and const members delete copy assignment by rule; a
+    by-value member whose type is itself in ``ctx.noncopyable`` (a wrapped
+    OCCT value or a known non-copyable std value, per extract.py) propagates
+    it.  Pointer/handle members never do (copying the pointer/refcount is
+    fine even when the pointee is non-copyable).
+    """
+    if f.type.is_ref or f.is_const:
+        return True
+    return (not f.type.is_pointer and not f.type.is_handle
+            and f.type.base_name in ctx.noncopyable)
+
 
 def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
     """Build a TypeContext shared across modules (in include-DAG order).
@@ -132,6 +147,10 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
                 ctx.noncopyable.add(cls.name)
     # Propagate non-copyability through data members: a class whose member is
     # non-copyable is itself non-copyable (implicitly deleted copy semantics).
+    # A reference member or a const member deletes copy assignment regardless
+    # of the referenced/const-qualified type, and a by-value member whose type
+    # is a known non-copyable std value (std::atomic, std::shared_mutex, ...)
+    # does too -- mirroring the scan-time structural detection (extract.py).
     changed = True
     while changed:
         changed = False
@@ -146,8 +165,7 @@ def build_context(modules: list[ModuleDecl]) -> tm.TypeContext:
                 # Pointer and handle members do not delete copy semantics of the
                 # enclosing class (copying the pointer/refcount is fine even when
                 # the pointee is non-copyable); only by-value members propagate.
-                if any(not f.type.is_pointer and not f.type.is_handle
-                       and f.type.base_name in ctx.noncopyable for f in cls.fields):
+                if any(_field_breaks_copy_semantics(f, ctx) for f in cls.fields):
                     ctx.noncopyable.add(cls.name)
                     changed = True
     for module in modules:

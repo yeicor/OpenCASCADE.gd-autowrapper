@@ -567,7 +567,8 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
         w = ctx.wrapped[key]
         if w in ctx.no_storage:
             return None  # exception / pure-static wrapper holds no native object
-        if w in ctx.no_return and not t.is_ref and not t.is_rvalue_ref:
+        if (key in ctx.noncopyable or w in ctx.no_return) \
+                and not t.is_ref and not t.is_rvalue_ref:
             # By-value params are passed as a copy of the wrapper's native;
             # an implicitly non-copyable type cannot cross that way.
             return None

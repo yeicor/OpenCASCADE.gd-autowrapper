@@ -173,6 +173,50 @@ def _has_explicit_noncopyable(cursor: Cursor) -> bool:
     return False
 
 
+# std class templates whose values are never copy-assignable (mutexes,
+# atomics, streams, threads, ...).  A by-value member of such a type makes the
+# enclosing class's copy assignment implicitly deleted; libclang does not
+# expose the implicitly-deleted operator, so the field's canonical spelling is
+# matched directly.  ``std::unique_ptr`` is included (the extractor also flags
+# it by name below) so every known root stays in one place.
+_STD_NONCOPYABLE_ROOTS = frozenset({
+    "std::unique_ptr", "std::auto_ptr",
+    "std::atomic", "std::atomic_flag", "std::atomic_ref",
+    "std::mutex", "std::recursive_mutex", "std::timed_mutex",
+    "std::recursive_timed_mutex", "std::shared_mutex",
+    "std::shared_timed_mutex",
+    "std::condition_variable", "std::condition_variable_any",
+    "std::thread", "std::jthread",
+    "std::future", "std::shared_future", "std::promise",
+    "std::packaged_task",
+    "std::ifstream", "std::ofstream", "std::fstream",
+    "std::istringstream", "std::ostringstream", "std::stringstream",
+    "std::istream", "std::ostream", "std::iostream",
+    "std::stop_callback",
+    "std::counting_semaphore", "std::binary_semaphore", "std::latch",
+    "std::barrier",
+})
+
+
+def _field_has_deleted_copy_assignment(f: FieldDecl) -> bool:
+    """A data member that implicitly deletes the class's copy assignment.
+
+    The enclosing class's copy assignment is unusable when a member is a
+    reference, is const, or is a value of a known non-copyable std type
+    (``std::atomic``, ``std::shared_mutex``, ...) -- the very cases libclang
+    keeps implicit, so these are the only structural signals the scan can see.
+    """
+    if f.type.is_ref:
+        return True
+    if f.is_const:
+        return True
+    canonical = f.type.canonical_spelling
+    for root in _STD_NONCOPYABLE_ROOTS:
+        if canonical == root or canonical.startswith(root + "<"):
+            return True
+    return False
+
+
 def _params(cursor: Cursor) -> list[Parameter]:
     out: list[Parameter] = []
     for child in cursor.get_children():
@@ -533,7 +577,8 @@ def _extract_class(cursor: Cursor, header: str,
     cls.has_pure_virtual = any(m.is_pure_virtual for m in cls.methods)
     cls.has_copy_assignment = not (
         _has_explicit_noncopyable(cursor)
-        or any("unique_ptr" in f.type.base_name for f in cls.fields))
+        or any("unique_ptr" in f.type.base_name for f in cls.fields)
+        or any(_field_has_deleted_copy_assignment(f) for f in cls.fields))
     try:
         cls.is_abstract = bool(cursor.is_abstract_record())
     except Exception:
