@@ -2122,28 +2122,48 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
             wrappers.append(cls)
     if len(tasks) > 1:
         workers = min(len(tasks), os.cpu_count() or 4, 16)
-        pool = _mp.get_context("fork").Pool(
-            processes=workers, initializer=_gen_pool_worker_init,
-            initargs=(modules, ctx, str(out_dir)))
+        # fork is only available on POSIX; Windows (and macOS >= 3.8 defaults)
+        # has no fork start method, so use the platform default (spawn) there.
+        # spawn pickles modules/ctx once into the worker initializer; if
+        # anything turns out unpicklable the pool fails to start and we fall
+        # back to serial generation rather than aborting the whole pass.
+        start_methods = _mp.get_all_start_methods()
+        ctx = _mp.get_context("fork" if "fork" in start_methods else None)
+        pool = None
         try:
-            for mi, ci, chunk, mutations in pool.imap_unordered(
-                    _gen_class_worker, tasks):
-                written.extend(chunk)
+            pool = ctx.Pool(
+                processes=workers, initializer=_gen_pool_worker_init,
+                initargs=(modules, ctx, str(out_dir)))
+        except Exception:
+            pool = None
+        if pool is not None:
+            try:
+                for mi, ci, chunk, mutations in pool.imap_unordered(
+                        _gen_class_worker, tasks):
+                    written.extend(chunk)
+                    cls = modules[mi].classes[ci]
+                    for group, i, skip, reason in mutations:
+                        if group == "c":
+                            m = cls.constructors[i]
+                        elif group == "m":
+                            m = cls.methods[i]
+                        elif group == "o":
+                            m = cls.operators[i]
+                        else:
+                            m = cls.static_methods[i]
+                        m.skip = skip
+                        m.skip_reason = reason
+            except Exception:
+                pool.terminate()
+                pool.join()
+                pool = None
+            else:
+                pool.close()
+                pool.join()
+        if pool is None:
+            for mi, ci in tasks:
                 cls = modules[mi].classes[ci]
-                for group, i, skip, reason in mutations:
-                    if group == "c":
-                        m = cls.constructors[i]
-                    elif group == "m":
-                        m = cls.methods[i]
-                    elif group == "o":
-                        m = cls.operators[i]
-                    else:
-                        m = cls.static_methods[i]
-                    m.skip = skip
-                    m.skip_reason = reason
-        finally:
-            pool.close()
-            pool.join()
+                _generate_class_serial(cls, ctx, out_dir, write)
     else:
         for mi, ci in tasks:
             cls = modules[mi].classes[ci]

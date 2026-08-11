@@ -745,7 +745,7 @@ def _ptr_ref_out_param(t: OCCTType, name: str, ctx: TypeContext) -> ParamConv | 
     elif w in ctx.unique_ptr:
         if w in ctx.stdalloc:
             postlude = (f"{guard} {{ {name}->_native.reset("
-                        f"occt_gd::occt_alloc_new<{_occt_qual(key)}>(*{pvar}))); }}")
+                        f"occt_gd::occt_alloc_new<{_occt_qual(key)}>(*{pvar})); }}")
         else:
             postlude = (f"{guard} {{ {name}->_native = "
                         f"std::make_unique<{_occt_qual(key)}>(*{pvar}); }}")
