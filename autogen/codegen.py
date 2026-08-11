@@ -2128,10 +2128,10 @@ def generate_all(modules: list[ModuleDecl], out_dir: Path,
         # anything turns out unpicklable the pool fails to start and we fall
         # back to serial generation rather than aborting the whole pass.
         start_methods = _mp.get_all_start_methods()
-        ctx = _mp.get_context("fork" if "fork" in start_methods else None)
+        mp_ctx = _mp.get_context("fork" if "fork" in start_methods else None)
         pool = None
         try:
-            pool = ctx.Pool(
+            pool = mp_ctx.Pool(
                 processes=workers, initializer=_gen_pool_worker_init,
                 initargs=(modules, ctx, str(out_dir)))
         except Exception:
