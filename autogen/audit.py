@@ -742,6 +742,16 @@ def _gcc_args(args: list[str]) -> list[str]:
         if arg in ("-include", "-Xclang", "-x", "-c", "-o"):
             skip_next = True
             continue
+        if arg in ("-target", "--target"):
+            # Clang-only two-word form (``-target arm-linux-gnueabihf``); the
+            # probe compile runs on the host so g++ cannot honour it.
+            skip_next = True
+            continue
+        if arg.startswith(("--target=", "-target=", "--sysroot=")):
+            # Clang-only cross-target / sysroot flags; the host probe cannot
+            # reproduce the cross ABI (the symbol diff that would need it is
+            # skipped separately -- see run_audit).
+            continue
         if arg.startswith("-isystem "):
             out += ["-isystem", arg[len("-isystem "):]]
             continue
@@ -781,14 +791,19 @@ def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
     if lib_dir is None:
         raise FileNotFoundError("no OCCT library directory found for symbol audit")
     # The probe must be compiled with the target's data model so its undefined
-    # symbols line up with the target OCCT libraries.  A plain `-m32` (x86 on an
-    # x64 host) is honored by g++; a clang-only `--target=` (arm, android, wasm)
-    # cannot be reproduced by the host toolchain, so degrade to the generate-only
-    # path rather than emit a bogus symbol diff.
-    if any(a.startswith(("--target=", "-target")) for a in args):
-        raise FileNotFoundError(
-            "probe compile needs a cross target the host toolchain cannot "
-            "reproduce; skipping symbol audit")
+    # symbols line up with the target OCCT libraries.  A plain `-m32` (x86 on
+    # an x64 host) is honored by g++; a clang-only `--target=` (arm, android,
+    # wasm) cannot be reproduced by the host toolchain for the undefined-symbol
+    # diff, so that stage is skipped.  The ill-formed-method pass still runs:
+    # copy-constructibility / default-constructibility / field-accessor
+    # validity are data-model independent, and cross-target wrappers must not
+    # emit copies of implicitly-deleted types (e.g. BRepMesh_CircleTool, whose
+    # copy is deleted through a move-holding NCollection_Map member the
+    # extractor cannot see).
+    cross_target = any(a.startswith(("--target=", "-target")) for a in args)
+    if cross_target:
+        print("audit          : cross target; undefined-symbol diff skipped "
+              "(ill-formed pass still runs)", file=sys.stderr)
 
     work_dir.mkdir(parents=True, exist_ok=True)
     if illformed_path is None:
@@ -842,20 +857,22 @@ def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
         # A compile failure gives no object file for nm: keep the missing set
         # from the parts that *did* compile (below) rather than bailing out.
 
-    defined = _defined_symbols(lib_dir, nm_tool)
+    defined: set[str] = set()
     missing: set[str] = set()
-    for tu, res in compiled:
-        if res.returncode != 0:
-            continue
-        obj = work_dir / (tu.stem + ".o")
-        for letter, name in _nm_undefined(obj, nm_tool):
-            if letter != "U":
+    if not cross_target:  # cross-target undefined symbols cannot match host libs
+        defined = _defined_symbols(lib_dir, nm_tool)
+        for tu, res in compiled:
+            if res.returncode != 0:
                 continue
-            cls = name.split("::")[0]
-            if cls not in occt_classes:
-                continue
-            if name not in defined:
-                missing.add(name)
+            obj = work_dir / (tu.stem + ".o")
+            for letter, name in _nm_undefined(obj, nm_tool):
+                if letter != "U":
+                    continue
+                cls = name.split("::")[0]
+                if cls not in occt_classes:
+                    continue
+                if name not in defined:
+                    missing.add(name)
     _write_lines(out_path, sorted(missing))
     return sorted(missing)
 

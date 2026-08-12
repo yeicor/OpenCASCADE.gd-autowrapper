@@ -3,6 +3,11 @@
 # headers installed via vcpkg (or OCCT_INCLUDE_DIR). Used by CI (build, test
 # and export-demo jobs) and by validate.sh.
 #
+# This is a thin wrapper over `python -m autogen regenerate`, which runs the
+# whole generate.sh pipeline (fresh scan-all, then repeated generate + symbol
+# audit passes until the probe compiles clean) and writes a stamp file into
+# ../src/autowrapper so the CMake build step can skip already-fresh wrappers.
+#
 # The pipeline is self-sufficient: it does not need a prior CMake configure,
 # because compile_db.py synthesizes the parse arguments (resource dir, OCCT
 # include path, OCCT feature defines) when no compile_commands.json exists.
@@ -34,76 +39,11 @@ if ! "$PYTHON" -c "import clang.cindex" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Fresh scan: out/ir/*.json is the IR produced by the local OCCT headers.
-rm -rf out/ir
-mkdir -p out/ir
-
 # One scan worker per core (each worker is a separate libclang process parsing
 # large OCCT headers, so oversubscribing beyond the core count on small CI
-# runners -- the old hard-coded 8 on 4-core runners -- starves memory without
-# speeding anything up), capped at 8 for very wide machines.  Override via the
-# AUTOWRAPPER_JOBS environment variable.
+# runners starves memory without speeding anything up), capped at 8 for very
+# wide machines.  Override via the AUTOWRAPPER_JOBS environment variable.
 NPROC="$(nproc 2>/dev/null || echo 4)"
 AUTOWRAPPER_JOBS="${AUTOWRAPPER_JOBS:-$(( NPROC > 8 ? 8 : NPROC ))}"
 
-echo "Scanning OCCT headers (all modules)..."
-"$PYTHON" -m autogen scan-all --jobs "${AUTOWRAPPER_JOBS}"
-
-# Pass 1: generate wrappers and a symbol-audit probe TU.  The audit then
-# compares the probe's undefined symbols against the OCCT libraries' defined
-# set; methods whose member symbol is missing from the libs (e.g.
-# OSD_Path::LocateExecFile, where only the free function is exported) or whose
-# instantiation does not compile (e.g. a synthesized NCollection_Vec3<unsigned
-# long>::cwiseAbs with an ambiguous std::abs) are skipped in a regeneration.
-# Both findings are re-audited until the probe compiles clean and no symbols
-# are missing, so the final wrappers are exactly what the library supports.
-mkdir -p out/audit
-
-PROBE="$SCRIPT_DIR/out/audit/probe.cpp"
-MISSING="$SCRIPT_DIR/out/audit/missing.txt"
-ILLFORMED="$SCRIPT_DIR/out/audit/illformed.txt"
-# Append-only skip sets that grow across passes.  The audit rewrites
-# missing/illformed.txt with *current* findings every run, so they cannot be
-# passed straight to generate-all (a later pass would silently un-skip earlier
-# findings); the accumulated files carry everything found so far.
-ACCUM_MISSING="$SCRIPT_DIR/out/audit/skips-missing.txt"
-ACCUM_ILLFORMED="$SCRIPT_DIR/out/audit/skips-illformed.txt"
-: > "$ACCUM_MISSING"
-: > "$ACCUM_ILLFORMED"
-
-for i in 1 2 3 4 5 6; do
-    echo "Generating wrappers (pass $i) + symbol probe..."
-    "$PYTHON" -m autogen generate-all --irs out/ir/*.json \
-        --out "$SCRIPT_DIR/../src/autowrapper" \
-        --probe-out "$PROBE" \
-        --missing "$ACCUM_MISSING" \
-        --illformed "$ACCUM_ILLFORMED" \
-        --synth-cache "$SCRIPT_DIR/out/synth/specs.json"
-
-    if ! "$PYTHON" -m autogen audit --irs out/ir/*.json \
-            --probe "$PROBE" \
-            --work "$SCRIPT_DIR/out/audit" \
-            --out "$MISSING" \
-            --illformed-out "$ILLFORMED"; then
-        echo "Symbol audit unavailable (g++/nm or OCCT libraries missing); using pass-$i output." >&2
-        break
-    fi
-
-    if [ ! -s "$MISSING" ] && [ ! -s "$ILLFORMED" ]; then
-        break
-    fi
-
-    # Merge this pass's findings into the accumulated skip sets.
-    if [ -s "$MISSING" ]; then
-        cat "$MISSING" "$ACCUM_MISSING" | sort -u > "$ACCUM_MISSING.tmp"
-        mv "$ACCUM_MISSING.tmp" "$ACCUM_MISSING"
-        echo "Pass $i found $(wc -l < "$MISSING") missing symbol(s); regenerating..."
-    fi
-    if [ -s "$ILLFORMED" ]; then
-        cat "$ILLFORMED" "$ACCUM_ILLFORMED" | sort -u > "$ACCUM_ILLFORMED.tmp"
-        mv "$ACCUM_ILLFORMED.tmp" "$ACCUM_ILLFORMED"
-        echo "Pass $i found $(wc -l < "$ILLFORMED") ill-formed method(s); regenerating..."
-    fi
-done
-
-echo "Autowrapper bindings generated (out/ir -> ../src/autowrapper)."
+"$PYTHON" -m autogen regenerate --jobs "${AUTOWRAPPER_JOBS}"

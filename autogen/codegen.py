@@ -1423,6 +1423,35 @@ _NUMERIC_DEFVAL_TYPES = {
 
 _CXX_KEYWORDS = frozenset({"true", "false", "nullptr"})
 
+# A conservative grammar for the numeric/bool literals godot-cpp's `DEFVAL`
+# accepts: optional sign, decimal/hex/binary/octal integers, floats with a
+# fractional dot and/or exponent, char literals and the bool keywords.  The
+# default-argument recovery (extract._param_default) returns raw *source* text,
+# which can be a bare identifier that only resolves as a macro in the OCCT
+# header's own context (e.g. `Update`); such a token would not compile inside
+# ClassDB::bind_method's _bind_methods, so anything outside this grammar (when
+# not a `::`-qualified constant) is dropped instead of emitted.
+_NUMERIC_LITERAL_RE = re.compile(
+    r"^(?:[+-]?(?:0[xX][0-9a-fA-F]+|0[bB][01]+|0[0-7]*"
+    r"|[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
+    r"(?:[eE][+-]?[0-9]+)?(?:[uUlLfF]+)?"
+    r"|'([^'\\]|\\[^'])'|true|false)$")
+
+# OCCT's own bool constants; they resolve inside every wrapper TU, which
+# includes the OCCT headers.
+_OCCT_BOOL_CONSTS = frozenset({"Standard_True", "Standard_False"})
+
+
+def _valid_defval_literal(dflt: str) -> bool:
+    """True if `dflt` (post ``_clean_numeric_default``) can appear in DEFVAL.
+
+    `::`-qualified constants (class statics, ``Precision::...``) resolve from
+    the wrapper's _bind_methods; anything else must be a plain literal.
+    """
+    if "::" in dflt:
+        return True
+    return dflt in _OCCT_BOOL_CONSTS or _NUMERIC_LITERAL_RE.match(dflt) is not None
+
 
 def _qualify_default(cls: ClassDecl, dflt: str) -> str:
     """Qualify a bare-identifier default with its owning OCCT class so it
@@ -1455,8 +1484,14 @@ def _defval_suffix(cls: ClassDecl, method: MethodDecl, ctx: tm.TypeContext) -> s
             break
         if p.type.is_enum or p.type.base_name not in _NUMERIC_DEFVAL_TYPES:
             break
-        parts.append(f"DEFVAL({_clean_numeric_default(
-            _qualify_default(cls, p.default_value))})")
+        cleaned = _clean_numeric_default(_qualify_default(cls, p.default_value))
+        if not _valid_defval_literal(cleaned):
+            # The recovered default is not a self-contained literal (a bare
+            # identifier that only made sense in the OCCT header's context).
+            # Dropping the clause is compile-safe: the trailing argument simply
+            # becomes required.
+            break
+        parts.append(f"DEFVAL({cleaned})")
     if not parts:
         return ""
     return ", " + ", ".join(reversed(parts))
