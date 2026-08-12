@@ -38,8 +38,16 @@ fi
 rm -rf out/ir
 mkdir -p out/ir
 
+# One scan worker per core (each worker is a separate libclang process parsing
+# large OCCT headers, so oversubscribing beyond the core count on small CI
+# runners -- the old hard-coded 8 on 4-core runners -- starves memory without
+# speeding anything up), capped at 8 for very wide machines.  Override via the
+# AUTOWRAPPER_JOBS environment variable.
+NPROC="$(nproc 2>/dev/null || echo 4)"
+AUTOWRAPPER_JOBS="${AUTOWRAPPER_JOBS:-$(( NPROC > 8 ? 8 : NPROC ))}"
+
 echo "Scanning OCCT headers (all modules)..."
-"$PYTHON" -m autogen scan-all --jobs "${AUTOWRAPPER_JOBS:-8}"
+"$PYTHON" -m autogen scan-all --jobs "${AUTOWRAPPER_JOBS}"
 
 # Pass 1: generate wrappers and a symbol-audit probe TU.  The audit then
 # compares the probe's undefined symbols against the OCCT libraries' defined

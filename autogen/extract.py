@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from clang.cindex import (AccessSpecifier, Cursor, CursorKind, Diagnostic,
-                          TranslationUnit, Type)
+                          TranslationUnit, Type, TypeKind)
 
 from .model import (ClassDecl, DocBlock, EnumDecl, EnumValue, FieldDecl,
                     MethodDecl, MethodKind, OperatorType, Parameter)
@@ -475,6 +475,145 @@ def _base_names(cursor: Cursor) -> list[str]:
             if c.kind == CursorKind.CXX_BASE_SPECIFIER]
 
 
+def _ctor_default_usable(cursor: Cursor) -> bool:
+    """True when a constructor can be invoked with no arguments (no parameters
+    or all parameters defaulted): a usable default ctor."""
+    params = [c for c in cursor.get_children() if c.kind == CursorKind.PARM_DECL]
+    if not params:
+        return True
+    return all(_param_default(p) is not None for p in params)
+
+
+def _record_decl_for_type(t: Type, tu_root: Cursor | None,
+                          defs: dict[str, Cursor | None]) -> Cursor | None:
+    """Definition cursor of the record type `t`, or None when unresolvable.
+
+    A canonical record type's ``get_declaration()`` returns the (specialization
+    or primary) cursor, which may carry no children; the TU-wide name lookup
+    used for Transient detection then resolves the primary template definition
+    whose constructors actually decide default-constructibility.
+    """
+    try:
+        canon = t.get_canonical()
+        if canon.kind != TypeKind.RECORD:
+            return None
+        decl = canon.get_declaration()
+        if decl is not None and decl.is_definition() \
+                and list(decl.get_children()):
+            return decl
+    except Exception:
+        return None
+    if tu_root is None:
+        return None
+    try:
+        name = re.sub(r"<.*", "", canon.spelling).strip().split("::")[-1]
+    except Exception:
+        return None
+    if not name:
+        return None
+    return _find_type_def(tu_root, name, defs)
+
+
+def _record_default_constructible(decl: Cursor | None, tu_root: Cursor | None,
+                                  defs: dict[str, Cursor | None],
+                                  seen: set[tuple],
+                                  as_base: bool = False) -> bool:
+    """Structural scan-time probe of a record's default-constructibility.
+
+    The symbol audit proves ``T()`` by compiling it, but only on host builds:
+    cross-target scans (``--target=``) skip it, so an implicitly *deleted*
+    default ctor leaks into the wrappers there (e.g. ``BRepGraph_FacesOfEdge``,
+    whose ``EdgeParentsOf`` base declares no default ctor: its wrapper's
+    ``_native()`` member init does not compile on arm-linux).  Mirror the audit
+    with a pure structural check: a class that declares no ctor at all relies
+    on the implicit default ctor, which C++ deletes when a direct base or a
+    data member is itself not default-constructible (or a member is a
+    reference).
+
+    ``as_base`` captures the access context of the call: a class's implicit
+    default ctor may call the *protected* default ctor of a direct base (OCCT
+    entity interfaces like ``IGESData_IGESEntity`` / ``TPrsStd_Driver`` keep a
+    protected ctor, so their leaf subclasses remain default-constructible), but
+    only *public* ctors of data members.
+
+    Conservative by design: anything unresolvable (dependent types, unions,
+    non-record types, cycles) is assumed constructible, so a genuinely
+    constructible class is never flipped.
+    """
+    if decl is None or not decl.is_definition():
+        return True
+    if decl.kind in (CursorKind.CLASS_DECL, CursorKind.CLASS_TEMPLATE,
+                     CursorKind.STRUCT_DECL):
+        ctors = [c for c in decl.get_children()
+                 if c.kind == CursorKind.CONSTRUCTOR]
+        if ctors:
+            # The primary template declares the ctors every specialization
+            # (apart from explicit specializations, which OCCT does not use
+            # here) inherits; a usable default ctor is exactly one that can be
+            # called with no arguments.
+            for c in ctors:
+                if not _ctor_default_usable(c):
+                    continue
+                if c.access_specifier == AccessSpecifier.PUBLIC:
+                    return True
+                if as_base and c.access_specifier == AccessSpecifier.PROTECTED:
+                    return True
+            return False
+    else:
+        return True  # unions and other kinds: assume constructible
+    # No declared ctor: the implicit default ctor exists iff every direct base
+    # and every data member keeps it usable.
+    try:
+        key = (decl.location.file.name, decl.extent.start.offset)
+    except Exception:
+        key = None
+    if key is not None:
+        if key in seen:
+            return True  # cycle guard: assume constructible
+        seen.add(key)
+    try:
+        for child in decl.get_children():
+            if child.kind == CursorKind.CXX_BASE_SPECIFIER:
+                if not _record_default_constructible(
+                        _record_decl_for_type(child.type, tu_root, defs),
+                        tu_root, defs, seen, as_base=True):
+                    return False
+            elif child.kind == CursorKind.FIELD_DECL:
+                if child.type.kind in (TypeKind.LVALUEREF, TypeKind.RVALUEREF):
+                    return False
+                if not _record_default_constructible(
+                        _record_decl_for_type(child.type, tu_root, defs),
+                        tu_root, defs, seen, as_base=False):
+                    return False
+    except Exception:
+        return True
+    return True
+
+
+def _class_implicit_default_usable(cursor: Cursor, tu_root: Cursor | None,
+                                   defs: dict[str, Cursor | None]) -> bool:
+    """True when a class declaring no ctor at all still has a usable implicit
+    default ctor (no direct base or data member deletes it)."""
+    seen: set[tuple] = set()
+    try:
+        for child in cursor.get_children():
+            if child.kind == CursorKind.CXX_BASE_SPECIFIER:
+                if not _record_default_constructible(
+                        _record_decl_for_type(child.type, tu_root, defs),
+                        tu_root, defs, seen, as_base=True):
+                    return False
+            elif child.kind == CursorKind.FIELD_DECL:
+                if child.type.kind in (TypeKind.LVALUEREF, TypeKind.RVALUEREF):
+                    return False
+                if not _record_default_constructible(
+                        _record_decl_for_type(child.type, tu_root, defs),
+                        tu_root, defs, seen, as_base=False):
+                    return False
+    except Exception:
+        return True
+    return True
+
+
 def _extract_enum(cursor: Cursor, header: str, parent: str = "") -> EnumDecl | None:
     name = cursor.spelling or ""
     if not name or name.startswith("("):
@@ -579,6 +718,13 @@ def _extract_class(cursor: Cursor, header: str,
         _has_explicit_noncopyable(cursor)
         or any("unique_ptr" in f.type.base_name for f in cls.fields)
         or any(_field_has_deleted_copy_assignment(f) for f in cls.fields))
+    if not cls.has_any_ctor and not cls.has_public_default_ctor:
+        # No declared ctor: the implicit default ctor is deleted when a direct
+        # base or a data member blocks it (libclang reports nothing for a
+        # deleted implicit default ctor).  Without this the symbol audit is the
+        # only thing catching it, and cross-target scans skip the audit.
+        cls.has_usable_implicit_default_ctor = _class_implicit_default_usable(
+            cursor, tu_root, defs)
     try:
         cls.is_abstract = bool(cursor.is_abstract_record())
     except Exception:

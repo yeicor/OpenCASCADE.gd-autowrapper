@@ -6,6 +6,7 @@ import argparse
 import enum
 import json
 import logging
+import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -21,6 +22,16 @@ from .scanner import ModuleScanResult, scan_module, to_dict
 SUBMODULE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SUBMODULE_DIR.parent
 DEFAULT_COMPILE_DB = PROJECT_ROOT / ".build-autowrapper" / "compile_commands.json"
+
+
+def _default_jobs() -> int:
+    """Default scan parallelism: one worker per core, capped at 8.
+
+    Each worker is a separate libclang process parsing large OCCT headers, so
+    oversubscribing beyond the core count (e.g. the old hard-coded 8 on 4-core
+    CI runners) doubles peak memory without speeding anything up.
+    """
+    return max(1, min(os.cpu_count() or 4, 8))
 
 
 def _count_metrics(result: ModuleScanResult) -> None:
@@ -353,14 +364,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p_scan = sub.add_parser("scan", help="scan one OCCT module into IR JSON")
     p_scan.add_argument("--module", default="Standard")
-    p_scan.add_argument("--jobs", type=int, default=8)
+    p_scan.add_argument("--jobs", type=int, default=_default_jobs())
     p_scan.add_argument("--out", type=Path,
                         default=SUBMODULE_DIR / "out" / "ir" / "Standard.json")
     p_scan.add_argument("--compile-db", type=Path, default=DEFAULT_COMPILE_DB)
     p_scan.set_defaults(func=cmd_scan)
 
     p_scan_all = sub.add_parser("scan-all", help="scan every OCCT module into out/ir/*.json")
-    p_scan_all.add_argument("--jobs", type=int, default=8)
+    p_scan_all.add_argument("--jobs", type=int, default=_default_jobs())
     p_scan_all.add_argument("--out", type=Path, default=SUBMODULE_DIR / "out" / "ir")
     p_scan_all.add_argument("--compile-db", type=Path, default=DEFAULT_COMPILE_DB)
     p_scan_all.set_defaults(func=cmd_scan_all)

@@ -213,6 +213,12 @@ class ClassDecl:
     doc: DocBlock = field(default_factory=DocBlock)
     extra_occt_includes: list[str] = field(default_factory=list)  # OCCT headers this class's own header needs but doesn't include
     has_public_default_ctor: bool = False
+    # For classes that declare NO ctor at all: True when the *implicit* default
+    # ctor is usable (scan-time structural check).  Set False when a direct
+    # base or a data member deletes it (e.g. a base template without a default
+    # ctor, or a reference member); such classes must fall back to unique_ptr
+    # storage on every target, not just the ones the symbol audit probes.
+    has_usable_implicit_default_ctor: bool = True
     has_any_ctor: bool = False        # True if the class declares any ctor (even private)
     has_any_public_ctor: bool = False      # True if the class declares a public ctor
     has_any_nonpublic_ctor: bool = False   # True if the class declares a private/protected ctor

@@ -86,6 +86,8 @@ def _class(d: dict) -> M.ClassDecl:
         doc=M.DocBlock(**(d.get("doc") or {})),
         extra_occt_includes=list(d.get("extra_occt_includes", [])),
         has_public_default_ctor=d.get("has_public_default_ctor", False),
+        has_usable_implicit_default_ctor=d.get(
+            "has_usable_implicit_default_ctor", True),
         has_any_ctor=d.get("has_any_ctor", False),
         has_any_public_ctor=d.get("has_any_public_ctor", False),
         has_any_nonpublic_ctor=d.get("has_any_nonpublic_ctor", False),
@@ -194,6 +196,7 @@ def _class_out(c: M.ClassDecl) -> dict:
         "header_file": c.header_file,
         "extra_occt_includes": c.extra_occt_includes,
         "has_public_default_ctor": c.has_public_default_ctor,
+        "has_usable_implicit_default_ctor": c.has_usable_implicit_default_ctor,
         "has_any_ctor": c.has_any_ctor,
         "has_any_public_ctor": c.has_any_public_ctor,
         "has_any_nonpublic_ctor": c.has_any_nonpublic_ctor,

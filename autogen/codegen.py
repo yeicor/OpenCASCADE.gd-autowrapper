@@ -320,6 +320,10 @@ def _default_constructible(cls: ClassDecl) -> bool:
     `cls.default_constructible` overrides the heuristic when the symbol audit
     proved `T()` ill-formed (the probe compiled `(void)T();` and the compiler
     rejected it); such classes must fall back to unique_ptr storage.
+    `cls.has_usable_implicit_default_ctor` is the scan-time structural twin:
+    it is False when a base or data member deletes the implicit default ctor
+    of a class that declares none (cross-target scans skip the audit, so the
+    probe never runs there).
     """
     if cls.default_constructible is not None:
         return cls.default_constructible
@@ -328,7 +332,8 @@ def _default_constructible(cls: ClassDecl) -> bool:
     # members are still extracted; either signal forbids value storage.
     if cls.is_abstract or cls.has_pure_virtual:
         return False  # cannot value-initialize an abstract type
-    return cls.has_public_default_ctor or not cls.has_any_ctor
+    return (cls.has_public_default_ctor
+            or (not cls.has_any_ctor and cls.has_usable_implicit_default_ctor))
 
 
 def _uses_stdalloc(cls: ClassDecl, ctx: tm.TypeContext) -> bool:
@@ -1977,6 +1982,10 @@ def generate_callable_streams_hpp() -> str:
 #include <godot_cpp/variant/callable.hpp>
 #include <godot_cpp/variant/string.hpp>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 #include <istream>
 #include <locale>
 #include <ostream>
@@ -1992,7 +2001,14 @@ namespace occt_gd {
 // and is never freed through the wrong allocator.
 inline void OcgPinInterposedLocale(const std::locale &p_replaced) {
     const void *const impl = *(const void *const *)&p_replaced;
-    __atomic_fetch_add(static_cast<int *>(const_cast<void *>(impl)), 1, __ATOMIC_ACQ_REL);
+    int *const refcount = static_cast<int *>(const_cast<void *>(impl));
+#if defined(_MSC_VER)
+    // MSVC has no GCC `__atomic_*` builtins; _InterlockedExchangeAdd is the
+    // same 32-bit fetch-add on the _Atomic_word (Windows long == int).
+    _InterlockedExchangeAdd(reinterpret_cast<volatile long *>(refcount), 1);
+#else
+    __atomic_fetch_add(refcount, 1, __ATOMIC_ACQ_REL);
+#endif
 }
 
 class OcgCallableOStream final : public std::ostream {
