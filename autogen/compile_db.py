@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from clang.cindex import CompilationDatabase, CursorKind, Diagnostic, Index
+from clang.cindex import CompilationDatabase, CursorKind, Index
 
 
 def find_resource_dir() -> str | None:
@@ -52,34 +52,32 @@ def find_resource_dir() -> str | None:
 
 
 def _cxx_stdlib_dirs(resource_dir: str | None = None) -> list[str]:
-    """Verified C++ standard library include dirs (each contains `<type_traits>`).
+    """Coherent C++ standard library include dirs (each contains `<type_traits>`).
 
-    libclang's driver normally synthesizes the C++ stdlib include path from the
-    parse target, but on some runners (macOS with pip-installed libclang
-    bindings) that synthesis is missing and the first OCCT header including a
-    stdlib header fails with ``'type_traits' file not found``.  These dirs are
-    the explicit `-isystem` candidates that restore the resolution, derived
-    from the macOS SDK, the resource dir's libc++ sibling, common LLVM
-    installs, and the C++ compiler's own include search list.
+    libclang's driver cannot be relied on to synthesize the C++ stdlib include
+    path: parsing the very same args leaves ``<type_traits>`` unresolved on
+    every host (the "type_traits always failed" failure, visible on all of the
+    platform runners) even though a full toolchain is installed.  The scan
+    therefore always passes these dirs explicitly as `-isystem`.
+
+    The set is the host C++ compiler's own include search list (authoritative,
+    internally coherent, single version -- exactly what the driver itself is
+    *supposed* to emit), with macOS SDK libc++, the resource dir's libc++
+    sibling, common LLVM installs, and the newest single libstdc++ install as
+    fallbacks.  Namespace sub-dirs (experimental/tr1/tr2/backward) are rejected
+    because adding them standalone is useless (experimental/type_traits is not
+    a root) and ordering them before the real root can shadow it.
     """
-    found: dict[str, None] = {}
     marker = ("type_traits", "bits/c++config.h")
-    # Namespace sub-dirs of a stdlib include root; adding them standalone is
-    # useless (experimental/type_traits is not a root) and ordering them before
-    # the real root can shadow it.
     _namespace_subdirs = ("experimental", "tr1", "tr2", "backward")
 
-    def add(d: str | Path | None) -> None:
-        if not d:
-            return
-        d = str(d)
-        if Path(d).name in _namespace_subdirs:
-            return
-        if any((Path(d) / m).is_file() for m in marker):
-            found[d] = None
+    def valid(d: str) -> bool:
+        p = Path(d)
+        return (p.name not in _namespace_subdirs
+                and any((p / m).is_file() for m in marker))
 
-    # The compiler's own include search list is the authoritative, coherent
-    # set (the driver's default C++ search); prefer it over glob heuristics.
+    # The compiler's own C++ include search list is the authoritative, coherent
+    # set (single libstdc++/libc++ version plus its arch sub-dir).
     for comp in (os.environ.get("CXX"), "clang++", "c++", "g++", "xcrun clang++"):
         if not comp:
             continue
@@ -90,51 +88,55 @@ def _cxx_stdlib_dirs(resource_dir: str | None = None) -> list[str]:
             continue
         m = re.search(r"#include <\.\.\.> search starts here:\n(.*?)End of search list",
                       out.stderr + out.stdout, re.S)
-        if m:
-            for line in m.group(1).splitlines():
-                add(line.strip())
+        if not m:
+            continue
+        dirs = [ln.strip() for ln in m.group(1).splitlines()]
+        dirs = [d for d in dict.fromkeys(dirs) if valid(d)]
+        if dirs:
+            return dirs
+    # macOS SDK libc++ (`xcrun --show-sdk-path`).
     try:
         sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True,
                              text=True, timeout=30)
         if sdk.returncode == 0 and sdk.stdout.strip():
-            add(Path(sdk.stdout.strip()) / "usr" / "include" / "c++" / "v1")
+            d = str(Path(sdk.stdout.strip()) / "usr" / "include" / "c++" / "v1")
+            if valid(d):
+                return [d]
     except (OSError, subprocess.SubprocessError):
         pass
+    # libc++ shipped beside a clang resource dir: lib/clang/XX/include -> prefix.
     if resource_dir:
-        rd = Path(resource_dir)
-        add(rd.parents[2] / "include" / "c++" / "v1")  # lib/clang/XX/include -> prefix
+        d = str(Path(resource_dir).parents[2] / "include" / "c++" / "v1")
+        if valid(d):
+            return [d]
     for pat in ("/opt/homebrew/opt/llvm/include/c++/v1",
                 "/usr/local/opt/llvm/include/c++/v1",
                 "/opt/homebrew/include/c++/v1",
                 "/usr/local/include/c++/v1"):
-        add(pat)
+        if valid(pat):
+            return [pat]
+    # Newest single libstdc++ install (never mix versions), with its arch
+    # sub-dir.  Version-tagged dirs are sorted; the highest one wins.
+    roots: list[Path] = []
     for p in glob.glob("/usr/lib/gcc/*/*/include/c++/*"):
-        add(p)
+        roots.append(Path(p))
     for p in glob.glob("/usr/include/c++/*"):
-        add(p)
-    for p in glob.glob("/usr/include/*-linux-gnu/c++/*"):
-        add(p)
-    for p in glob.glob("/usr/lib/gcc/*/*/include/c++/*/*"):
-        add(p)
-    for p in glob.glob("/usr/include/c++/*/*"):
-        add(p)
-    return list(found)
+        roots.append(Path(p))
+    version_roots = [r for r in roots if (r / "type_traits").is_file()]
+    if version_roots:
+        version_roots.sort(key=lambda r: _version_key(r.name), reverse=True)
+        root = version_roots[0]
+        out = [str(root)]
+        out += [str(q) for q in sorted(root.glob("*"))
+                if q.is_dir() and (q / "bits" / "c++config.h").is_file()]
+        return out
+    return []
 
 
-def _stl_resolves(args: list[str]) -> bool:
-    """True if libclang can resolve `<type_traits>` with `args`."""
-    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w",
-                                     delete=False) as f:
-        f.write("#include <type_traits>\nint x;\n")
-        tmp_path = f.name
-    try:
-        tu = Index.create().parse(tmp_path, args=args + ["-x", "c++"])
-        return not any(d.severity >= Diagnostic.Error for d in tu.diagnostics)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+def _version_key(name: str) -> tuple[int, ...]:
+    """Sortable numeric tuple for a version like ``16`` or ``15.3.0``."""
+    nums = [int(x) for x in name.split(".") if x.isdigit()]
+    return tuple(nums) or (0,)
 
 
 def _android_sysroot() -> Path | None:
@@ -417,20 +419,17 @@ def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:
     rd = find_resource_dir()
     if rd and not any(a.startswith("-resource-dir") for a in out):
         out.append(f"-resource-dir={rd}")
-    # C++ standard library resolution: libclang's driver usually synthesizes
-    # the stdlib include path from the parse target, but on runners where that
-    # fails (macOS with pip-installed libclang bindings) every OCCT header
+    # C++ standard library resolution.  libclang's driver cannot be relied on
+    # to synthesize the C++ stdlib include path: it leaves `<type_traits>`
+    # unresolved on every host, so the located stdlib include dirs are injected
+    # unconditionally (see _cxx_stdlib_dirs).  Without them every OCCT header
     # including a stdlib header breaks with "'type_traits' file not found".
-    # Probe the actual args and, only when the stdlib is genuinely unresolved,
-    # add the located stdlib include dirs as -isystem (never on healthy hosts).
-    # Each dir is added one at a time, re-probing after each so only the
-    # minimal coherent set is kept (mixing e.g. libstdc++ 15 + 16 dirs would
-    # otherwise leave the parse even more broken than before).
-    if not _stl_resolves(out):
+    # Cross targets (android/wasm/32-bit) carry their own libc++ in the sysroot
+    # and must not inherit the host's libstdc++/libc++ headers.
+    if not _triplet_target_args(triplet):
         for d in _cxx_stdlib_dirs(rd):
-            if any(a == d for a in out):
-                continue
-            out += ["-isystem", d]
-            if _stl_resolves(out):
-                break
+            if not any(a == f"-isystem={d}" for a in out) and not any(
+                    out[i] == "-isystem" and i + 1 < len(out) and out[i + 1] == d
+                    for i in range(len(out))):
+                out += ["-isystem", d]
     return out
