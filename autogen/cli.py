@@ -286,6 +286,12 @@ def cmd_regenerate(args: argparse.Namespace) -> int:
 
     missing = Path(args.missing_acc)
     illformed = Path(args.illformed_acc)
+    # The accumulators live under out/audit/, which is gitignored and may not
+    # exist on a fresh checkout; create it before the first write (the
+    # generate/audit subprocesses create their own dirs, but these writes
+    # happen before they run).
+    missing.parent.mkdir(parents=True, exist_ok=True)
+    illformed.parent.mkdir(parents=True, exist_ok=True)
     missing.write_text("")
     illformed.write_text("")
     wrapper_out = Path(args.out)

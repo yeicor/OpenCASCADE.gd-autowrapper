@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from clang.cindex import CompilationDatabase, CursorKind, Index
+from clang.cindex import CompilationDatabase, CursorKind, Diagnostic, Index
 
 
 def find_resource_dir() -> str | None:
@@ -49,6 +49,92 @@ def find_resource_dir() -> str | None:
         if c and (Path(c) / "include" / "stddef.h").exists():
             return c
     return None
+
+
+def _cxx_stdlib_dirs(resource_dir: str | None = None) -> list[str]:
+    """Verified C++ standard library include dirs (each contains `<type_traits>`).
+
+    libclang's driver normally synthesizes the C++ stdlib include path from the
+    parse target, but on some runners (macOS with pip-installed libclang
+    bindings) that synthesis is missing and the first OCCT header including a
+    stdlib header fails with ``'type_traits' file not found``.  These dirs are
+    the explicit `-isystem` candidates that restore the resolution, derived
+    from the macOS SDK, the resource dir's libc++ sibling, common LLVM
+    installs, and the C++ compiler's own include search list.
+    """
+    found: dict[str, None] = {}
+    marker = ("type_traits", "bits/c++config.h")
+    # Namespace sub-dirs of a stdlib include root; adding them standalone is
+    # useless (experimental/type_traits is not a root) and ordering them before
+    # the real root can shadow it.
+    _namespace_subdirs = ("experimental", "tr1", "tr2", "backward")
+
+    def add(d: str | Path | None) -> None:
+        if not d:
+            return
+        d = str(d)
+        if Path(d).name in _namespace_subdirs:
+            return
+        if any((Path(d) / m).is_file() for m in marker):
+            found[d] = None
+
+    # The compiler's own include search list is the authoritative, coherent
+    # set (the driver's default C++ search); prefer it over glob heuristics.
+    for comp in (os.environ.get("CXX"), "clang++", "c++", "g++", "xcrun clang++"):
+        if not comp:
+            continue
+        try:
+            cmd = comp.split() + ["-E", "-x", "c++", "-v", "/dev/null"]
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        m = re.search(r"#include <\.\.\.> search starts here:\n(.*?)End of search list",
+                      out.stderr + out.stdout, re.S)
+        if m:
+            for line in m.group(1).splitlines():
+                add(line.strip())
+    try:
+        sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True,
+                             text=True, timeout=30)
+        if sdk.returncode == 0 and sdk.stdout.strip():
+            add(Path(sdk.stdout.strip()) / "usr" / "include" / "c++" / "v1")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if resource_dir:
+        rd = Path(resource_dir)
+        add(rd.parents[2] / "include" / "c++" / "v1")  # lib/clang/XX/include -> prefix
+    for pat in ("/opt/homebrew/opt/llvm/include/c++/v1",
+                "/usr/local/opt/llvm/include/c++/v1",
+                "/opt/homebrew/include/c++/v1",
+                "/usr/local/include/c++/v1"):
+        add(pat)
+    for p in glob.glob("/usr/lib/gcc/*/*/include/c++/*"):
+        add(p)
+    for p in glob.glob("/usr/include/c++/*"):
+        add(p)
+    for p in glob.glob("/usr/include/*-linux-gnu/c++/*"):
+        add(p)
+    for p in glob.glob("/usr/lib/gcc/*/*/include/c++/*/*"):
+        add(p)
+    for p in glob.glob("/usr/include/c++/*/*"):
+        add(p)
+    return list(found)
+
+
+def _stl_resolves(args: list[str]) -> bool:
+    """True if libclang can resolve `<type_traits>` with `args`."""
+    with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w",
+                                     delete=False) as f:
+        f.write("#include <type_traits>\nint x;\n")
+        tmp_path = f.name
+    try:
+        tu = Index.create().parse(tmp_path, args=args + ["-x", "c++"])
+        return not any(d.severity >= Diagnostic.Error for d in tu.diagnostics)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _android_sysroot() -> Path | None:
@@ -331,4 +417,20 @@ def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:
     rd = find_resource_dir()
     if rd and not any(a.startswith("-resource-dir") for a in out):
         out.append(f"-resource-dir={rd}")
+    # C++ standard library resolution: libclang's driver usually synthesizes
+    # the stdlib include path from the parse target, but on runners where that
+    # fails (macOS with pip-installed libclang bindings) every OCCT header
+    # including a stdlib header breaks with "'type_traits' file not found".
+    # Probe the actual args and, only when the stdlib is genuinely unresolved,
+    # add the located stdlib include dirs as -isystem (never on healthy hosts).
+    # Each dir is added one at a time, re-probing after each so only the
+    # minimal coherent set is kept (mixing e.g. libstdc++ 15 + 16 dirs would
+    # otherwise leave the parse even more broken than before).
+    if not _stl_resolves(out):
+        for d in _cxx_stdlib_dirs(rd):
+            if any(a == d for a in out):
+                continue
+            out += ["-isystem", d]
+            if _stl_resolves(out):
+                break
     return out
