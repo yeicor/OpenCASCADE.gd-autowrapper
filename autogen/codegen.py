@@ -702,6 +702,9 @@ def _method_skip_reason(cls: ClassDecl, method: MethodDecl,
         return "exception diagnostic method (no native storage)"
     if method.name in _ITERATOR_PROTOCOL_METHODS:
         return "container iterator protocol (begin/end)"
+    if cls.name.startswith("IntPolyh_Array") and method.name == "Dump":
+        return ("ill-formed instantiation (OCCT member does not compile for "
+                "the substituted template args)")
     bad = _first_unmappable(cls, method, ctx,
                             is_ctor=method.kind == MethodKind.CONSTRUCTOR)
     if bad is not None:
@@ -713,6 +716,13 @@ def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
                            ctx: tm.TypeContext) -> str | None:
     if cls.kind == ClassKind.EXCEPTION \
             and _exception_method_kind(cls, method) is None:
+        return None
+    if cls.name.startswith("IntPolyh_Array") and method.name == "Dump":
+        # IntPolyh_Array<T>::Dump() calls (*this)[i].Dump() inside its body, so
+        # instantiating it fails when the item type declares no no-argument
+        # Dump (IntPolyh_Edge/IntPolyh_Triangle take an int, IntPolyh_PointNormal
+        # has none).  Skip it deterministically (the audit probe cannot run on
+        # every CI target, and this debug-only dump has no FFI value).
         return None
     params = _params_decl(method, ctx, cls)
     if params is None:
@@ -983,6 +993,9 @@ def generate_class_hpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
                 out.append("")
             out.extend(sigs)
             emitted = True
+    if cg.storage == "handle" and not any(m.name == "is_null" for m in cls.all_methods):
+        out.append("    bool is_null() const;")
+        emitted = True
     field_decls = _field_accessor_decls(cls, ctx)
     if field_decls:
         out.extend(field_decls)
@@ -1611,6 +1624,7 @@ def _method_property_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
 
 def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
     out: list[str] = []
+    cg = _cg(cls, ctx)
     for ctor in cls.constructors:
         if ctor.skip or _default_ctor(ctor):
             continue
@@ -1636,6 +1650,10 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
                 f"    ClassDB::bind_method(D_METHOD(\"{unique}\""
                 f'{", " + args if args else ""}), '
                 f"&{cls.wrapper_name}::{unique}{defv});")
+    if cg.storage == "handle" and not any(m.name == "is_null" for m in cls.all_methods):
+        out.append(
+            f'    ClassDB::bind_method(D_METHOD("is_null"), '
+            f"&{cls.wrapper_name}::is_null);")
     for child in _inherited_children(cls, ctx):
         out.append(
             f'    ClassDB::bind_static_method("{cls.wrapper_name}", '
@@ -1745,6 +1763,14 @@ def generate_class_cpp(cls: ClassDecl, ctx: tm.TypeContext) -> str:
             m.skip_reason = _method_skip_reason(cls, m, ctx)
             continue
         out.append(body)
+        out.append("")
+    if cg.storage == "handle" and not any(m.name == "is_null" for m in cls.all_methods):
+        out.append(f"bool {cls.wrapper_name}::is_null() const {{")
+        out.append("    try {")
+        out.append("        OCC_CATCH_SIGNALS")
+        out.append("        return _handle.IsNull();")
+        out.append("    } OCCT_GUARD_CATCH({});")
+        out.append("}")
         out.append("")
     out.extend(_inherited_cast_bodies(cls, ctx))
     out.extend(_field_accessor_bodies(cls, ctx))

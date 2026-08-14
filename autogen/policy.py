@@ -131,6 +131,14 @@ METHOD_SKIP_POLICIES: dict[str, SkipPolicy] = {
         "Parameterized constructors of abstract classes are dropped because "
         "the class cannot be constructed; closes together with abstract-class "
         "support (see CLASS_SKIP_POLICIES)."),
+    "ill-formed instantiation (OCCT member does not compile for the "
+    "substituted template args)": SkipPolicy(
+        "accepted",
+        "A class-template member that is ill-formed for the substituted "
+        "arguments (e.g. IntPolyh_Array<T>::Dump calling (*this)[i].Dump() "
+        "when the item type has no no-argument Dump). The API itself is "
+        "unusable, so the method is dropped; matches out/audit/illformed.txt "
+        "and the class-level policy of the same name."),
 }
 
 

@@ -35,6 +35,13 @@ PRIMITIVE_MAP: dict[str, tuple[str, str]] = {
     "long double": ("double", "FLOAT"),
 }
 
+# Canonical builtins that a `size_t` parameter canonicalizes to on the parse
+# host (LP64: `unsigned long`; LLP64: `unsigned long long`).  Both map to the
+# wrapper's `uint64_t`, but on 32-bit targets `size_t` is narrower, so calls
+# must cast back to `size_t` to stay exact and unambiguous (see cpp_param).
+_SIZE_DERIVED_BUILTINS: frozenset[str] = frozenset(
+    {"unsigned long", "unsigned long long"})
+
 # Non-const reference out-parameters of these canonical types become small
 # RefCounted box classes (see OcgPrimitiveWrappers.hpp).
 PRIMITIVE_WRAPPER_MAP: dict[str, tuple[str, str]] = {
@@ -555,8 +562,20 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
         return _cpp_pointer_param(t, name, ctx)
     if t.base_name in PRIMITIVE_MAP:
         cpp, gd = primitive_entry(t.base_name, ctx)
+        call_expr = _rw(move, name)
+        if cpp == "uint64_t" and t.base_name in _SIZE_DERIVED_BUILTINS:
+            # OCCT container index/count parameters are `size_t` (V8 switched
+            # NCollection indexes to `size_t`).  The parse host canonicalizes
+            # `size_t` to `unsigned long` (LP64) or `unsigned long long`
+            # (LLP64), both mapped to `uint64_t` in the wrapper, but on 32-bit
+            # targets `size_t` is 32-bit: a bare `uint64_t` argument is then
+            # ambiguous between the `size_t` and `int` overloads (MSVC C2668).
+            # `static_cast<size_t>` selects the exact OCCT type on every
+            # target (32-bit size_t -> unsigned long, 64-bit size_t ->
+            # unsigned long long) and keeps the call unambiguous.
+            call_expr = f"static_cast<size_t>({call_expr})"
         return ParamConv(cpp_type=cpp, gd_type=gd, name=name,
-                         call_expr=_rw(move, name))
+                         call_expr=call_expr)
     if t.is_handle and t.handle_inner in ctx.wrapped \
             and ctx.wrapped[t.handle_inner] in ctx.handles:
         w = ctx.wrapped[t.handle_inner]
