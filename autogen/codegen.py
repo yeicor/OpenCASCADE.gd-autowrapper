@@ -1434,6 +1434,14 @@ _NUMERIC_DEFVAL_TYPES = {
     "unsigned long", "unsigned long long", "char16_t", "float", "double",
 }
 
+# Mapped cpp types that Variant constructs unambiguously from; defaults for
+# numeric params are cast to these to avoid overload ambiguity on targets where
+# the OCCT type and its mapping differ (e.g. Standard_Size = unsigned long on
+# LP64 Apple vs mapped uint64_t = unsigned long long).
+PRIMITIVE_MAP_CXX_TYPES = frozenset(
+    {"bool", "int8_t", "int16_t", "int32_t", "int64_t",
+     "uint8_t", "uint16_t", "uint32_t", "uint64_t", "float", "double"})
+
 _CXX_KEYWORDS = frozenset({"true", "false", "nullptr"})
 
 # A conservative grammar for the numeric/bool literals godot-cpp's `DEFVAL`
@@ -1504,6 +1512,16 @@ def _defval_suffix(cls: ClassDecl, method: MethodDecl, ctx: tm.TypeContext) -> s
             # Dropping the clause is compile-safe: the trailing argument simply
             # becomes required.
             break
+        # Cast the default to the mapped cpp parameter type.  OCCT's Standard_Size
+        # is `unsigned long` on LP64 targets, but the wrapper's parameter is the
+        # mapped `uint64_t` (`unsigned long long` on Apple), so a bare
+        # `DEFVAL(NCollection_AccAllocator::DefaultBlockSize)` is ambiguous
+        # between the int64_t/uint64_t Variant constructors (arm64-ios C2668-
+        # style error).  An explicit cast selects exactly one Variant ctor while
+        # keeping the same value.
+        conv = tm.cpp_param(p.type, p.name, ctx, cls)
+        if conv is not None and conv.cpp_type in PRIMITIVE_MAP_CXX_TYPES:
+            cleaned = f"static_cast<{conv.cpp_type}>({cleaned})"
         parts.append(f"DEFVAL({cleaned})")
     if not parts:
         return ""
