@@ -469,6 +469,8 @@ def _type_wrapper(t: OCCTType, ctx: tm.TypeContext) -> str | None:
     if inner is not None:
         base = inner
     key = tm._wrapped_key(base, ctx)
+    if key is None and base.rstrip().endswith("*"):
+        key = tm._wrapped_key(base.rstrip()[:-1].rstrip(), ctx)
     if key is not None:
         return ctx.wrapped[key]
     return None
