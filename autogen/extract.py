@@ -1,9 +1,10 @@
 """AST extraction: classes, enums, typedefs, methods, fields from a TU.
 
 Clean extraction driven by the libclang Type API; no source-text
-mis-resolution heuristics.  The only source-text readers are (a) field access
-recovery (libclang's access_specifier is unreliable for OCCT class bodies) and
-(b) token-extent default-argument recovery (libclang does not expose defaults).
+mis-resolution heuristics.  The only source-text reader is token-extent
+default-argument recovery (libclang does not expose defaults).  Field access
+is tracked from CXX_ACCESS_SPEC_DECL decls, which are exact, because the
+field-level access_specifier is unreliable for OCCT class bodies.
 """
 
 from __future__ import annotations
@@ -292,107 +293,6 @@ def _extract_constructor(cursor: Cursor, class_name: str) -> MethodDecl | None:
 
 
 # ---------------------------------------------------------------------------
-# Field access recovery (libclang's access_specifier is unreliable for OCCT)
-# ---------------------------------------------------------------------------
-
-_ACCESS_LABELS = ("public", "protected", "private")
-
-
-def _read_header(file_name: str) -> str:
-    try:
-        with open(file_name, "r", errors="replace") as fh:
-            return fh.read()
-    except OSError:
-        return ""
-
-
-def _class_body_access(source: str, start: int, end: int) -> dict[int, str] | None:
-    open_brace = source.find("{", start, end)
-    if open_brace < 0:
-        return None
-    access: str | None = None
-    changes: dict[int, str] = {}
-    depth = 0
-    i = open_brace
-    n = len(source)
-    line = source.count("\n", 0, open_brace) + 1
-    while i < n and i <= end:
-        ch = source[i]
-        if ch == "\n":
-            line += 1
-            i += 1
-            continue
-        if source.startswith("//", i):
-            nl = source.find("\n", i, end)
-            if nl < 0:
-                break
-            line += 1
-            i = nl + 1
-            continue
-        if source.startswith("/*", i):
-            close = source.find("*/", i + 2, end)
-            if close < 0:
-                break
-            line += source.count("\n", i, close + 2)
-            i = close + 2
-            continue
-        if source.startswith('"', i) or source.startswith("'", i):
-            quote = source[i]
-            j = i + 1
-            while j < n and j <= end:
-                if source[j] == "\\":
-                    j += 2
-                    continue
-                if source[j] == quote:
-                    break
-                if source[j] == "\n":
-                    line += 1
-                j += 1
-            line += source.count("\n", i, j + 1)
-            i = j + 1
-            continue
-        if ch == "{":
-            depth += 1
-            i += 1
-            continue
-        if ch == "}":
-            depth -= 1
-            i += 1
-            continue
-        if depth == 1:
-            for label in _ACCESS_LABELS:
-                if source.startswith(label + ":", i) and (
-                        i == 0 or not (source[i - 1].isalnum() or source[i - 1] == "_")):
-                    access = label
-                    changes[line] = label
-                    i += len(label) + 1
-                    break
-            else:
-                i += 1
-            continue
-        i += 1
-    return changes
-
-
-def _field_is_public(field: Cursor, changes: dict[int, str] | None) -> bool | None:
-    if changes is None:
-        return None
-    try:
-        fline = field.location.line
-    except Exception:
-        return None
-    best = None
-    best_line = -1
-    for line, label in changes.items():
-        if line <= fline and line > best_line:
-            best = label
-            best_line = line
-    if best is None:
-        return None
-    return best == "public"
-
-
-# ---------------------------------------------------------------------------
 # Extraction
 # ---------------------------------------------------------------------------
 
@@ -651,19 +551,18 @@ def _extract_class(cursor: Cursor, header: str,
         is_template=cursor.kind == CursorKind.CLASS_TEMPLATE,
         header_file=header, doc=_doc(cursor),
     )
-    source = ""
-    changes: dict[int, str] | None = None
-    try:
-        fname = cursor.location.file.name
-        source = _read_header(fname)
-        if source:
-            changes = _class_body_access(source, cursor.extent.start.offset,
-                                         cursor.extent.end.offset)
-    except Exception:
-        changes = None
+    # Track the access level from the class's access-specifier cursors.  The
+    # field-level `access_specifier` is unreliable (libclang reports e.g.
+    # `Bnd_Box::Xmin`, declared under `private:`, as public), so the current
+    # region is maintained from CXX_ACCESS_SPEC_DECL decls, which are exact.
+    current_access = ("public" if cursor.kind == CursorKind.STRUCT_DECL
+                      else "private")
 
     for child in cursor.get_children():
         kind = child.kind
+        if kind == CursorKind.CXX_ACCESS_SPEC_DECL:
+            current_access = str(child.access_specifier).replace(
+                "AccessSpecifier.", "").lower()
         if kind == CursorKind.DESTRUCTOR:
             if child.access_specifier != AccessSpecifier.PUBLIC:
                 cls.has_protected_dtor = True
@@ -699,9 +598,7 @@ def _extract_class(cursor: Cursor, header: str,
                 else:
                     cls.methods.append(method)
         elif kind == CursorKind.FIELD_DECL:
-            is_public = _field_is_public(child, changes)
-            if is_public is None:
-                is_public = child.access_specifier == AccessSpecifier.PUBLIC
+            is_public = current_access == "public"
             cls.fields.append(FieldDecl(name=child.spelling,
                                         type=make_type(child.type),
                                         doc=_doc(child), is_public=is_public,
