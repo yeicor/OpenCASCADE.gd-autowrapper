@@ -669,6 +669,22 @@ def _exception_method_body(cls: ClassDecl, method: MethodDecl,
 _ITERATOR_PROTOCOL_METHODS = frozenset(
     {"begin", "end", "cbegin", "cend", "rbegin", "rend", "crbegin", "crend"})
 
+# NCollection_Vec{2,3,4}<unsigned int/long/long long>::cwiseAbs() is ill-formed:
+# its body calls std::abs on the unsigned element type, and no std::abs
+# overload exists for unsigned integer types, so the call is ambiguous
+# (libc++/libstdc++/MSVC all reject it).  The symbol-audit probe drops it on
+# hosts that provide g++ (Linux), but macOS/iOS and Windows CI hosts cannot run
+# that probe, so it must be skipped deterministically here -- exactly like the
+# IntPolyh_Array::Dump member below.
+_VEC_AMBIGUOUS_ABS_RE = re.compile(
+    r"^NCollection_Vec[234]<unsigned (?:int|long|long long|__int64)>$")
+
+
+def _vec_cwise_abs_ambiguous(cls: ClassDecl, method: MethodDecl) -> bool:
+    """True when a synthesized NCollection_Vec wrapper's cwiseAbs would not
+    compile (ambiguous std::abs on the unsigned element type)."""
+    return method.name == "cwiseAbs" and bool(_VEC_AMBIGUOUS_ABS_RE.match(cls.name))
+
 
 def _first_unmappable(cls: ClassDecl, method: MethodDecl,
                       ctx: tm.TypeContext, is_ctor: bool = False) -> str | None:
@@ -707,6 +723,9 @@ def _method_skip_reason(cls: ClassDecl, method: MethodDecl,
     if cls.name.startswith("IntPolyh_Array") and method.name == "Dump":
         return ("ill-formed instantiation (OCCT member does not compile for "
                 "the substituted template args)")
+    if _vec_cwise_abs_ambiguous(cls, method):
+        return ("ill-formed instantiation (OCCT member does not compile for "
+                "the substituted template args)")
     bad = _first_unmappable(cls, method, ctx,
                             is_ctor=method.kind == MethodKind.CONSTRUCTOR)
     if bad is not None:
@@ -725,6 +744,12 @@ def _method_decl_signature(cls: ClassDecl, method: MethodDecl,
         # Dump (IntPolyh_Edge/IntPolyh_Triangle take an int, IntPolyh_PointNormal
         # has none).  Skip it deterministically (the audit probe cannot run on
         # every CI target, and this debug-only dump has no FFI value).
+        return None
+    if _vec_cwise_abs_ambiguous(cls, method):
+        # NCollection_Vec{2,3,4}<unsigned int/long/long long>::cwiseAbs() calls
+        # std::abs on the unsigned element type, which is ambiguous on every
+        # toolchain.  Skip deterministically (the audit probe cannot run on
+        # every CI target; abs of an unsigned value is the identity anyway).
         return None
     params = _params_decl(method, ctx, cls)
     if params is None:
