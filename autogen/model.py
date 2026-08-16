@@ -278,8 +278,11 @@ def _sanitize_identifier(s: str) -> str:
 
 
 # Longest wrapper name that still leaves room for the ".hpp"/".cpp" suffix
-# under the 255-byte filesystem limit.
-_WRAPPER_NAME_MAX = 200
+# under both the 255-byte filesystem limit and Windows' 260-byte MAX_PATH
+# (the CI checkout path "D:\a\OpenCASCADE.gd\OpenCASCADE.gd\src\autowrapper\"
+# is 51 chars, so a 212-char name + 4-char extension = 267 already exceeds
+# MAX_PATH and makes MSVC report C1083 "cannot open file").
+_WRAPPER_NAME_MAX = 180
 
 
 def occt_name_to_wrapper(occt_name: str, module_name: str) -> str:
