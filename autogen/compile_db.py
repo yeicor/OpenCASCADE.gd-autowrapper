@@ -293,6 +293,14 @@ def _triplet_target_args(triplet: str) -> list[str]:
         args = ["--target=wasm32-unknown-emscripten"]
         sysroot = _emscripten_sysroot()
         return args + ([f"--sysroot={sysroot}"] if sysroot else [])
+    if triplet == "x86-windows-static":
+        # Windows hosts default to the LLP64 x64 target, which canonicalizes
+        # size_t to unsigned long long even when building the ILP32 x86
+        # triplet (size_t is unsigned int there); force the 32-bit target so
+        # wrapper storage matches what MSVC actually compiles.
+        return ["--target=i686-pc-windows-msvc"]
+    if triplet == "x86-mingw-static":
+        return ["--target=i686-w64-mingw32"]
     return []
 
 
