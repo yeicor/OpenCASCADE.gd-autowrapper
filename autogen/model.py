@@ -278,11 +278,14 @@ def _sanitize_identifier(s: str) -> str:
 
 
 # Longest wrapper name that still leaves room for the ".hpp"/".cpp" suffix
-# under both the 255-byte filesystem limit and Windows' 260-byte MAX_PATH
-# (the CI checkout path "D:\a\OpenCASCADE.gd\OpenCASCADE.gd\src\autowrapper\"
-# is 51 chars, so a 212-char name + 4-char extension = 267 already exceeds
-# MAX_PATH and makes MSVC report C1083 "cannot open file").
-_WRAPPER_NAME_MAX = 180
+# and the MSVC ".obj" output under Windows' 260-byte MAX_PATH. The CI
+# object output prefix
+# ("D:\a\OpenCASCADE.gd\OpenCASCADE.gd\vcpkg\buildtrees\gdext\arm64-windows-static-dbg\OpenCASCADE.gd.dir\Debug\")
+# is 108 chars, so a 192-char name + 4-char extension = 304 bytes already
+# exceeds MAX_PATH and makes MSVC report C1083 "cannot open compiler
+# generated file" for the object file. Budget: name (incl. 12-char hash)
+# must stay <= 148, i.e. the pre-hash base must be <= 136.
+_WRAPPER_NAME_MAX = 130
 
 
 def occt_name_to_wrapper(occt_name: str, module_name: str) -> str:
