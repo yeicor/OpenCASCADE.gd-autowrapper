@@ -103,6 +103,19 @@ def render_nm_type(t: OCCTType) -> str:
     return inner
 
 
+_OCCT_TYPEDEF_NM_MAP = {
+    "Standard_OStream": "std::basic_ostream<char>",
+    "Standard_IStream": "std::basic_istream<char>",
+    "Standard_SStream": "std::basic_stringstream<char>",
+    "Standard_Boolean": "bool",
+    "Standard_Integer": "int",
+    "Standard_Real": "double",
+    "Standard_ShortReal": "float",
+    "Standard_Character": "char",
+    "Standard_Byte": "unsigned char",
+}
+
+
 def _nm_base(t: OCCTType) -> str:
     """Space-free base of a parameter type as `nm -C` prints it.
 
@@ -113,6 +126,8 @@ def _nm_base(t: OCCTType) -> str:
     """
     if t.is_handle:
         base = f"opencascade::handle<{t.handle_inner}>"
+    elif t.base_name in _OCCT_TYPEDEF_NM_MAP:
+        base = _OCCT_TYPEDEF_NM_MAP[t.base_name]
     else:
         base = re.sub(r"\s*([*&])", r"\1", t.base_name)
     if t.pointee_pointee_is_const and base.endswith("*"):
@@ -1016,18 +1031,46 @@ def apply_illformed(modules, illformed: set[str]) -> int:
 # `std::string`) where the IR keeps the underlying `std::basic_*<char>` form;
 # both spellings must collapse onto the same symbol name.
 _STD_TEMPLATE_MAP = {
+    # libc++ (Apple / LLVM)
+    "std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >": "std::basic_string<char>",
+    "std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>": "std::basic_string<char>",
+    "std::__1::basic_stringstream<char, std::__1::char_traits<char>, std::__1::allocator<char> >": "std::basic_stringstream<char>",
+    "std::__1::basic_stringstream<char, std::__1::char_traits<char>, std::__1::allocator<char>>": "std::basic_stringstream<char>",
+    "std::__1::basic_ostream<char, std::__1::char_traits<char> >": "std::basic_ostream<char>",
+    "std::__1::basic_ostream<char, std::__1::char_traits<char>>": "std::basic_ostream<char>",
+    "std::__1::basic_istream<char, std::__1::char_traits<char> >": "std::basic_istream<char>",
+    "std::__1::basic_istream<char, std::__1::char_traits<char>>": "std::basic_istream<char>",
+    # libstdc++ (GCC)
     "std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >": "std::basic_string<char>",
+    "std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>>": "std::basic_string<char>",
     "std::basic_string<char, std::char_traits<char>, std::allocator<char> >": "std::basic_string<char>",
+    "std::basic_string<char, std::char_traits<char>, std::allocator<char>>": "std::basic_string<char>",
     "std::__cxx11::basic_stringstream<char, std::char_traits<char>, std::allocator<char> >": "std::basic_stringstream<char>",
+    "std::__cxx11::basic_stringstream<char, std::char_traits<char>, std::allocator<char>>": "std::basic_stringstream<char>",
     "std::basic_stringstream<char, std::char_traits<char>, std::allocator<char> >": "std::basic_stringstream<char>",
+    "std::basic_stringstream<char, std::char_traits<char>, std::allocator<char>>": "std::basic_stringstream<char>",
     "std::__cxx11::basic_ostream<char, std::char_traits<char> >": "std::basic_ostream<char>",
+    "std::__cxx11::basic_ostream<char, std::char_traits<char>>": "std::basic_ostream<char>",
     "std::basic_ostream<char, std::char_traits<char> >": "std::basic_ostream<char>",
+    "std::basic_ostream<char, std::char_traits<char>>": "std::basic_ostream<char>",
     "std::__cxx11::basic_istream<char, std::char_traits<char> >": "std::basic_istream<char>",
+    "std::__cxx11::basic_istream<char, std::char_traits<char>>": "std::basic_istream<char>",
     "std::basic_istream<char, std::char_traits<char> >": "std::basic_istream<char>",
+    "std::basic_istream<char, std::char_traits<char>>": "std::basic_istream<char>",
+    # Standard and OCCT typedefs
     "std::ostream": "std::basic_ostream<char>",
     "std::istream": "std::basic_istream<char>",
     "std::string": "std::basic_string<char>",
     "std::stringstream": "std::basic_stringstream<char>",
+    "Standard_OStream": "std::basic_ostream<char>",
+    "Standard_IStream": "std::basic_istream<char>",
+    "Standard_SStream": "std::basic_stringstream<char>",
+    "Standard_Boolean": "bool",
+    "Standard_Integer": "int",
+    "Standard_Real": "double",
+    "Standard_ShortReal": "float",
+    "Standard_Character": "char",
+    "Standard_Byte": "unsigned char",
 }
 
 
@@ -1065,7 +1108,7 @@ def apply_missing(modules, missing: set[str]) -> int:
             for method in cls.all_methods:
                 if method.skip:
                     continue
-                if symbol_for_method(cls, method) in missing:
+                if _normalize_symbol(symbol_for_method(cls, method)) in missing:
                     method.skip = True
                     method.skip_reason = "missing OCCT symbol (not exported by linked libraries)"
                     if method.kind == MethodKind.CONSTRUCTOR and not method.parameters:
