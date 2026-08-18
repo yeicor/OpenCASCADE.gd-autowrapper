@@ -1,7 +1,7 @@
 # OpenCASCADE.gd-autowrapper
 
 Generates the godot-cpp wrapper for OpenCASCADE (OCCT) used by
-[OpenCASCADE.gd](https://github.com/yeicor/OpenCASCADE.gd).
+[OpenCASCADE.gd](https://github.com/yeicor-gd/OpenCASCADE.gd).
 
 ## Pipeline
 
