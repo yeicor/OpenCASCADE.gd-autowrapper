@@ -23,6 +23,9 @@ from .scanner import ModuleScanResult, scan_module, to_dict
 SUBMODULE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SUBMODULE_DIR.parent
 DEFAULT_COMPILE_DB = PROJECT_ROOT / ".build-autowrapper" / "compile_commands.json"
+DATA_DIR = Path(__file__).resolve().parent / "data"
+BASELINE_MISSING = DATA_DIR / "skips-missing.txt"
+BASELINE_ILLFORMED = DATA_DIR / "skips-illformed.txt"
 
 
 def _default_jobs() -> int:
@@ -292,8 +295,17 @@ def cmd_regenerate(args: argparse.Namespace) -> int:
     # happen before they run).
     missing.parent.mkdir(parents=True, exist_ok=True)
     illformed.parent.mkdir(parents=True, exist_ok=True)
-    missing.write_text("")
-    illformed.write_text("")
+    if BASELINE_MISSING.exists():
+        missing.write_text(BASELINE_MISSING.read_text())
+    else:
+        print(f"regenerate     : warning: baseline missing skips not found at {BASELINE_MISSING}", file=sys.stderr)
+        missing.write_text("")
+
+    if BASELINE_ILLFORMED.exists():
+        illformed.write_text(BASELINE_ILLFORMED.read_text())
+    else:
+        print(f"regenerate     : warning: baseline illformed skips not found at {BASELINE_ILLFORMED}", file=sys.stderr)
+        illformed.write_text("")
     wrapper_out = Path(args.out)
     wrapper_out.mkdir(parents=True, exist_ok=True)
 
@@ -316,9 +328,14 @@ def cmd_regenerate(args: argparse.Namespace) -> int:
                        "--compiler", args.compiler, "--nm", args.nm])
         if rc != 0:
             # Audit unavailable (g++/nm or OCCT libraries missing); keep the
-            # pass-i output, as generate.sh does.
+            # pass-i output, which already has baseline skips applied.
+            if not BASELINE_MISSING.exists() and not BASELINE_ILLFORMED.exists():
+                print("regenerate     : error: symbol audit unavailable and baseline skip sets "
+                      "(autogen/data/skips-*.txt) not found", file=sys.stderr)
+                return 1
             print(f"regenerate     : symbol audit unavailable; "
-                  f"using pass-{i} output", file=sys.stderr)
+                  f"using pass-{i} output with baseline skips "
+                  f"(warning: symbols may be outdated if OCCT version changed)", file=sys.stderr)
             break
         cur_missing = Path(args.missing_cur)
         cur_ill = Path(args.illformed_cur)
@@ -396,13 +413,22 @@ def cmd_coverage(args: argparse.Namespace) -> int:
 
     ir_dir = Path(args.ir_dir)
     missing: set[str] = set()
-    if args.missing and Path(args.missing).exists():
+    missing_path = Path(args.missing) if args.missing else None
+    if missing_path and missing_path.exists():
         from .audit import load_missing
-        missing = load_missing(Path(args.missing))
+        missing = load_missing(missing_path)
+    elif BASELINE_MISSING.exists():
+        from .audit import load_missing
+        missing = load_missing(BASELINE_MISSING)
+
     illformed: set[str] = set()
-    if args.illformed and Path(args.illformed).exists():
+    illformed_path = Path(args.illformed) if args.illformed else None
+    if illformed_path and illformed_path.exists():
         from .audit import load_illformed
-        illformed = load_illformed(Path(args.illformed))
+        illformed = load_illformed(illformed_path)
+    elif BASELINE_ILLFORMED.exists():
+        from .audit import load_illformed
+        illformed = load_illformed(BASELINE_ILLFORMED)
     modules = [load_module(p) for p in sorted(ir_dir.glob("*.json"))]
     table, entries, meta = compute_all(
         modules, missing=missing, illformed=illformed,

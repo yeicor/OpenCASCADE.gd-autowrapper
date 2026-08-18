@@ -1,0 +1,292 @@
+AIS_ViewController::copy (return value)
+Approx_SameParameter::copy (return value)
+BlendFunc_ConstThroatWithPenetration::Set
+BRepAlgoAPI_BooleanOperation::copy (return value)
+BRepAlgoAPI_BuilderAlgo::copy (return value)
+BRepAlgoAPI_Common::copy (return value)
+BRepAlgoAPI_Cut::copy (return value)
+BRepAlgoAPI_Fuse::copy (return value)
+BRepAlgoAPI_Section::copy (return value)
+BRepAlgoAPI_Splitter::copy (return value)
+BRepClass3d_BndBoxTreeSelectorLine::copy (return value)
+BRepClass3d_BndBoxTreeSelectorPoint::copy (return value)
+BRepClass3d_SolidClassifier::copy (return value)
+BRepClass3d_SolidExplorer::copy (return value)
+BRepClass_FaceExplorer::copy (return value)
+BRepExtrema_ExtCC::copy (return value)
+BRepExtrema_ExtCF::copy (return value)
+BRepExtrema_ExtPF::copy (return value)
+BRepExtrema_ProximityValueTool::copy (return value)
+BRepExtrema_ShapeProximity::copy (return value)
+BRepGProp_Domain::copy (return value)
+BRepGraph_CacheRegistry::copy (return value)
+BRepGraph_ChildExplorer::copy (return value)
+BRepGraph::copy (return value)
+BRepGraph_Data::copy (return value)
+BRepGraph_Data::myCacheRegistry (field accessor)
+BRepGraph_Data::myIncStorage (field accessor)
+BRepGraph_Data::myLayerRegistry (field accessor)
+BRepGraph_DeferredScope::copy (return value)
+BRepGraphInc_Storage::copy (return value)
+BRepGraph_LayerRegistry::copy (return value)
+BRepGraph_ParentExplorer::copy (return value)
+BRepLib_PointCloudShape::copy (return value)
+BRepMesh_CircleTool::copy (return value)
+BRepMesh_Delaun::copy (return value)
+BRepTopAdaptor_FClass2d::copy (return value)
+BSplCLib_CacheParams::copy (return value)
+BVH_BuildQueue::copy (return value)
+CSLib_Class2d::copy (return value)
+Extrema_ExtCC::copy (return value)
+Extrema_ExtCS::copy (return value)
+Extrema_ExtPS::copy (return value)
+Extrema_FuncPSDist::copy (return value)
+Extrema_GenExtCS::copy (return value)
+Extrema_GenExtPS::copy (return value)
+Extrema_GenExtSS::copy (return value)
+Extrema_GenLocateExtPS::copy (return value)
+ExtremaPC_BezierCurve::copy (return value)
+ExtremaPC_BSplineCurve::copy (return value)
+ExtremaPC_Circle::copy (return value)
+ExtremaPC_Curve::copy (return value)
+ExtremaPC_Ellipse::copy (return value)
+ExtremaPC_GridEvaluator::copy (return value)
+ExtremaPC_Hyperbola::copy (return value)
+ExtremaPC_Line::copy (return value)
+ExtremaPC_OffsetCurve::copy (return value)
+ExtremaPC_OtherCurve::copy (return value)
+ExtremaPC_Parabola::copy (return value)
+Geom2dGridEval_BezierCurve::copy (return value)
+Geom2dGridEval_BSplineCurve::copy (return value)
+Geom2dGridEval_Circle::copy (return value)
+Geom2dGridEval_Curve::copy (return value)
+Geom2dGridEval_Ellipse::copy (return value)
+Geom2dGridEval_Hyperbola::copy (return value)
+Geom2dGridEval_OffsetCurve::copy (return value)
+Geom2dGridEval_OtherCurve::copy (return value)
+Geom2dGridEval_Parabola::copy (return value)
+GeomAPI_ExtremaCurveCurve::copy (return value)
+GeomAPI_ExtremaCurveSurface::copy (return value)
+GeomAPI_ProjectPointOnSurf::copy (return value)
+GeomBndLib_BezierCurve2d::copy (return value)
+GeomBndLib_BezierCurve::copy (return value)
+GeomBndLib_BezierSurface::copy (return value)
+GeomBndLib_BSplineCurve2d::copy (return value)
+GeomBndLib_BSplineCurve::copy (return value)
+GeomBndLib_BSplineSurface::copy (return value)
+GeomBndLib_Circle2d::copy (return value)
+GeomBndLib_Circle::copy (return value)
+GeomBndLib_Cone::copy (return value)
+GeomBndLib_Cylinder::copy (return value)
+GeomBndLib_Ellipse2d::copy (return value)
+GeomBndLib_Ellipse::copy (return value)
+GeomBndLib_Hyperbola2d::copy (return value)
+GeomBndLib_Hyperbola::copy (return value)
+GeomBndLib_OffsetCurve2d::copy (return value)
+GeomBndLib_OffsetCurve::copy (return value)
+GeomBndLib_OffsetSurface::copy (return value)
+GeomBndLib_OtherCurve2d::copy (return value)
+GeomBndLib_OtherCurve::copy (return value)
+GeomBndLib_OtherSurface::copy (return value)
+GeomBndLib_Parabola2d::copy (return value)
+GeomBndLib_Parabola::copy (return value)
+GeomBndLib_Plane::copy (return value)
+GeomBndLib_Sphere::copy (return value)
+GeomBndLib_Surface::copy (return value)
+GeomBndLib_SurfaceOfExtrusion::copy (return value)
+GeomBndLib_SurfaceOfRevolution::copy (return value)
+GeomBndLib_Torus::copy (return value)
+GeomGridEval_BezierCurve::copy (return value)
+GeomGridEval_BezierSurface::copy (return value)
+GeomGridEval_BSplineCurve::copy (return value)
+GeomGridEval_BSplineSurface::copy (return value)
+GeomGridEval_Circle::copy (return value)
+GeomGridEval_Cone::copy (return value)
+GeomGridEval_Curve::copy (return value)
+GeomGridEval_Cylinder::copy (return value)
+GeomGridEval_Ellipse::copy (return value)
+GeomGridEval_Hyperbola::copy (return value)
+GeomGridEval_OffsetCurve::copy (return value)
+GeomGridEval_OffsetSurface::copy (return value)
+GeomGridEval_OtherCurve::copy (return value)
+GeomGridEval_OtherSurface::copy (return value)
+GeomGridEval_Parabola::copy (return value)
+GeomGridEval_Plane::copy (return value)
+GeomGridEval_Sphere::copy (return value)
+GeomGridEval_Surface::copy (return value)
+GeomGridEval_SurfaceOfExtrusion::copy (return value)
+GeomGridEval_SurfaceOfRevolution::copy (return value)
+GeomGridEval_Torus::copy (return value)
+GeomPlate_BuildPlateSurface::copy (return value)
+IFGraph_ConnectedComponants::copy (return value)
+IFGraph_Cycles::copy (return value)
+IFGraph_SCRoots::copy (return value)
+IFGraph_StrongComponants::copy (return value)
+IFGraph_SubPartsIterator::copy (return value)
+IFSelect_ShareOutResult::copy (return value)
+IntTools_BeanFaceIntersector::copy (return value)
+IntTools_FClass2d::copy (return value)
+LDOM_OSStream::copy (return value)
+LDOMParser::copy (return value)
+LDOM_XmlReader::copy (return value)
+LDOM_XmlWriter::copy (return value)
+math_GlobOptMin::copy (return value)
+MeshVS_Buffer::copy (return value)
+Message_LazyProgressScope::copy (return value)
+Message_ProgressScope::copy (return value)
+Message_ProgressSentry::copy (return value)
+MoniTool_TypedValue::SetInterpret
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::Bind
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::Bound
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::ChangeFind
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::ChangeSeek
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::Find
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::IsBound
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::operator()
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::Seek
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::TryBind
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::TryBound
+NCollection_DataMap<const char *, opencascade::handle<MoniTool_Timer>, Standard_CStringHasher>::UnBind
+NCollection_DataMap<gp_Pnt, opencascade::handle<Standard_Transient>>::NCollection_DataMap
+NCollection_DataMap<int, double>::NCollection_DataMap
+NCollection_DataMap<int, gp_Vec>::NCollection_DataMap
+NCollection_DataMap<int, int>::NCollection_DataMap
+NCollection_DataMap<int, MeshVS_TwoColors>::NCollection_DataMap
+NCollection_DataMap<int, NCollection_List<TopoDS_Shape>>::NCollection_DataMap
+NCollection_DataMap<int, NCollection_PackedMap<int>>::NCollection_DataMap
+NCollection_DataMap<int, opencascade::handle<MAT_BasicElt>>::NCollection_DataMap
+NCollection_DataMap<int, opencascade::handle<SelectMgr_EntityOwner>>::NCollection_DataMap
+NCollection_DataMap<int, Quantity_Color>::NCollection_DataMap
+NCollection_DataMap<int, TCollection_AsciiString>::NCollection_DataMap
+NCollection_DataMap<int, TopoDS_Shape>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<Graphic3d_Aspects>, opencascade::handle<Graphic3d_Aspects>>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<SelectMgr_EntityOwner>, int>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<Standard_Transient>, NCollection_List<Message_Msg>>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<Standard_Transient>, opencascade::handle<Standard_Transient>>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<Standard_Transient>, opencascade::handle<StdObjMgt_Persistent>>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<StepRepr_RepresentationItem>, TopoDS_Shape>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<StepShape_TopologicalRepresentationItem>, TopoDS_Shape>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<TCollection_HExtendedString>, TDF_Label>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<TDF_Attribute>, opencascade::handle<TDF_Attribute>>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<TopoDS_TShape>, opencascade::handle<VrmlData_Appearance>>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<XCAFDimTolObjects_GeomToleranceObject>, opencascade::handle<XCAFDimTolObjects_DatumObject>>::NCollection_DataMap
+NCollection_DataMap<opencascade::handle<XCAFDoc_VisMaterial>, opencascade::handle<XCAFDoc_VisMaterial>>::NCollection_DataMap
+NCollection_DataMap<TCollection_AsciiString, int>::NCollection_DataMap
+NCollection_DataMap<TCollection_AsciiString, NCollection_IndexedDataMap<TCollection_AsciiString, opencascade::handle<DE_ConfigurationNode>>>::NCollection_DataMap
+NCollection_DataMap<TCollection_AsciiString, opencascade::handle<Standard_Transient>>::NCollection_DataMap
+NCollection_DataMap<TCollection_AsciiString, opencascade::handle<STEPCAFControl_ExternFile>>::NCollection_DataMap
+NCollection_DataMap<TCollection_AsciiString, opencascade::handle<XmlMDF_ADriver>>::NCollection_DataMap
+NCollection_DataMap<TCollection_AsciiString, RWObj_Material>::NCollection_DataMap
+NCollection_DataMap<TCollection_AsciiString, TCollection_AsciiString>::NCollection_DataMap
+NCollection_DataMap<TCollection_AsciiString, TopoDS_Shape>::NCollection_DataMap
+NCollection_DataMap<TCollection_ExtendedString, double>::NCollection_DataMap
+NCollection_DataMap<TCollection_ExtendedString, int>::NCollection_DataMap
+NCollection_DataMap<TCollection_ExtendedString, opencascade::handle<CDM_MetaData>>::NCollection_DataMap
+NCollection_DataMap<TCollection_ExtendedString, opencascade::handle<NCollection_HArray1<double>>>::NCollection_DataMap
+NCollection_DataMap<TCollection_ExtendedString, opencascade::handle<NCollection_HArray1<int>>>::NCollection_DataMap
+NCollection_DataMap<TCollection_ExtendedString, TCollection_ExtendedString>::NCollection_DataMap
+NCollection_DataMap<TCollection_ExtendedString, unsigned char>::NCollection_DataMap
+NCollection_DataMap<TDF_Label, int>::NCollection_DataMap
+NCollection_DataMap<TDF_Label, TDF_Label>::NCollection_DataMap
+NCollection_DataMap<TopoDS_Shape, int>::NCollection_DataMap
+NCollection_DataMap<TopoDS_Shape, TNaming_RefShape *, TopTools_ShapeMapHasher>::Bind
+NCollection_DataMap<TopoDS_Shape, TNaming_RefShape *, TopTools_ShapeMapHasher>::Bound
+NCollection_DataMap<TopoDS_Shape, TNaming_RefShape *, TopTools_ShapeMapHasher>::ChangeSeek
+NCollection_DataMap<TopoDS_Shape, TNaming_RefShape *, TopTools_ShapeMapHasher>::Seek
+NCollection_DataMap<TopoDS_Shape, TNaming_RefShape *, TopTools_ShapeMapHasher>::TryBind
+NCollection_DataMap<unsigned int, AIS_MouseGesture>::NCollection_DataMap
+NCollection_DataMap<unsigned int, AIS_SelectionScheme>::NCollection_DataMap
+NCollection_DoubleMap<int, TDF_Label>::NCollection_DoubleMap
+NCollection_FlatDataMap<BRepGraph_ItemId, BRepGraph_ItemId>::NCollection_FlatDataMap
+NCollection_FlatDataMap<BRepGraph_NodeId, BRepGraphInc_Storage::CachedShape>::NCollection_FlatDataMap
+NCollection_FlatMap<BRepGraph_ItemUID>::NCollection_FlatMap
+NCollection_FlatMap<BRepGraph_NodeId>::NCollection_FlatMap
+NCollection_FlatMap<BRepGraph_UID>::NCollection_FlatMap
+NCollection_IndexedDataMap<opencascade::handle<BOPDS_PaveBlock>, NCollection_List<int>>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<opencascade::handle<BOPDS_PaveBlock>, NCollection_List<opencascade::handle<BOPDS_PaveBlock>>>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<opencascade::handle<Standard_Transient>, opencascade::handle<Standard_Transient>>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<TCollection_AsciiString, int>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<TCollection_AsciiString, opencascade::handle<Aspect_XRAction>>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<TCollection_AsciiString, opencascade::handle<DE_ConfigurationNode>>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<TCollection_AsciiString, opencascade::handle<Standard_Transient>>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<TCollection_AsciiString, Standard_DumpValue>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<TCollection_AsciiString, TCollection_AsciiString>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<TDF_Label, TopoDS_Shape>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<TopoDS_Shape, Bnd_Box>::NCollection_IndexedDataMap
+NCollection_IndexedDataMap<unsigned long, Aspect_Touch>::NCollection_IndexedDataMap
+NCollection_IndexedMap<const Graphic3d_CStructure *>::Add
+NCollection_IndexedMap<const Graphic3d_CStructure *>::Contains
+NCollection_IndexedMap<const Graphic3d_CStructure *>::FindIndex
+NCollection_IndexedMap<const Graphic3d_CStructure *>::NCollection_IndexedMap
+NCollection_IndexedMap<const Graphic3d_CStructure *>::RemoveKey
+NCollection_IndexedMap<const Graphic3d_CStructure *>::Substitute
+NCollection_IndexedMap<Graphic3d_CView *>::Add
+NCollection_IndexedMap<Graphic3d_CView *>::Contains
+NCollection_IndexedMap<Graphic3d_CView *>::FindIndex
+NCollection_IndexedMap<Graphic3d_CView *>::NCollection_IndexedMap
+NCollection_IndexedMap<Graphic3d_CView *>::RemoveKey
+NCollection_IndexedMap<Graphic3d_CView *>::Substitute
+NCollection_IndexedMap<Message_MetricType>::NCollection_IndexedMap
+NCollection_IndexedMap<opencascade::handle<BOPDS_PaveBlock>>::NCollection_IndexedMap
+NCollection_IndexedMap<opencascade::handle<Select3D_SensitiveEntity>>::NCollection_IndexedMap
+NCollection_IndexedMap<opencascade::handle<SelectMgr_SensitiveEntity>>::NCollection_IndexedMap
+NCollection_IndexedMap<opencascade::handle<Standard_Transient>>::NCollection_IndexedMap
+NCollection_IndexedMap<opencascade::handle<TDF_Attribute>>::NCollection_IndexedMap
+NCollection_IndexedMap<TCollection_AsciiString>::NCollection_IndexedMap
+NCollection_IndexedMap<TopoDS_Shape>::NCollection_IndexedMap
+NCollection_ListNode::copy (return value)
+NCollection_LocalArray<double>::copy (return value)
+NCollection_Map<BOPDS_Pair>::NCollection_Map
+NCollection_Map<Graphic3d_Structure *>::Add
+NCollection_Map<Graphic3d_Structure *>::Contains
+NCollection_Map<Graphic3d_Structure *>::NCollection_Map
+NCollection_Map<Graphic3d_Structure *>::Remove
+NCollection_Map<int>::NCollection_Map
+NCollection_Map<opencascade::handle<BOPDS_PaveBlock>>::NCollection_Map
+NCollection_Map<opencascade::handle<Graphic3d_Structure>>::NCollection_Map
+NCollection_Map<opencascade::handle<TDF_Attribute>>::NCollection_Map
+NCollection_Map<opencascade::handle<TNaming_NamedShape>>::NCollection_Map
+NCollection_Map<TCollection_AsciiString>::NCollection_Map
+NCollection_Map<TDF_Label>::NCollection_Map
+NCollection_Sequence<const gp_Pnt2d *>::Append
+NCollection_Sequence<const gp_Pnt2d *>::InsertAfter
+NCollection_Sequence<const gp_Pnt2d *>::InsertBefore
+NCollection_Sequence<const gp_Pnt2d *>::Prepend
+NCollection_Sequence<const gp_Pnt2d *>::SetValue
+NCollection_UBTree<int, Bnd_Box>::copy (return value)
+NCollection_Vec2<unsigned long>::cwiseAbs
+NCollection_Vec3<unsigned long>::cwiseAbs
+PCDM_DOMHeaderParser::copy (return value)
+Poly_MakeLoops::copy (return value)
+Prs3d_ToolQuadric::copy (return value)
+RWMesh_EdgeIterator::copy (return value)
+RWMesh_FaceIterator::copy (return value)
+RWMesh_VertexIterator::copy (return value)
+Select3D_PointData::copy (return value)
+Standard_ArrayStreamBuffer::copy (return value)
+Standard_CLocaleSentry::copy (return value)
+Standard_Condition::copy (return value)
+Standard_MMgrOpt::copy (return value)
+Standard_Mutex::copy (return value)
+StdPrs_ShapeTool::copy (return value)
+StdPrs_ToolRFace::copy (return value)
+StdStorage_TypeData::Instantiator
+StepFile_ReadData::copy (return value)
+StepFile_ReadData::GetRecordDescription
+TDF_CopyLabel::copy (return value)
+TDF_DerivedAttribute::Register
+TDF_IDFilter::copy (return value)
+TDF_Transaction::copy (return value)
+TopExp_Explorer::copy (return value)
+TopOpeBRepBuild_ShapeSet::copy (return value)
+TopOpeBRepBuild_ShellFaceSet::copy (return value)
+TopOpeBRepBuild_WireEdgeSet::copy (return value)
+TopOpeBRep_DSFiller::copy (return value)
+TopOpeBRep_FaceEdgeIntersector::copy (return value)
+TopOpeBRep_ShapeIntersector2d::copy (return value)
+TopOpeBRep_ShapeIntersector::copy (return value)
+TopOpeBRepTool_ShapeExplorer::copy (return value)
+VrmlData_InBuffer::Input (field accessor)
+VrmlData_Scene::copy (return value)
+VrmlData_Scene::WriteArrIndex
+VrmlData_WorldInfo::InfoIterator

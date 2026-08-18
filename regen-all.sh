@@ -19,8 +19,8 @@ MISSING="$SCRIPT_DIR/out/audit/missing.txt"
 ILLFORMED="$SCRIPT_DIR/out/audit/illformed.txt"
 ACCUM_MISSING="$SCRIPT_DIR/out/audit/skips-missing.txt"
 ACCUM_ILLFORMED="$SCRIPT_DIR/out/audit/skips-illformed.txt"
-: > "$ACCUM_MISSING"
-: > "$ACCUM_ILLFORMED"
+cp -f "$SCRIPT_DIR/autogen/data/skips-missing.txt" "$ACCUM_MISSING" 2>/dev/null || : > "$ACCUM_MISSING"
+cp -f "$SCRIPT_DIR/autogen/data/skips-illformed.txt" "$ACCUM_ILLFORMED" 2>/dev/null || : > "$ACCUM_ILLFORMED"
 
 for i in 1 2 3 4 5 6; do
     echo "Generating wrappers (pass $i) + symbol probe..."

@@ -1,0 +1,75 @@
+AppDef_ResConstraintOfMyGradientbisOfBSplineCompute::Error() const
+AppDef_ResConstraintOfMyGradientOfCompute::Error() const
+AppDef_ResConstraintOfTheGradient::Error() const
+AppDef_TheResol::Error() const
+BinTools_Curve2dSet::Dump(std::ostream&) const
+BlendFunc::Knots(BlendFunc_SectionShape, NCollection_Array1<double>&)
+BlendFunc::Mults(BlendFunc_SectionShape, NCollection_Array1<int>&)
+BRepApprox_Approx::Perform()
+BRepApprox_ResConstraintOfMyGradientbisOfTheComputeLineOfApprox::Error() const
+BRepApprox_ResConstraintOfMyGradientOfTheComputeLineBezierOfApprox::Error() const
+BRepBlend_CSWalking::IsDone() const
+BRepBlend_CSWalking::Line() const
+BRepFeat::IsInOut(BRepTopAdaptor_FClass2d const&, Geom2dAdaptor_Curve const&)
+BRepGProp_VinertGK::GetAbsolutError() const
+BSplCLib::DN(double, int, NCollection_Array1<gp_Pnt2d> const&, NCollection_Array1<double> const&, gp_Pnt2d&, gp_Vec2d&)
+BSplCLib::DN(double, int, NCollection_Array1<gp_Pnt> const&, NCollection_Array1<double> const&, gp_Pnt&, gp_Vec&)
+CDF_DirectoryIterator::CDF_DirectoryIterator()
+DsgPrs_RadiusPresentation::Add(opencascade::handle<Graphic3d_Structure> const&, opencascade::handle<Prs3d_Drawer> const&, TCollection_ExtendedString const&, gp_Pnt const&, gp_Circ const&, double, double, DsgPrs_ArrowSide, bool, bool)
+Geom2dAPI_Interpolate::ClearTangents()
+Geom2dGcc_FunctionTanCuCuCu::Geom2dGcc_FunctionTanCuCuCu(Geom2dAdaptor_Curve const&, gp_Pnt2d const&, gp_Pnt2d const&)
+Geom2dGcc_FunctionTanCuCuCu::Geom2dGcc_FunctionTanCuCuCu(gp_Circ2d const&, Geom2dAdaptor_Curve const&, gp_Pnt2d const&)
+Geom2dGcc_FunctionTanCuCuCu::Geom2dGcc_FunctionTanCuCuCu(gp_Lin2d const&, Geom2dAdaptor_Curve const&, gp_Pnt2d const&)
+Geom2dGcc_Lin2dTanObl::IsParallel2() const
+Geom2dHatch_Hatcher::IsDone() const
+Geom2dInt_Geom2dCurveTool::IsComposite(Adaptor2d_Curve2d const&)
+GeomAPI_Interpolate::ClearTangents()
+GeomFill_FunctionGuide::Deriv2T(gp_XYZ const&, gp_XYZ const&, math_VectorBase<double>&, math_VectorBase<double>&)
+GeomInt_IntSS::SetTolFixTangents(double, double)
+GeomInt_IntSS::TolFixTangents(double&, double&)
+GeomInt_ResConstraintOfMyGradientbisOfTheComputeLineOfWLApprox::Error() const
+GeomInt_ResConstraintOfMyGradientOfTheComputeLineBezierOfWLApprox::Error() const
+GeomInt_WLApprox::Perform()
+HLRBRep_BSurfaceTool::Axis(BRepAdaptor_Surface const&)
+HLRBRep_Surface::UIntervalContinuity() const
+HLRBRep_Surface::VIntervalContinuity() const
+IFSelect_ContextModif::Search(opencascade::handle<Standard_Transient> const&, opencascade::handle<Standard_Transient>&) const
+IFSelect_EditForm::NbTouched() const
+IFSelect_IntParam::StaticName() const
+IGESSelect_SelectBasicGeom::CurvesOnly() const
+IGESToBRep_TopoSurface::TransferPlaneSurface(opencascade::handle<IGESSolid_PlaneSurface> const&)
+IntImpParGen_ImpTool::D1(double, gp_Pnt2d&, gp_Vec2d&) const
+IntImpParGen_ImpTool::D2(double, gp_Pnt2d&, gp_Vec2d&, gp_Vec2d&) const
+IntImpParGen_ImpTool::Distance(gp_Pnt2d const&) const
+IntImpParGen_ImpTool::FindParameter(gp_Pnt2d const&) const
+IntImpParGen_ImpTool::GradDistance(gp_Pnt2d const&) const
+IntImpParGen_ImpTool::Value(double) const
+IntPatch_Polyhedron::HasUMaxSingularity() const
+IntPatch_Polyhedron::HasUMinSingularity() const
+IntPatch_Polyhedron::HasVMaxSingularity() const
+IntPatch_Polyhedron::HasVMinSingularity() const
+IntPatch_Polyhedron::Perform(opencascade::handle<Adaptor3d_Surface> const&, int, int)
+IntPatch_Polyhedron::UMaxSingularity(bool)
+IntPatch_Polyhedron::UMinSingularity(bool)
+IntPatch_Polyhedron::VMaxSingularity(bool)
+IntPatch_Polyhedron::VMinSingularity(bool)
+IntPatch_RLine::SetParamOnS1(double, double)
+IntPatch_RLine::SetParamOnS2(double&, double&)
+IntPolyh_MaillageAffinage::GetFinTE(int) const
+IntPolyh_MaillageAffinage::GetFinTT(int) const
+Law_Interpolate::ClearTangents()
+LocOpe_Revol::LocOpe_Revol(TopoDS_Shape const&, gp_Ax1 const&, double)
+LocOpe_Revol::LocOpe_Revol(TopoDS_Shape const&, gp_Ax1 const&, double, double)
+LocOpe_RevolutionForm::LocOpe_RevolutionForm(TopoDS_Shape const&, gp_Ax1 const&, double)
+MAT2d_CutCurve::PerformInf(opencascade::handle<Geom2d_Curve> const&)
+MAT2d_CutCurve::Perform(opencascade::handle<Geom2d_Curve> const&, MAT_Side)
+math_NewtonFunctionSetRoot::StateNumber() const
+math_NewtonMinimum::IsConvex() const
+OSD_Path::LocateExecFile(OSD_Path&)
+StepData_FreeFormEntity::StepData_FreeFormEntity()
+StepData_UndefinedEntity::Super() const
+StepFEA_SymmetricTensor43d::SetFeaIsotropicSymmetricTensor43d(opencascade::handle<NCollection_HArray1<double> > const&)
+STEPSelections_Counter::POP2() const
+STEPSelections_Counter::POP() const
+TopOpeBRepBuild_Builder1::GFillSplitsPVS(TopoDS_Shape const&, TopOpeBRepBuild_GTopo const&, TopOpeBRepBuild_PaveSet&)
+TransferBRep::BRepCheck(TopoDS_Shape const&, int)

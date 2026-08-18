@@ -668,13 +668,24 @@ def _nm_undefined(obj: Path, nm_tool: str) -> list[tuple[str, str]]:
     out = subprocess.run([nm_tool, "-u", "-C", str(obj)],
                          capture_output=True, text=True)
     if out.returncode != 0:
-        raise RuntimeError(f"nm failed on {obj}: {out.stderr[:1000]}")
+        out = subprocess.run([nm_tool, "-u", str(obj)], capture_output=True, text=True)
+        if out.returncode != 0:
+            raise RuntimeError(f"nm failed on {obj}: {out.stderr[:1000]}")
     syms: list[tuple[str, str]] = []
     for line in out.stdout.splitlines():
         line = line.strip()
+        if not line or line.endswith(":"):
+            continue
+        if line.startswith("(undefined)"):
+            m = re.match(r"^\(undefined\)\s+(?:(?:weak\s+|non-)?external\s+)?(.*)$", line)
+            if m:
+                syms.append(("U", _normalize_symbol(m.group(1).strip())))
+                continue
         m = re.match(r"^([A-Za-z])\s+(.*)$", line)
         if m:
-            syms.append((m.group(1), m.group(2)))
+            syms.append((m.group(1), _normalize_symbol(m.group(2).strip())))
+            continue
+        syms.append(("U", _normalize_symbol(line)))
     return syms
 
 
@@ -683,21 +694,36 @@ def _nm_defined_one(lib: Path, nm_tool: str, dynamic: bool) -> set[str]:
     if dynamic:
         args.insert(1, "-D")
     out = subprocess.run(args + [str(lib)], capture_output=True, text=True)
+    if out.returncode != 0:
+        args = [nm_tool, "-C", "-g", str(lib)]
+        out = subprocess.run(args, capture_output=True, text=True)
+        if out.returncode != 0:
+            args = [nm_tool, "-C", str(lib)]
+            out = subprocess.run(args, capture_output=True, text=True)
+            if out.returncode != 0:
+                return set()
     defined: set[str] = set()
     for line in out.stdout.splitlines():
         line = line.strip()
-        if not line or line.endswith(":"):
+        if not line or line.endswith(":") or line.startswith("(undefined)"):
             continue
-        m = re.match(r"^[0-9a-fA-F]{8,16}\s+([A-Za-z])\s+(.*)$", line)
-        if m:
-            defined.add(m.group(2))
+        m_darwin = re.match(r"^[0-9a-fA-F]+\s+\([^)]+\)\s+(?:(?:weak\s+|non-)?external\s+)?(.*)$", line)
+        if m_darwin:
+            defined.add(_normalize_symbol(m_darwin.group(1).strip()))
+            continue
+        m_gnu = re.match(r"^[0-9a-fA-F]{8,16}\s+([A-Za-z])\s+(.*)$", line)
+        if m_gnu:
+            letter = m_gnu.group(1)
+            if letter not in ("U", "u"):
+                defined.add(_normalize_symbol(m_gnu.group(2).strip()))
+            continue
     return defined
 
 
 def _defined_symbols(lib_dir: Path, nm_tool: str,
                      max_workers: int | None = None) -> set[str]:
     static = sorted(lib_dir.glob("*.a"))
-    shared = sorted(lib_dir.glob("*.so*"))
+    shared = sorted(lib_dir.glob("*.so*")) + sorted(lib_dir.glob("*.dylib")) + sorted(lib_dir.glob("*.dll"))
     libs = static or shared
     if not libs:
         return set()
@@ -722,8 +748,9 @@ def _occt_lib_dir(project_root: Path | None, install: OCCTInstall) -> Path | Non
     if project_root is not None:
         candidates.append(project_root / "vcpkg" / "installed" / triplet / "lib")
     candidates.append(install.include_dir.parent.parent / "lib")
+    candidates.append(install.include_dir.parent / "lib")
     for d in candidates:
-        if d.is_dir() and list(d.glob("libTKMath.*")):
+        if d.is_dir() and (list(d.glob("libTKMath.*")) or list(d.glob("TKMath.*"))):
             return d
     return None
 
@@ -861,18 +888,22 @@ def run_audit(probe_path: Path, work_dir: Path, out_path: Path,
     missing: set[str] = set()
     if not cross_target:  # cross-target undefined symbols cannot match host libs
         defined = _defined_symbols(lib_dir, nm_tool)
-        for tu, res in compiled:
-            if res.returncode != 0:
-                continue
-            obj = work_dir / (tu.stem + ".o")
-            for letter, name in _nm_undefined(obj, nm_tool):
-                if letter != "U":
+        if not defined:
+            print("audit          : warning: no defined symbols extracted from OCCT libraries; "
+                  "skipping undefined-symbol diff to avoid false positives", file=sys.stderr)
+        else:
+            for tu, res in compiled:
+                if res.returncode != 0:
                     continue
-                cls = name.split("::")[0]
-                if cls not in occt_classes:
-                    continue
-                if name not in defined:
-                    missing.add(name)
+                obj = work_dir / (tu.stem + ".o")
+                for letter, name in _nm_undefined(obj, nm_tool):
+                    if letter != "U":
+                        continue
+                    cls = name.split("::")[0]
+                    if cls not in occt_classes:
+                        continue
+                    if name not in defined:
+                        missing.add(name)
     _write_lines(out_path, sorted(missing))
     return sorted(missing)
 
