@@ -1518,7 +1518,7 @@ def _valid_defval_literal(dflt: str) -> bool:
     the wrapper's _bind_methods; anything else must be a plain literal.
     """
     if "::" in dflt:
-        return True
+        return bool(re.match(r"^(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*(?:\(\))?$", dflt))
     return dflt in _OCCT_BOOL_CONSTS or _NUMERIC_LITERAL_RE.match(dflt) is not None
 
 
