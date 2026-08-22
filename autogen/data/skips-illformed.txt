@@ -1,4 +1,5 @@
 AIS_ViewController::copy (return value)
+AIS_ViewController::TouchPoints
 Approx_SameParameter::copy (return value)
 BlendFunc_ConstThroatWithPenetration::Set
 BRepAlgoAPI_BooleanOperation::copy (return value)
