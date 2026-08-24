@@ -1,6 +1,24 @@
+AdvApp2Var_SysBase::macrai4_
+AdvApp2Var_SysBase::macrar8_
+AdvApp2Var_SysBase::macrdi4_
+AdvApp2Var_SysBase::macrdr8_
+AdvApp2Var_SysBase::mcrdelt_
+AdvApp2Var_SysBase::mcrrqst_
 AIS_ViewController::copy (return value)
 AIS_ViewController::TouchPoints
 Approx_SameParameter::copy (return value)
+Aspect_NeutralWindow::NativeFBConfig
+Aspect_NeutralWindow::NativeHandle
+Aspect_NeutralWindow::NativeParentHandle
+Aspect_NeutralWindow::SetNativeFBConfig
+Aspect_NeutralWindow::SetNativeHandle
+Aspect_NeutralWindow::SetNativeHandles
+Aspect_Window::NativeFBConfig
+Aspect_Window::NativeHandle
+Aspect_Window::NativeParentHandle
+Aspect_Window::SetNativeFBConfig
+Aspect_Window::SetNativeHandle
+Aspect_Window::SetNativeHandles
 BlendFunc_ConstThroatWithPenetration::Set
 BRepAlgoAPI_BooleanOperation::copy (return value)
 BRepAlgoAPI_BuilderAlgo::copy (return value)
