@@ -59,16 +59,30 @@ def _strip_qualifiers(s: str) -> str:
     return s
 
 
+def _normalize_spec_arg(arg: str) -> str:
+    """Normalize platform-dependent integer types in template arguments to portable standard types."""
+    arg = arg.strip()
+    if arg in ("unsigned long", "unsigned long long"):
+        return "size_t"
+    if arg in ("long", "long long"):
+        return "int64_t"
+    # For nested templates e.g. NCollection_Array1<NCollection_Vec3<unsigned long>>
+    arg = re.sub(r"\bunsigned\s+long(?:\s+long)?\b", "size_t", arg)
+    arg = re.sub(r"\blong\s+long\b", "int64_t", arg)
+    arg = re.sub(r"\blong\b(?!\s+(?:double))", "int64_t", arg)
+    return arg
+
+
 def _template_args(t: "Type") -> list[str]:
     """Top-level template argument spellings, best-effort."""
     try:
         n = t.get_num_template_arguments()
-        if n <= 0:
-            return []
-        out = []
-        for i in range(n):
-            out.append(t.get_template_argument_type(i).spelling)
-        return out
+        if n > 0:
+            out = []
+            for i in range(n):
+                arg_type = t.get_template_argument_type(i)
+                out.append(_normalize_spec_arg(arg_type.spelling))
+            return out
     except Exception:
         pass
     # Fallback: split the outermost <...> by top-level commas.
@@ -87,12 +101,12 @@ def _template_args(t: "Type") -> list[str]:
             depth -= 1
             cur += ch
         elif ch == "," and depth == 0:
-            parts.append(cur.strip())
+            parts.append(_normalize_spec_arg(cur))
             cur = ""
         else:
             cur += ch
     if cur.strip():
-        parts.append(cur.strip())
+        parts.append(_normalize_spec_arg(cur))
     return parts
 
 
@@ -159,6 +173,8 @@ def make_type(cursor_type: "Type") -> OCCTType:
     else:
         base_name = core
         targs = _template_args(pointee)
+        if "<" in base_name:
+            base_name = _normalize_spec_arg(base_name)
         if targs and base_name.endswith("<>"):
             # libclang canonicalizes a typedef'd template specialization to a
             # bare `Root<>` (empty angle brackets) even though the template

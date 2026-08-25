@@ -29,6 +29,10 @@ PRIMITIVE_MAP: dict[str, tuple[str, str]] = {
     "unsigned long": ("uint64_t", "INT"),
     "long long": ("int64_t", "INT"),
     "unsigned long long": ("uint64_t", "INT"),
+    "size_t": ("uint64_t", "INT"),
+    "Standard_Size": ("uint64_t", "INT"),
+    "intptr_t": ("int64_t", "INT"),
+    "uintptr_t": ("uint64_t", "INT"),
     "char16_t": ("uint16_t", "INT"),
     "float": ("float", "FLOAT"),
     "double": ("double", "FLOAT"),
@@ -40,7 +44,7 @@ PRIMITIVE_MAP: dict[str, tuple[str, str]] = {
 # wrapper's `uint64_t`, but on 32-bit targets `size_t` is narrower, so calls
 # must cast back to `size_t` to stay exact and unambiguous (see cpp_param).
 _SIZE_DERIVED_BUILTINS: frozenset[str] = frozenset(
-    {"unsigned long", "unsigned long long"})
+    {"unsigned long", "unsigned long long", "size_t", "Standard_Size"})
 
 # Non-const reference out-parameters of these canonical types become small
 # RefCounted box classes (see OcgPrimitiveWrappers.hpp).
@@ -58,6 +62,10 @@ PRIMITIVE_WRAPPER_MAP: dict[str, tuple[str, str]] = {
     "unsigned long": ("OcgStandardULongInteger", "INT"),
     "long long": ("OcgStandardLongInteger", "INT"),
     "unsigned long long": ("OcgStandardULongInteger", "INT"),
+    "size_t": ("OcgStandardULongInteger", "INT"),
+    "Standard_Size": ("OcgStandardULongInteger", "INT"),
+    "intptr_t": ("OcgStandardLongInteger", "INT"),
+    "uintptr_t": ("OcgStandardULongInteger", "INT"),
     "double": ("OcgStandardReal", "FLOAT"),
     "float": ("OcgStandardShortReal", "FLOAT"),
     "TCollection_AsciiString": ("OcgTCollectionAsciiString", "STRING"),

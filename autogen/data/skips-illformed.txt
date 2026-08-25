@@ -274,7 +274,9 @@ NCollection_Sequence<const gp_Pnt2d *>::InsertBefore
 NCollection_Sequence<const gp_Pnt2d *>::Prepend
 NCollection_Sequence<const gp_Pnt2d *>::SetValue
 NCollection_UBTree<int, Bnd_Box>::copy (return value)
+NCollection_Vec2<size_t>::cwiseAbs
 NCollection_Vec2<unsigned long>::cwiseAbs
+NCollection_Vec3<size_t>::cwiseAbs
 NCollection_Vec3<unsigned long>::cwiseAbs
 PCDM_DOMHeaderParser::copy (return value)
 Poly_MakeLoops::copy (return value)
