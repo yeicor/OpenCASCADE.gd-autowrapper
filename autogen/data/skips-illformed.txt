@@ -48,6 +48,7 @@ BRepGraph_Data::myLayerRegistry (field accessor)
 BRepGraph_DeferredScope::copy (return value)
 BRepGraphInc_Storage::copy (return value)
 BRepGraph_LayerRegistry::copy (return value)
+BRepGraph_LayerTopoSupplement::AttachedTo
 BRepGraph_ParentExplorer::copy (return value)
 BRepLib_PointCloudShape::copy (return value)
 BRepMesh_CircleTool::copy (return value)
