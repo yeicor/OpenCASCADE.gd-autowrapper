@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -139,6 +140,28 @@ def _version_key(name: str) -> tuple[int, ...]:
     return tuple(nums) or (0,)
 
 
+def _macos_sdk_path() -> Path | None:
+    """The macOS/iOS SDK sysroot, or None when not available."""
+    for var in ("SDKROOT", "MACOSX_SYSROOT"):
+        val = os.environ.get(var)
+        if val and Path(val).is_dir():
+            return Path(val)
+    try:
+        sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True,
+                             text=True, timeout=10)
+        if sdk.returncode == 0 and sdk.stdout.strip():
+            p = Path(sdk.stdout.strip())
+            if p.is_dir():
+                return p
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for p in (Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"),
+             Path("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")):
+        if p.is_dir():
+            return p
+    return None
+
+
 def _android_sysroot() -> Path | None:
     """The NDK sysroot, or None when no usable NDK is in the environment."""
     ndk = os.environ.get("ANDROID_NDK_HOME")
@@ -208,7 +231,9 @@ _DEFAULT_OCCT_DEFINES = ["HAVE_FREETYPE", "HAVE_OPENGL_EXT", "HAVE_RAPIDJSON",
 # godot platform macro per vcpkg OS token (vcpkg's own triplet naming).
 _PLATFORM_DEFINE_BY_OS = {
     "windows": "WINDOWS_ENABLED",
+    "mingw": "WINDOWS_ENABLED",
     "osx": "OSX_ENABLED",
+    "macos": "OSX_ENABLED",
     "ios": "OSX_ENABLED",
     "android": "ANDROID_ENABLED",
     "wasm": "WEB_ENABLED",
@@ -218,6 +243,16 @@ _PLATFORM_DEFINE_BY_OS = {
 
 def _platform_defines(triplet: str) -> list[str]:
     """godot platform macros matching the triplet's OS (the build env)."""
+    if "windows" in triplet or "mingw" in triplet:
+        return [
+            "-DWINDOWS_ENABLED",
+            "-D_WIN32",
+            "-DWIN32",
+            "-DNOMINMAX",
+            "-DWIN32_LEAN_AND_MEAN",
+            "-D_UNICODE",
+            "-DUNICODE",
+        ]
     for os_token, define in _PLATFORM_DEFINE_BY_OS.items():
         if os_token in triplet:
             out = [f"-D{define}"]
@@ -262,45 +297,32 @@ def _occt_compile_definitions(include_dir: Path) -> list[str]:
 
 
 def _triplet_target_args(triplet: str) -> list[str]:
-    """clang flags so the OCCT parse uses the build target's data model.
-
-    libclang canonicalizes size-sensitive builtins against the *parse* target
-    (``uint64_t`` is ``unsigned long`` on LP64 hosts but ``unsigned long
-    long`` on ILP32 targets, and ``size_t`` shrinks to 32 bits).  Generated
-    wrapper storage must match the build target, so for 32-bit triplets the
-    headers are parsed with the target's flags.  LP64/LLP64 targets (x64,
-    arm64, windows, osx, ios) already match their 64-bit hosts and need none.
-
-    The mapping follows vcpkg's own triplet naming (``<arch>-<os>...``), where
-    a 32-bit arch token means an ILP32 target that must be forced.  The cross
-    sysroot is best-effort: the ``--target`` alone already fixes the data
-    model (the part that corrupts wrapper storage); a missing sysroot only
-    degrades standard-library header resolution visibly.
-    """
-    if triplet == "x86-linux":
-        return ["-m32"]  # gcc-multilib provides the 32-bit headers
+    """clang flags so the OCCT parse uses the build target's data model."""
+    if triplet in ("x86-linux", "x86-mingw-static", "x86-windows-static"):
+        return ["-m32"]  # 32-bit ILP32 data model
     if triplet == "arm-linux":
         return ["--target=arm-linux-gnueabihf"]
     if triplet == "x86-android":
-        args = ["--target=i686-linux-android"]
+        args = ["--target=i686-linux-android28"]
         sysroot = _android_sysroot()
         return args + ([f"--sysroot={sysroot}"] if sysroot else [])
-    if triplet == "arm-neon-android":
-        args = ["--target=armv7a-linux-androideabi"]
+    if triplet == "x64-android":
+        args = ["--target=x86_64-linux-android28"]
+        sysroot = _android_sysroot()
+        return args + ([f"--sysroot={sysroot}"] if sysroot else [])
+    if triplet in ("arm-neon-android", "arm-android"):
+        args = ["--target=armv7a-linux-androideabi28"]
+        sysroot = _android_sysroot()
+        return args + ([f"--sysroot={sysroot}"] if sysroot else [])
+    if triplet == "arm64-android":
+        args = ["--target=aarch64-linux-android28"]
         sysroot = _android_sysroot()
         return args + ([f"--sysroot={sysroot}"] if sysroot else [])
     if triplet == "wasm32-emscripten":
-        args = ["--target=wasm32-unknown-emscripten"]
         sysroot = _emscripten_sysroot()
-        return args + ([f"--sysroot={sysroot}"] if sysroot else [])
-    if triplet == "x86-windows-static":
-        # Windows hosts default to the LLP64 x64 target, which canonicalizes
-        # size_t to unsigned long long even when building the ILP32 x86
-        # triplet (size_t is unsigned int there); force the 32-bit target so
-        # wrapper storage matches what MSVC actually compiles.
-        return ["--target=i686-pc-windows-msvc"]
-    if triplet == "x86-mingw-static":
-        return ["--target=i686-w64-mingw32"]
+        if sysroot:
+            return ["--target=wasm32-unknown-emscripten", f"--sysroot={sysroot}"]
+        return []
     return []
 
 
@@ -342,7 +364,7 @@ class CompileArgs:
                 continue
             if arg.startswith("--driver-mode"):
                 continue
-            if arg in ("-o", "-c", "-x"):
+            if arg in ("-o", "-c", "-x", "-include"):
                 skip_next = True
                 continue
             if arg.endswith((".o", ".obj")) or (arg.endswith((".cpp", ".cxx", ".c", ".cc"))
@@ -358,8 +380,8 @@ class CompileArgs:
         triplet = os.environ.get("VCPKG_DEFAULT_TRIPLET", "x64-linux")
         return (["-std=gnu++17", "-DDEBUG_ENABLED", "-DGDEXTENSION",
                  "-DTHREADS_ENABLED"]
-                + _platform_defines(triplet)
-                + _triplet_target_args(triplet))
+                 + _platform_defines(triplet)
+                 + _triplet_target_args(triplet))
 
 
 def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:
@@ -427,17 +449,111 @@ def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:
     rd = find_resource_dir()
     if rd and not any(a.startswith("-resource-dir") for a in out):
         out.append(f"-resource-dir={rd}")
-    # C++ standard library resolution.  libclang's driver cannot be relied on
-    # to synthesize the C++ stdlib include path: it leaves `<type_traits>`
-    # unresolved on every host, so the located stdlib include dirs are injected
-    # unconditionally (see _cxx_stdlib_dirs).  Without them every OCCT header
-    # including a stdlib header breaks with "'type_traits' file not found".
-    # Cross targets (android/wasm/32-bit) carry their own libc++ in the sysroot
-    # and must not inherit the host's libstdc++/libc++ headers.
-    if not _triplet_target_args(triplet):
+    # C++ standard library resolution.
+    if not _triplet_target_args(triplet) and not ("osx" in triplet or "ios" in triplet or "mingw" in triplet or "windows" in triplet):
         for d in _cxx_stdlib_dirs(rd):
             if not any(a == f"-isystem={d}" for a in out) and not any(
                     out[i] == "-isystem" and i + 1 < len(out) and out[i + 1] == d
                     for i in range(len(out))):
                 out += ["-isystem", d]
+
+    # MinGW / Windows defines, extensions, and standard library resolution
+    if "mingw" in triplet or "windows" in triplet:
+        for win_def in ("_WIN32", "WIN32", "UNICODE", "_UNICODE"):
+            if win_def not in have:
+                out.append(f"-D{win_def}")
+                have.add(win_def)
+        if "x86" in triplet and "_X86_" not in have:
+            out.append("-D_X86_")
+            have.add("_X86_")
+        elif "arm64" in triplet and "_ARM64_" not in have:
+            out.append("-D_ARM64_")
+            have.add("_ARM64_")
+        elif "_AMD64_" not in have:
+            out.append("-D_AMD64_")
+            have.add("_AMD64_")
+
+        # Enable MS/Windows extensions so __declspec and _stdcall parse without error
+        for ext in ("-fms-extensions", "-fdeclspec"):
+            if ext not in out:
+                out.append(ext)
+        if "-D_stdcall=__stdcall" not in out and "_stdcall" not in have:
+            out.append("-D_stdcall=__stdcall")
+            have.add("_stdcall")
+
+        # On native Windows, include MSVC and Windows SDK headers via INCLUDE env var
+        if sys.platform == "win32":
+            inc_env = os.environ.get("INCLUDE", "")
+            for p in inc_env.split(";"):
+                p = p.strip()
+                if p and Path(p).is_dir():
+                    if not any(a == f"-imsvc={p}" for a in out) and not any(
+                            out[i] in ("-imsvc", "-isystem") and i + 1 < len(out) and out[i + 1] == p
+                            for i in range(len(out))):
+                        out += ["-imsvc", p]
+
+        # Host C++ stdlib fallback
+        for d in _cxx_stdlib_dirs(rd):
+            if not any(a == f"-isystem={d}" for a in out) and not any(
+                    out[i] == "-isystem" and i + 1 < len(out) and out[i + 1] == d
+                    for i in range(len(out))):
+                out += ["-isystem", d]
+
+    # macOS / iOS SDK resolution
+    if "osx" in triplet or "ios" in triplet or sys.platform == "darwin":
+        sdk = _macos_sdk_path()
+        if sdk:
+            sdk_str = str(sdk)
+            if not any(a.startswith("-isysroot") or a.startswith("--sysroot") for a in out):
+                out += ["-isysroot", sdk_str]
+            for sub in ("usr/include/c++/v1", "usr/include"):
+                inc_p = str(sdk / sub)
+                if Path(inc_p).is_dir() and not any(
+                        a == f"-isystem={inc_p}" or (out[i] == "-isystem" and i + 1 < len(out) and out[i + 1] == inc_p)
+                        for i in range(len(out))):
+                    out += ["-isystem", inc_p]
+    # Emscripten libc++/libc
+    if triplet == "wasm32-emscripten":
+        sysroot = _emscripten_sysroot()
+        if sysroot:
+            checks = {"include/c++/v1": lambda p: (p / "type_traits").is_file(),
+                      "include/compat": lambda p: p.is_dir()}
+            for sub, ok in checks.items():
+                d = str(sysroot / sub)
+                if ok(Path(d)) and not any(a == f"-isystem={d}" for a in out) \
+                        and not any(out[i] == "-isystem" and i + 1 < len(out)
+                                    and out[i + 1] == d
+                                    for i in range(len(out))):
+                    out += ["-isystem", d]
+    if triplet.endswith("-android") or "-android" in triplet:
+        sysroot = _android_sysroot()
+        if sysroot:
+            cxx_v1 = sysroot / "usr" / "include" / "c++" / "v1"
+            if cxx_v1.is_dir():
+                d = str(cxx_v1)
+                if not any(a == f"-isystem={d}" for a in out) \
+                        and not any(out[i] == "-isystem" and i + 1 < len(out)
+                                    and out[i + 1] == d for i in range(len(out))):
+                    out += ["-isystem", d]
+            usr_inc = sysroot / "usr" / "include"
+            if usr_inc.is_dir():
+                arch_map = {
+                    "arm-neon-android": "arm-linux-androideabi",
+                    "arm-android": "arm-linux-androideabi",
+                    "arm64-android": "aarch64-linux-android",
+                    "x86-android": "i686-linux-android",
+                    "x64-android": "x86_64-linux-android",
+                }
+                arch = arch_map.get(triplet)
+                if arch and (usr_inc / arch).is_dir():
+                    d = str(usr_inc / arch)
+                    if not any(a == f"-isystem={d}" for a in out) \
+                            and not any(out[i] == "-isystem" and i + 1 < len(out)
+                                        and out[i + 1] == d for i in range(len(out))):
+                        out += ["-isystem", d]
+                d = str(usr_inc)
+                if not any(a == f"-isystem={d}" for a in out) \
+                        and not any(out[i] == "-isystem" and i + 1 < len(out)
+                                    and out[i + 1] == d for i in range(len(out))):
+                    out += ["-isystem", d]
     return out

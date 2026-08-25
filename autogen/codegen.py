@@ -1916,36 +1916,51 @@ def generate_enums_cpp(modules: list[ModuleDecl]) -> str:
 # ---------------------------------------------------------------------------
 
 _PRIMITIVE_WRAPPERS: dict[str, tuple[str, str, str, str, str]] = {
-    "bool": ("OcgStandardBoolean", "bool", "BOOL",
+    "bool": ("OcgStandardBoolean", "Standard_Boolean", "BOOL",
              "bool get_value() const { return _native; }",
              "void set_value(bool v) { _native = v; }"),
-    "unsigned char": ("OcgStandardByte", "uint8_t", "INT",
+    "unsigned char": ("OcgStandardByte", "Standard_Byte", "INT",
                       "uint8_t get_value() const { return _native; }",
                       "void set_value(uint8_t v) { _native = v; }"),
-    "char": ("OcgStandardCharacter", "char", "INT",
+    "signed char": ("OcgStandardSByte", "signed char", "INT",
+                    "int8_t get_value() const { return _native; }",
+                    "void set_value(int8_t v) { _native = v; }"),
+    "char": ("OcgStandardCharacter", "Standard_Character", "INT",
              "int32_t get_value() const { return (int32_t)_native; }",
              "void set_value(int32_t v) { _native = static_cast<char>(v); }"),
-    "char16_t": ("OcgStandardChar16", "char16_t", "INT",
+    "char16_t": ("OcgStandardChar16", "Standard_ExtCharacter", "INT",
                  "int32_t get_value() const { return (int32_t)_native; }",
                  "void set_value(int32_t v) { _native = static_cast<char16_t>(v); }"),
-    "int": ("OcgStandardInteger", "int32_t", "INT",
+    "short": ("OcgStandardShortInteger", "short", "INT",
+              "int16_t get_value() const { return _native; }",
+              "void set_value(int16_t v) { _native = v; }"),
+    "unsigned short": ("OcgStandardUShortInteger", "unsigned short", "INT",
+                       "uint16_t get_value() const { return _native; }",
+                       "void set_value(uint16_t v) { _native = v; }"),
+    "int": ("OcgStandardInteger", "Standard_Integer", "INT",
             "int32_t get_value() const { return _native; }",
             "void set_value(int32_t v) { _native = v; }"),
-    "long": ("OcgStandardLongInteger", "long", "INT",
-             "int64_t get_value() const { return _native; }",
-             "void set_value(int64_t v) { _native = static_cast<long>(v); }"),
-    "double": ("OcgStandardReal", "double", "FLOAT",
-               "double get_value() const { return _native; }",
-               "void set_value(double v) { _native = v; }"),
-    "float": ("OcgStandardShortReal", "float", "FLOAT",
-              "float get_value() const { return _native; }",
-              "void set_value(float v) { _native = v; }"),
-    "unsigned long": ("OcgStandardULongInteger", "unsigned long", "INT",
-                      "uint64_t get_value() const { return _native; }",
-                      "void set_value(uint64_t v) { _native = static_cast<unsigned long>(v); }"),
-    "unsigned int": ("OcgStandardUInteger", "uint32_t", "INT",
+    "unsigned int": ("OcgStandardUInteger", "Standard_UInteger", "INT",
                      "uint32_t get_value() const { return _native; }",
                      "void set_value(uint32_t v) { _native = v; }"),
+    "long": ("OcgStandardLongInteger", "intptr_t", "INT",
+             "int64_t get_value() const { return _native; }",
+             "void set_value(int64_t v) { _native = static_cast<intptr_t>(v); }"),
+    "long long": ("OcgStandardLongInteger", "intptr_t", "INT",
+                  "int64_t get_value() const { return _native; }",
+                  "void set_value(int64_t v) { _native = static_cast<intptr_t>(v); }"),
+    "double": ("OcgStandardReal", "Standard_Real", "FLOAT",
+               "double get_value() const { return _native; }",
+               "void set_value(double v) { _native = v; }"),
+    "float": ("OcgStandardShortReal", "Standard_ShortReal", "FLOAT",
+              "float get_value() const { return _native; }",
+              "void set_value(float v) { _native = v; }"),
+    "unsigned long": ("OcgStandardULongInteger", "Standard_Size", "INT",
+                      "uint64_t get_value() const { return _native; }",
+                      "void set_value(uint64_t v) { _native = static_cast<Standard_Size>(v); }"),
+    "unsigned long long": ("OcgStandardULongInteger", "Standard_Size", "INT",
+                           "uint64_t get_value() const { return _native; }",
+                           "void set_value(uint64_t v) { _native = static_cast<Standard_Size>(v); }"),
     "TCollection_AsciiString": (
         "OcgTCollectionAsciiString", "TCollection_AsciiString", "STRING",
         "::godot::String get_value() const { return ::godot::String::utf8(_native.ToCString()); }",
@@ -1979,6 +1994,9 @@ def generate_primitive_wrappers(keys: set[str],
     out.append("// Auto-generated primitive wrapper classes for non-const ref output params -- DO NOT EDIT")
     out.append("#pragma once")
     out.append("")
+    out.append("#include <Standard_TypeDef.hxx>")
+    out.append("#include <cstdint>")
+    out.append("#include <cstddef>")
     out.append("#include <godot_cpp/classes/ref_counted.hpp>")
     out.append("#include <godot_cpp/core/class_db.hpp>")
     out.append("#include <godot_cpp/variant/string.hpp>")
@@ -1994,8 +2012,12 @@ def generate_primitive_wrappers(keys: set[str],
     out.append("")
     out.append("using namespace godot;")
     out.append("")
+    seen_classes: set[str] = set()
     for key in sorted(keys, key=lambda k: _PRIMITIVE_WRAPPERS[k][0]):
         wclass, native, gd, getter, setter = _PRIMITIVE_WRAPPERS[key]
+        if wclass in seen_classes:
+            continue
+        seen_classes.add(wclass)
         out.append(f"class {wclass} : public RefCounted {{")
         out.append(f"    GDCLASS({wclass}, RefCounted)")
         out.append("public:")
