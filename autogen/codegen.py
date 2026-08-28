@@ -1943,12 +1943,17 @@ _PRIMITIVE_WRAPPERS: dict[str, tuple[str, str, str, str, str]] = {
     "unsigned int": ("OcgStandardUInteger", "Standard_UInteger", "INT",
                      "uint32_t get_value() const { return _native; }",
                      "void set_value(uint32_t v) { _native = v; }"),
-    "long": ("OcgStandardLongInteger", "intptr_t", "INT",
-             "int64_t get_value() const { return _native; }",
-             "void set_value(int64_t v) { _native = static_cast<intptr_t>(v); }"),
-    "long long": ("OcgStandardLongInteger", "intptr_t", "INT",
-                  "int64_t get_value() const { return _native; }",
-                  "void set_value(int64_t v) { _native = static_cast<intptr_t>(v); }"),
+    # `long` must be stored as the exact C type `long` (NOT intptr_t): the
+    # generated call sites pass `&_native`/`_native` straight into OCCT
+    # signatures like `VrmlData_Node::ReadInteger(VrmlData_InBuffer&, long&)`.
+    # intptr_t == long only on LP64 targets; on ILP32 (x86-32, armv7,
+    # wasm32, android-32) intptr_t is `int`, and the binding fails to compile.
+    "long": ("OcgStandardLongInteger", "long", "INT",
+             "int64_t get_value() const { return static_cast<int64_t>(_native); }",
+             "void set_value(int64_t v) { _native = static_cast<long>(v); }"),
+    "long long": ("OcgStandardLongLongInteger", "long long", "INT",
+                  "int64_t get_value() const { return static_cast<int64_t>(_native); }",
+                  "void set_value(int64_t v) { _native = static_cast<long long>(v); }"),
     "double": ("OcgStandardReal", "Standard_Real", "FLOAT",
                "double get_value() const { return _native; }",
                "void set_value(double v) { _native = v; }"),

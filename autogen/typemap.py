@@ -60,7 +60,7 @@ PRIMITIVE_WRAPPER_MAP: dict[str, tuple[str, str]] = {
     "unsigned int": ("OcgStandardUInteger", "INT"),
     "long": ("OcgStandardLongInteger", "INT"),
     "unsigned long": ("OcgStandardULongInteger", "INT"),
-    "long long": ("OcgStandardLongInteger", "INT"),
+    "long long": ("OcgStandardLongLongInteger", "INT"),
     "unsigned long long": ("OcgStandardULongInteger", "INT"),
     "size_t": ("OcgStandardULongInteger", "INT"),
     "Standard_Size": ("OcgStandardULongInteger", "INT"),
@@ -561,8 +561,13 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
                 # by-value argument (moved in) is a sound, minimal binding.
                 if t.base_name in PRIMITIVE_MAP:
                     cpp, gd = primitive_entry(t.base_name, ctx)
+                    call = _rw(move, name)
+                    if t.base_name in _SIZE_DERIVED_BUILTINS:
+                        # Same overload-disambiguation requirement as the
+                        # by-value path below (size_t/int overload pairs).
+                        call = f"static_cast<size_t>({call})"
                     return ParamConv(cpp_type=cpp, gd_type=gd, name=name,
-                                     call_expr=_rw(move, name))
+                                     call_expr=call)
                 return _enum_param(t, name, ctx, move=move)
             if t.is_enum:
                 # Non-const enum& out-parameter -> small OcgEnumBox; OCCT
@@ -576,16 +581,17 @@ def cpp_param(t: OCCTType, name: str, ctx: TypeContext,
     if t.base_name in PRIMITIVE_MAP:
         cpp, gd = primitive_entry(t.base_name, ctx)
         call_expr = _rw(move, name)
-        if cpp == "uint64_t" and t.base_name in _SIZE_DERIVED_BUILTINS:
+        if t.base_name in _SIZE_DERIVED_BUILTINS:
             # OCCT container index/count parameters are `size_t` (V8 switched
-            # NCollection indexes to `size_t`).  The parse host canonicalizes
-            # `size_t` to `unsigned long` (LP64) or `unsigned long long`
-            # (LLP64), both mapped to `uint64_t` in the wrapper, but on 32-bit
-            # targets `size_t` is 32-bit: a bare `uint64_t` argument is then
-            # ambiguous between the `size_t` and `int` overloads (MSVC C2668).
+            # NCollection indexes to `size_t`), and several containers expose
+            # BOTH `ReSize(const size_t)` and `ReSize(const int)` overloads.
+            # The parse host canonicalizes `size_t` to `unsigned long` (LP64)
+            # or `unsigned long long` (LLP64), mapped to `uint64_t` here — but
+            # on 32-bit targets (wasm32, x86-32, armv7) primitive_entry()
+            # narrows it to `uint32_t`, and a bare argument is then ambiguous
+            # between the `size_t` and `int` overloads regardless of width.
             # `static_cast<size_t>` selects the exact OCCT type on every
-            # target (32-bit size_t -> unsigned long, 64-bit size_t ->
-            # unsigned long long) and keeps the call unambiguous.
+            # target and keeps every such call unambiguous.
             call_expr = f"static_cast<size_t>({call_expr})"
         return ParamConv(cpp_type=cpp, gd_type=gd, name=name,
                          call_expr=call_expr)

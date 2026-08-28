@@ -86,6 +86,41 @@ def _specialization_broken(spec_name: str, noncopyable: set[str]) -> bool:
                for inner in _split_top_level(m.group(1)))
 
 
+# Nested "view" types that are deliberately excluded from the wrapped API by
+# policy (see TYPE_PREFIX_POLICIES: BRepGraph module-host-internal helpers).
+# They may only be forward-declared at the point where container signatures
+# reference them (e.g. BRepGraph.hxx forward-declares `class EditorView;`
+# while other headers take NCollection_LinearVector<EditorView::BoundaryIssue>*),
+# so a synthesized container over them cannot even name its element type
+# without pulling an incomplete type into the generated header.  Any
+# specialization whose arguments reference one must never be wrapped.
+_HOST_INTERNAL_NESTED_VIEWS = frozenset({
+    "EditorView", "TopoView", "UIDsView", "RefsView", "ShapesView", "MeshView",
+})
+_HOST_VIEW_RE = re.compile(
+    r"(?:^|[:<>,\s(])(" + "|".join(sorted(_HOST_INTERNAL_NESTED_VIEWS)) + r")(?=$|[:<>,\s)])")
+
+
+def _references_host_internal_view(spec_name: str) -> bool:
+    return _HOST_VIEW_RE.search(spec_name) is not None
+
+
+def filter_host_internal_views(classes: list[object]) -> list[object]:
+    """Drop synthesized specializations over module-host-internal nested views.
+
+    Applied both when synthesizing fresh and when loading a cached spec list,
+    so a stale cache written before this policy existed is cleaned up too."""
+    kept: list[object] = []
+    for cls in classes:
+        if _references_host_internal_view(getattr(cls, "name", "")):
+            print(f"synth          : SKIP {cls.name} (module-host-internal "
+                  "nested view type)",
+                  file=__import__("sys").stderr)
+            continue
+        kept.append(cls)
+    return kept
+
+
 def filter_noncopyable(classes: list[object], modules: list[ModuleDecl]) -> list[object]:
     """Drop synthesized specializations over non-copyable value args.
 
@@ -844,6 +879,10 @@ def synthesize_all(modules: list[ModuleDecl]) -> list[object]:
         if _specialization_broken(key, noncopyable):
             print(f"synth          : SKIP {key} (non-copyable template arg)",
                   flush=True)
+            continue
+        if _references_host_internal_view(key):
+            print(f"synth          : SKIP {key} (module-host-internal nested "
+                  "view type)", flush=True)
             continue
         try:
             cls = synth_template_spec(header, tname, args, install=install,

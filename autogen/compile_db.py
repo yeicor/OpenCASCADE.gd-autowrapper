@@ -178,7 +178,13 @@ def _emscripten_sysroot() -> Path | None:
     """The Emscripten sysroot, or None when not available (not yet built)."""
     emsdk = os.environ.get("EMSDK")
     if not emsdk:
-        return None
+        # setup-emsdk only adds PATH entries (no $EMSDK), so derive the
+        # install root from the em++ executable: <emsdk>/upstream/emscripten.
+        emxx = shutil.which("em++")
+        if emxx:
+            emsdk = str(Path(emxx).parents[2])
+        else:
+            return None
     p = Path(emsdk) / "upstream" / "emscripten" / "cache" / "sysroot"
     return p if p.is_dir() else None
 
@@ -378,10 +384,19 @@ class CompileArgs:
     @staticmethod
     def _fallback_args() -> list[str]:
         triplet = os.environ.get("VCPKG_DEFAULT_TRIPLET", "x64-linux")
-        return (["-std=gnu++17", "-DDEBUG_ENABLED", "-DGDEXTENSION",
-                 "-DTHREADS_ENABLED"]
-                 + _platform_defines(triplet)
-                 + _triplet_target_args(triplet))
+        out = (["-std=gnu++17", "-DDEBUG_ENABLED", "-DGDEXTENSION",
+                "-DTHREADS_ENABLED"]
+               + _platform_defines(triplet)
+               + _triplet_target_args(triplet))
+        if "wasm" in triplet:
+            # Without a compile_commands.json, libclang bypasses em++'s driver
+            # logic and never adds the musl root include; the emscripten libc++
+            # headers (include/c++/v1) then fail on `bits/alltypes.h`.  Add the
+            # sysroot root explicitly so parse/probe runs resolve like em++.
+            sysroot = _emscripten_sysroot()
+            if sysroot is not None:
+                out += ["-isystem", str(Path(sysroot) / "include")]
+        return out
 
 
 def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:

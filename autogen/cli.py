@@ -161,6 +161,8 @@ def _load_or_synthesize(modules, cache: Path | None):
         synth = load_module(cache)
         if synth.name == "NCollection" and synth.classes:
             install = find_occt_install(PROJECT_ROOT)
+            from .synthesize import filter_host_internal_views
+            synth.classes = filter_host_internal_views(synth.classes)
             synth.classes = filter_unwrappable(synth.classes, modules, install)
             synth.classes = filter_undeclarable(
                 filter_noncopyable(synth.classes, modules), install, modules)
