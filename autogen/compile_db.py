@@ -389,13 +389,17 @@ class CompileArgs:
                + _platform_defines(triplet)
                + _triplet_target_args(triplet))
         if "wasm" in triplet:
-            # Without a compile_commands.json, libclang bypasses em++'s driver
-            # logic and never adds the musl root include; the emscripten libc++
-            # headers (include/c++/v1) then fail on `bits/alltypes.h`.  Add the
-            # sysroot root explicitly so parse/probe runs resolve like em++.
             sysroot = _emscripten_sysroot()
             if sysroot is not None:
-                out += ["-isystem", str(Path(sysroot) / "include")]
+                cxx_v1 = Path(sysroot) / "include" / "c++" / "v1"
+                if cxx_v1.is_dir():
+                    out += ["-isystem", str(cxx_v1)]
+                compat = Path(sysroot) / "include" / "compat"
+                if compat.is_dir():
+                    out += ["-isystem", str(compat)]
+                inc = Path(sysroot) / "include"
+                if inc.is_dir():
+                    out += ["-isystem", str(inc)]
         return out
 
 
@@ -502,10 +506,10 @@ def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:
             for p in inc_env.split(";"):
                 p = p.strip()
                 if p and Path(p).is_dir():
-                    if not any(a == f"-imsvc={p}" for a in out) and not any(
-                            out[i] in ("-imsvc", "-isystem") and i + 1 < len(out) and out[i + 1] == p
+                    if not any(a == f"-isystem={p}" for a in out) and not any(
+                            out[i] == "-isystem" and i + 1 < len(out) and out[i + 1] == p
                             for i in range(len(out))):
-                        out += ["-imsvc", p]
+                        out += ["-isystem", p]
 
         # Host C++ stdlib fallback
         for d in _cxx_stdlib_dirs(rd):
@@ -531,15 +535,13 @@ def ensure_occt_args(args: list[str], include_dir: Path) -> list[str]:
     if triplet == "wasm32-emscripten":
         sysroot = _emscripten_sysroot()
         if sysroot:
-            checks = {"include/c++/v1": lambda p: (p / "type_traits").is_file(),
-                      "include/compat": lambda p: p.is_dir()}
-            for sub, ok in checks.items():
-                d = str(sysroot / sub)
-                if ok(Path(d)) and not any(a == f"-isystem={d}" for a in out) \
+            for sub in ("include/c++/v1", "include/compat", "include"):
+                p = Path(sysroot) / sub
+                if p.is_dir() and not any(a == f"-isystem={p}" for a in out) \
                         and not any(out[i] == "-isystem" and i + 1 < len(out)
-                                    and out[i + 1] == d
+                                    and out[i + 1] == str(p)
                                     for i in range(len(out))):
-                    out += ["-isystem", d]
+                    out += ["-isystem", str(p)]
     if triplet.endswith("-android") or "-android" in triplet:
         sysroot = _android_sysroot()
         if sysroot:

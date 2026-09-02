@@ -1683,7 +1683,7 @@ def _method_property_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
         out.append(
             f'    ClassDB::add_property(get_class_static(), '
             f'PropertyInfo(Variant::{gd}, "{name}", PROPERTY_HINT_NONE, "", '
-            f'PROPERTY_USAGE_DEFAULT, "{cls.wrapper_name}"), '
+            f'PROPERTY_USAGE_NONE, "{cls.wrapper_name}"), '
             f'"{setter}", "{name}");')
     return out
 
@@ -1747,7 +1747,7 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
             out.append(
                 f'    ClassDB::add_property(get_class_static(), '
                 f'PropertyInfo(Variant::{gd}, "{snake}", PROPERTY_HINT_NONE, "", '
-                f'PROPERTY_USAGE_DEFAULT, "{cls.wrapper_name}"), '
+                f'PROPERTY_USAGE_NONE, "{cls.wrapper_name}"), '
                 f'"", "_ocg_field_get_{snake}");')
             continue
         out.append(
@@ -1756,7 +1756,7 @@ def _bind_entries(cls: ClassDecl, ctx: tm.TypeContext) -> list[str]:
         out.append(
             f'    ClassDB::add_property(get_class_static(), '
             f'PropertyInfo(Variant::{gd}, "{snake}", PROPERTY_HINT_NONE, "", '
-            f'PROPERTY_USAGE_DEFAULT, "{cls.wrapper_name}"), '
+            f'PROPERTY_USAGE_NONE, "{cls.wrapper_name}"), '
             f'"_ocg_field_set_{snake}", "_ocg_field_get_{snake}");')
     out.extend(_method_property_entries(cls, ctx))
     # Godot's ClassDB keys integer constants per class by constant NAME (the
